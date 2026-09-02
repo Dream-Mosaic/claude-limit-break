@@ -14,12 +14,6 @@ State as of the initial commits. Read
   attribution detail that can silently break at release time.
 - **Public repo, no Marketplace listing**, `.vsix` attached to releases.
 
-## Open
-
-### Not yet pushed
-
-Local only. Commits to be squashed before the first push.
-
 ## Verification still outstanding
 
 **Does the panel render a CLI-advanced session on reload?** The docs say the
@@ -78,5 +72,9 @@ the third under the design conversation's project directory.
 
 ## Then
 
-Write the implementation plan. TypeScript reconstruction, the three parser fixes
-with the corpus as the gate, then `sessionResolver` / `budget` / `resumer`.
+Execute [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md):
+15 tasks, TypeScript reconstruction first, the three parser fixes with the
+corpus as the gate, then `sessionResolver` / `budget` / `resumer`.
+
+Task 14 step 6 answers the outstanding panel-rendering question above; record
+the result here when it does.
