@@ -39,6 +39,7 @@ const ERROR_MARKERS = [
     // the middle of a sentence is someone talking about a queue.
     /^overloaded\b/i,
     /\btimed out\b/i,
+    /\bsocket hang up\b/i,   // <-- added: Node prints this bare, with no "Error:" prefix
     /\b5\d{2}\b/,
 ];
 

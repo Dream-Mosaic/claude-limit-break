@@ -48,3 +48,12 @@ test('line scanner takes the newest error from a repainted screen', () => {
   const buf = 'API Error: 500 Internal Server Error\nretrying\nAPI Error: 503 Service Unavailable';
   assert.equal(detectOverloadInLines(buf)?.status, 503);
 });
+
+test('recognises a bare socket hang up, which is how Node prints it', () => {
+  assert.ok(detectOverload('socket hang up'));
+  assert.ok(detectOverload('Error: socket hang up'), 'prefixed form must keep working');
+});
+
+test('the added marker does not admit prose about sockets', () => {
+  assert.equal(detectOverload('the socket layer hangs up on idle connections'), undefined);
+});
