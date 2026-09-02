@@ -77,3 +77,30 @@ test('formatDuration renders compact countdowns', () => {
   assert.equal(formatDuration(42_000), '42s');
   assert.equal(formatDuration(3_600_000 * 4 + 60_000 * 32), '4h 32m');
 });
+
+test('detects the bare "your limit" format from the docs', () => {
+  const hit = detectLimit('Your limit will reset at 14:00 (UTC)', NOW, MAXW);
+  assert.ok(hit, 'documented format must be recognised');
+  assert.equal(hit.resumeAt.toISOString(), '2026-08-03T14:00:00.000Z');
+});
+
+test('detectLimit guards against source code internally', () => {
+  const code = 'const LIMIT_HINTS = [/usage limit reached/i]; // try again in 5 hours';
+  assert.equal(detectLimit(code, NOW, MAXW), undefined);
+});
+
+test('the line scanner inherits the source-code guard', () => {
+  const code = 'if (usage limit reached) { return retryIn(5 hours); }';
+  assert.equal(detectLimitInLines(code, NOW, MAXW), undefined);
+});
+
+test('detectLimit rejects text longer than the notice cap', () => {
+  const long = 'Usage limit reached. Try again in 5 hours.' + ' x'.repeat(MAX_NOTICE_LENGTH);
+  assert.equal(detectLimit(long, NOW, MAXW), undefined);
+});
+
+test('a trusted entry bypasses the source-code guard', () => {
+  const banner = 'Claude AI usage limit reached `retry` => try again in 5 hours';
+  assert.equal(detectLimit(banner, NOW, MAXW), undefined, 'untrusted: guarded');
+  assert.ok(detectLimit(banner, NOW, MAXW, { trusted: true }), 'trusted: allowed');
+});

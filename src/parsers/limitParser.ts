@@ -50,6 +50,7 @@ const LIMIT_HINTS = [
     /usage limit reached/i,
     /\blimit reached\b/i,
     /\b(?:session|usage|weekly|daily|opus|sonnet) limit\b/i,
+    /\byour limit\b/i,            // <-- added: documented format, previously missed
     /\brate[- ]limit(?:ed|s)?\b/i,
     /\brate limit exceeded\b/i,
     /you(?:'ve| have)\s+(?:hit|reached|used(?: up)?)\s+(?:your|the)\s+(?:\w+\s+){0,3}limit/i,
@@ -282,10 +283,21 @@ function resolveClockTime(m: RegExpExecArray, now: Date): Date | undefined {
 export function detectLimit(
     rawText: string,
     now: Date = new Date(),
-    maxWaitHours: number = 24
+    maxWaitHours: number = 24,
+    opts: { trusted?: boolean } = {}
 ): LimitDetection | undefined {
     const text = normalize(rawText);
+    if (!text || text.length > MAX_NOTICE_LENGTH) {
+        return undefined;
+    }
     if (!looksLikeLimitMessage(text)) {
+        return undefined;
+    }
+    // Source code and conversation *about* limits - which is exactly what a
+    // transcript of working on this extension looks like - must not arm a timer.
+    // Mirrors detectOverload, which has always guarded internally. Entries Claude
+    // Code itself tagged as a rate-limit event are trusted past this.
+    if (!opts.trusted && looksLikeCode(text)) {
         return undefined;
     }
     const horizon = now.getTime() + maxWaitHours * HOUR_MS;
