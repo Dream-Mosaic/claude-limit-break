@@ -1,0 +1,32 @@
+{
+  "name": "claude-limit-buster",
+  "displayName": "Claude Limit Buster",
+  "description": "Waits out Claude Code usage limits and resumes your session by ID.",
+  "version": "0.1.0",
+  "publisher": "dream-mosaic",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git" },
+  "engines": { "vscode": "^1.93.0" },
+  "categories": ["Other"],
+  "extensionKind": ["workspace"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Resuming a session launches the Claude CLI in the workspace folder."
+    }
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/src/extension.js",
+  "contributes": {},
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run compile && node --test \"out/test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.6.3"
+  }
+}
