@@ -32,7 +32,7 @@
         },
         "claudeLimitBuster.autoResume": {
           "type": "boolean", "default": true, "scope": "window",
-          "description": "Resume automatically when the cooldown elapses. When off, the status bar offers a manual resume."
+          "description": "Resume automatically when the cooldown elapses. When off, a notification offers a Resume Now action instead, and the job stays resumable from the \"Claude Limit Buster: Resume Now\" command until you use it."
         },
         "claudeLimitBuster.resumeMode": {
           "type": "string", "enum": ["interactive", "headless"], "default": "interactive",

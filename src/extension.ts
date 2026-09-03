@@ -28,6 +28,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const statBytes = (p: string) => fs.statSync(p).size;
 
+  // A job whose cooldown elapsed while autoResume was off. The scheduler clears
+  // its own state before firing — a deliberate re-entrancy guard — so without
+  // holding it here the job would simply be gone and "Resume Now" would report
+  // nothing pending.
+  let readyJob: PendingJob | undefined;
+
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
     const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs);
@@ -105,20 +111,45 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     scheduler.onChange((job) => status.update(job)),
     scheduler.onFire((job) => {
-      if (settings().autoResume) {
-        resume(job);
+      const s = settings();
+      if (!s.autoResume) {
+        readyJob = job;
+        log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
+        void Promise.resolve(
+          vscode.window.showInformationMessage(
+            'Claude Limit Buster: the cooldown has elapsed. Resume when you are ready.',
+            'Resume Now',
+          ),
+        ).then((choice) => {
+          if (choice === 'Resume Now') {
+            void vscode.commands.executeCommand(`${NS}.resumeNow`);
+          }
+        });
+        return;
       }
+      if (s.notify) {
+        void vscode.window.showInformationMessage(
+          `Claude Limit Buster: resuming session ${job.sessionId.slice(0, 8)}.`,
+        );
+      }
+      resume(job);
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, () => {
-      const job = scheduler.current;
+      // Falls back to a job that already fired: with autoResume off the
+      // scheduler has nothing pending, but the job is still resumable.
+      const job = scheduler.current ?? readyJob;
       if (!job) {
         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
         return;
       }
+      readyJob = undefined;
       scheduler.cancel();
       resume(job);
     }),
-    vscode.commands.registerCommand(`${NS}.cancel`, () => scheduler.cancel()),
+    vscode.commands.registerCommand(`${NS}.cancel`, () => {
+      readyJob = undefined;
+      scheduler.cancel();
+    }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
   );
 
