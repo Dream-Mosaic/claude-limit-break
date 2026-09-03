@@ -78,7 +78,13 @@ test('execution-adjacent settings are machine-scoped', () => {
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
   );
   const props = manifest.contributes.configuration.properties;
-  for (const key of ['resumeMode', 'headlessPermissionMode', 'claudeCommand', 'alertSoundFile']) {
+  for (const key of [
+    'resumeMode',
+    'headlessPermissionMode',
+    'claudeCommand',
+    'alertSoundFile',
+    'resumePrompt',
+  ]) {
     assert.equal(
       props[`claudeLimitBuster.${key}`].scope,
       'machine',

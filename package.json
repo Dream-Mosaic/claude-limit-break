@@ -59,8 +59,8 @@
           "markdownDescription": "Path to the `claude` executable. Empty auto-detects from PATH. Machine-scoped: this names the program that gets run."
         },
         "claudeLimitBuster.resumePrompt": {
-          "type": "string", "default": "Continue where you left off.", "scope": "window",
-          "description": "Prompt sent when resuming. Passed as a single argument, never through a shell."
+          "type": "string", "default": "Continue where you left off.", "scope": "machine",
+          "description": "Prompt sent when resuming. Passed as a single argument, never through a shell. Machine-scoped: this is the instruction a tool-using agent acts on, so a workspace must not be able to set it."
         },
         "claudeLimitBuster.maxResumeTokens": {
           "type": "number", "default": 150000, "scope": "window",
