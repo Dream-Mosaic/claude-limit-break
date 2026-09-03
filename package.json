@@ -47,7 +47,7 @@
           "type": "string", "enum": ["", "default", "acceptEdits", "plan"], "default": "",
           "enumDescriptions": [
             "No permission mode is passed. Tool calls are denied.",
-            "Same effect as leaving this empty, for headless runs.",
+            "Claude's standard permission handling.",
             "Allow file edits without asking.",
             "Let Claude plan without making changes."
           ],
