@@ -99,10 +99,11 @@ the third under the design conversation's project directory.
 
 ## Then
 
-Execute [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md):
-15 tasks, TypeScript reconstruction first, the three parser fixes with the
-corpus as the gate, then `sessionResolver` / `budget` / `resumer`.
+All 15 tasks in [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md)
+are implemented: TypeScript reconstruction, the three parser fixes with the
+corpus as the gate, `sessionResolver` / `budget` / `resumer`, and CI.
 
-Task 14 (steps 1-5, 7) is done. Its step 6 — the manual smoke test that would
-also answer the outstanding panel-rendering question above — is still open;
-see "Outstanding manual verification" under Verification still outstanding.
+The one item left open is the manual smoke test under "Outstanding manual
+verification" above — nobody has pressed `F5` in a real Extension Development
+Host, so step 5 of that test, which is also the panel-rendering question this
+document opens with, still has no answer.

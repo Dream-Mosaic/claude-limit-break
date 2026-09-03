@@ -9,3 +9,5 @@ docs/**
 **/*.map
 tsconfig.json
 .gitignore
+.superpowers/**
+.github/**

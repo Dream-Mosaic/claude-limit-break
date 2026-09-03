@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm test
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npx --yes @vscode/vsce package --out limit-buster.vsix
+      - name: Attribution files must ship inside the vsix
+        run: |
+          set -euo pipefail
+          # vsce renames LICENSE to extension/LICENSE.txt on package, so this
+          # substring grep is what makes the LICENSE case match at all.
+          # Do not tighten it to an exact match — that would fail forever.
+          for f in LICENSE THIRDPARTY.md; do
+            unzip -l limit-buster.vsix | grep -q "extension/$f" \
+              || { echo "::error::$f is missing from the .vsix"; exit 1; }
+          done
+          echo "LICENSE and THIRDPARTY.md are present."
+      - name: Development artifacts must not ship inside the vsix
+        run: |
+          set -euo pipefail
+          if unzip -l limit-buster.vsix | grep -q "\.superpowers"; then
+            echo "::error::.superpowers is present in the .vsix"
+            exit 1
+          fi
+          echo ".superpowers is absent from the .vsix."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: limit-buster.vsix
