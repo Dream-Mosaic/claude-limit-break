@@ -53,11 +53,29 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const statBytes = (p: string) => fs.statSync(p).size;
 
-  // A job whose cooldown elapsed while autoResume was off. The scheduler clears
+  // Jobs whose cooldown elapsed while autoResume was off. The scheduler clears
   // its own state before firing — a deliberate re-entrancy guard — so without
-  // holding it here the job would simply be gone and "Resume Now" would report
+  // holding them here they would simply be gone and "Resume Now" would report
   // nothing pending.
-  let readyJob: PendingJob | undefined;
+  //
+  // A list, not a slot. Sessions in different projects hit their limits
+  // independently, so a second one can come ready while the first is still
+  // sitting in an unanswered notification. One slot would silently overwrite
+  // the first, and its notification would then resume the wrong session.
+  const readyJobs: PendingJob[] = [];
+
+  const forgetReady = (sessionId: string) => {
+    const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
+    if (at >= 0) {
+      readyJobs.splice(at, 1);
+    }
+  };
+
+  /** Remember a job for manual resume, replacing any earlier one for the same session. */
+  const rememberReady = (job: PendingJob) => {
+    forgetReady(job.sessionId);
+    readyJobs.push(job);
+  };
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
@@ -145,16 +163,20 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduler.onFire((job) => {
       const s = settings();
       if (!s.autoResume) {
-        readyJob = job;
+        rememberReady(job);
         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
         void Promise.resolve(
           vscode.window.showInformationMessage(
-            'Claude Limit Buster: the cooldown has elapsed. Resume when you are ready.',
+            `Claude Limit Buster: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
             'Resume Now',
           ),
         ).then((choice) => {
           if (choice === 'Resume Now') {
-            void vscode.commands.executeCommand(`${NS}.resumeNow`);
+            // This job, closed over here - not "whatever is ready now". Another
+            // session can come ready while this notification is still on
+            // screen, and the offer names a session, so it must honour it.
+            forgetReady(job.sessionId);
+            resume(job);
           }
         });
         return;
@@ -167,19 +189,31 @@ export function activate(context: vscode.ExtensionContext): void {
       resume(job);
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, () => {
-      // Falls back to a job that already fired: with autoResume off the
-      // scheduler has nothing pending, but the job is still resumable.
-      const job = scheduler.current ?? readyJob;
-      if (!job) {
+      // Exactly one job moves, and only its own source is touched. Cancelling
+      // the scheduler while resuming a ready job - or dropping a ready job
+      // while resuming the scheduler's - would throw away work nobody asked to
+      // discard.
+      const counting = scheduler.current;
+      if (counting) {
+        scheduler.cancel();
+        resume(counting);
+        return;
+      }
+      // Oldest first: the session that has been waiting longest goes first.
+      const ready = readyJobs.shift();
+      if (!ready) {
         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
         return;
       }
-      readyJob = undefined;
-      scheduler.cancel();
-      resume(job);
+      resume(ready);
     }),
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
-      readyJob = undefined;
+      // "Cancel Pending Resume" means all of it, but say how much it threw
+      // away: a job dropped from readyJobs has no other trace.
+      if (readyJobs.length > 0) {
+        log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
+        readyJobs.length = 0;
+      }
       scheduler.cancel();
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),

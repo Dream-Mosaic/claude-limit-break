@@ -12,6 +12,9 @@ import {
 
 installVscodeStub();
 
+const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
+
 /**
  * Stands in for the real transcript watcher, which would otherwise walk
  * ~/.claude/projects and leave an fs.watch and a poll timer running for the
@@ -44,6 +47,20 @@ class FakeWatcher {
     this.inputEmitter.fire({ cwd, file: `/h/p/${SESSION}.jsonl` });
   }
 
+  /**
+   * Pretend a usage limit was detected for `sessionId`, resetting at
+   * `resumeAt`. This runs through the real policy and the real scheduler; the
+   * transcript path does not exist, which resolveSession treats as an unknown
+   * size, so the budget check passes.
+   */
+  limitFor(sessionId: string, resumeAt: Date): void {
+    this.hitEmitter.fire({
+      detection: { resumeAt, text: 'Claude AI usage limit reached. Try again in 5 hours' },
+      cwd: '/projects/example',
+      file: `/h/.claude/projects/p/${sessionId}.jsonl`,
+    });
+  }
+
   async start(): Promise<void> {
     this.started = true;
   }
@@ -66,11 +83,11 @@ stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.pu
 const { activate, isInsideWorkspace } =
   require('../src/extension') as typeof import('../src/extension');
 
-const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 // A path with a separator and no .cmd/.bat/.ps1 extension resolves as-is on
 // every platform, so the resume path never touches PATH or the filesystem.
 const LAUNCHER = '/opt/claude/bin/claude';
 const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
+const PROMPT = 'Continue where you left off.';
 
 interface FakeContext {
   subscriptions: { dispose(): void }[];
@@ -102,13 +119,29 @@ const teardown = (ctx: FakeContext) => {
   }
 };
 
+/** Long enough for the scheduler's one-second tick to see an elapsed deadline. */
+const oneTick = () => new Promise((r) => setTimeout(r, 1400));
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+const offers = () => vscodeFake.info.filter((m) => m.items.includes('Resume Now'));
+const argsOf = (index: number) =>
+  (vscodeFake.terminals[index]?.options as { shellArgs: string[] } | undefined)?.shellArgs;
+
+/** autoResume off, no jitter, and a launcher that needs no PATH lookup. */
+const manualConfig = () => ({
+  autoResume: false,
+  claudeCommand: LAUNCHER,
+  randomDelayMinMinutes: 0,
+  randomDelayMaxMinutes: 0,
+});
+
 const pastJob = () => {
   const resumeAtMs = Date.now() - 1000;
   return {
     sessionId: SESSION,
     transcript: `/h/p/${SESSION}.jsonl`,
     cwd: '/projects/example',
-    prompt: 'Continue where you left off.',
+    prompt: PROMPT,
     resumeAtMs,
     baseResumeAtMs: resumeAtMs,
     jitterMs: 0,
@@ -126,11 +159,11 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
     // The scheduler's first tick sees an elapsed deadline and consumes it,
     // clearing its own state before firing. That ordering is deliberate, so
     // the job only survives if extension.ts holds on to it.
-    await new Promise((r) => setTimeout(r, 1400));
+    await oneTick();
     assert.equal(store.get('claudeLimitBuster.pending'), undefined, 'the scheduler must have consumed it');
     assert.equal(vscodeFake.terminals.length, 0, 'autoResume is off; nothing may launch on its own');
 
-    const offer = vscodeFake.info.find((m) => m.items.includes('Resume Now'));
+    const offer = offers()[0];
     assert.ok(offer, `no Resume Now offer was made; saw ${JSON.stringify(vscodeFake.info)}`);
 
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
@@ -145,7 +178,7 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
     assert.equal(vscodeFake.terminals.length, 1, 'resumeNow must have resumed it');
     const opts = vscodeFake.terminals[0]?.options as { shellPath: string; shellArgs: string[] };
     assert.equal(opts.shellPath, LAUNCHER, 'never a shell');
-    assert.deepEqual(opts.shellArgs, ['--resume', SESSION, 'Continue where you left off.']);
+    assert.deepEqual(opts.shellArgs, ['--resume', SESSION, PROMPT]);
 
     // And it is consumed exactly once.
     resumeNow();
@@ -154,6 +187,93 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
       vscodeFake.info.some((m) => m.message.includes('nothing pending')),
       'the second call has nothing left to resume',
     );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a notification resumes the session it names, not whichever came ready last', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    const first = offers()[0];
+    assert.ok(first, 'the first session must have offered a manual resume');
+    assert.ok(
+      first.message.includes(SESSION.slice(0, 8)),
+      `the offer must name its session; got "${first.message}"`,
+    );
+
+    // A second, unrelated session comes ready while the first offer is still
+    // on screen and unanswered. It must not take the first one's place.
+    watcher.limitFor(SESSION_B, new Date(Date.now() - 1000));
+    await oneTick();
+    assert.equal(offers().length, 2, 'both sessions must have been offered');
+    assert.equal(vscodeFake.terminals.length, 0, 'neither may have launched on its own');
+
+    // Accept the FIRST offer.
+    first.answer('Resume Now');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'accepting one offer resumes one session');
+    assert.deepEqual(
+      argsOf(0),
+      ['--resume', SESSION, PROMPT],
+      'the first offer must resume the session it named, not the one that fired last',
+    );
+
+    // The second is untouched, and still reachable from the command.
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 2, 'the second session must still be recoverable');
+    assert.deepEqual(argsOf(1), ['--resume', SESSION_B, PROMPT]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resumeNow takes the counting-down job first and keeps the ready one', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    // One job ready: elapsed, fired, and held for a manual resume.
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    assert.equal(offers().length, 1, 'the first session must be waiting to be resumed by hand');
+
+    // A second job still counting down.
+    watcher.limitFor(SESSION_B, new Date(Date.now() + 600_000));
+
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.deepEqual(
+      argsOf(0),
+      ['--resume', SESSION_B, PROMPT],
+      'the job still counting down is the one "Resume Now" means',
+    );
+
+    // Resuming the scheduler's job must not have discarded the ready one.
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 2, 'the ready job must survive the first resume');
+    assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
+
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 2, 'both sources are empty now');
+    assert.ok(vscodeFake.info.some((m) => m.message.includes('nothing pending')));
   } finally {
     teardown(ctx);
   }

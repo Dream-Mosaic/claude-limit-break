@@ -32,6 +32,18 @@ export interface FakeTerminal {
   dispose(): void;
 }
 
+/**
+ * One recorded information message. `answer` settles the promise the extension
+ * is awaiting, so a test can leave an offer open - firing other events while it
+ * hangs - and accept it later, which is the only way to reproduce a second
+ * session coming ready before the first notification is clicked.
+ */
+export interface FakeInfoMessage {
+  message: string;
+  items: string[];
+  answer(item?: string): void;
+}
+
 export interface FakeStatusBarItem {
   alignment: number;
   priority: number;
@@ -72,16 +84,12 @@ export const vscodeFake = {
   /** What `vscode.workspace.workspaceFolders` returns. */
   workspaceFolders: undefined as { uri: { fsPath: string } }[] | undefined,
   outputLines: [] as string[],
-  info: [] as { message: string; items: string[] }[],
+  info: [] as FakeInfoMessage[],
   warnings: [] as string[],
   errors: [] as string[],
   terminals: [] as FakeTerminal[],
   statusBarItems: [] as FakeStatusBarItem[],
   commands: new Map<string, (...args: unknown[]) => unknown>(),
-  /** Chooses an offered item, so a notification's action can be exercised. */
-  answerInfo: undefined as
-    | ((message: string, items: string[]) => string | undefined)
-    | undefined,
 };
 
 export function resetVscodeFake(): void {
@@ -94,7 +102,6 @@ export function resetVscodeFake(): void {
   vscodeFake.terminals = [];
   vscodeFake.statusBarItems = [];
   vscodeFake.commands = new Map();
-  vscodeFake.answerInfo = undefined;
 }
 
 const fakeVscode = {
@@ -138,8 +145,12 @@ const fakeVscode = {
       return terminal;
     },
     showInformationMessage: (message: string, ...items: string[]) => {
-      vscodeFake.info.push({ message, items });
-      return Promise.resolve(vscodeFake.answerInfo?.(message, items));
+      let settle: (item: string | undefined) => void = () => {};
+      const answered = new Promise<string | undefined>((r) => {
+        settle = r;
+      });
+      vscodeFake.info.push({ message, items, answer: (item?: string) => settle(item) });
+      return answered;
     },
     showWarningMessage: (message: string) => {
       vscodeFake.warnings.push(message);
