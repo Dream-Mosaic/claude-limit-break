@@ -12,7 +12,7 @@
  * more annoying than a missed one.
  */
 
-import { normalize, stripAnsi, looksLikeLimitMessage, looksLikeCode, MAX_NOTICE_LENGTH } from './limitParser';
+import { normalize, looksLikeLimitMessage, looksLikeCode, MAX_NOTICE_LENGTH } from './limitParser';
 
 export interface OverloadDetection {
     rule: string;
@@ -132,30 +132,4 @@ export function detectOverload(rawText: string): OverloadDetection | undefined {
         return { rule: rule.id, status, text };
     }
     return undefined;
-}
-
-/**
- * Line-oriented variant for terminal buffers, matching the limit parser's
- * approach: one short line at a time, so a marker in one place cannot pair up
- * with unrelated text somewhere else on screen.
- */
-export function detectOverloadInLines(text: string): OverloadDetection | undefined {
-    const lines = stripAnsi(text).split(/\r?\n/);
-    // Newest first: when a redrawn TUI screen holds several errors, the freshest
-    // one is the one being reacted to.
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const line = (lines[i] ?? '').trim();
-        if (line && line.length <= MAX_NOTICE_LENGTH) {
-            const hit = detectOverload(line);
-            if (hit) {
-                return hit;
-            }
-        }
-    }
-    return undefined;
-}
-
-/** Human-readable summary for logs and notifications. */
-export function describeOverload(detection: OverloadDetection): string {
-    return detection.status ? `HTTP ${detection.status}` : detection.rule.replace(/-/g, ' ');
 }

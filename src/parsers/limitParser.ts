@@ -333,36 +333,6 @@ export const MAX_NOTICE_LENGTH = 400;
 export function looksLikeCode(text: string): boolean {
     return /[{};]|=>|\b(?:const|let|var|function|return|assert|import|export|test|describe)\b|\/\/|\/\*|`/.test(text);
 }
-/**
- * Line-oriented variant of {@link detectLimit} for large buffers.
- *
- * Scanning a whole terminal scrollback at once lets a hint phrase in one place
- * pair up with an unrelated time somewhere else - reading a source file that
- * discusses rate limits was enough to arm a timer. Matching one short line at a
- * time removes that.
- *
- * Deliberately strict: a notice split across two lines is missed rather than
- * risking a wrong resume, because the real banner is a single line and the
- * transcript watcher covers what the terminal misses.
- */
-export function detectLimitInLines(
-    text: string,
-    now: Date = new Date(),
-    maxWaitHours: number = 24,
-    maxLineLength: number = MAX_NOTICE_LENGTH
-): LimitDetection | undefined {
-    const lines = stripAnsi(text).split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-        const line = (lines[i] ?? '').trim();
-        if (line && line.length <= maxLineLength) {
-            const hit = detectLimit(line, now, maxWaitHours);
-            if (hit) {
-                return hit;
-            }
-        }
-    }
-    return undefined;
-}
 /** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
 export function formatDuration(ms: number): string {
     if (ms <= 0) {
@@ -379,28 +349,4 @@ export function formatDuration(ms: number): string {
         return `${minutes}m ${seconds}s`;
     }
     return `${seconds}s`;
-}
-/** Parse free-form user input from the "Set Resume Timer" prompt. */
-export function parseManualWait(input: string, now: Date = new Date()): Date | undefined {
-    const text = normalize(input).toLowerCase();
-    if (!text) {
-        return undefined;
-    }
-    // "5h", "90m", "2h30m", "1h 15m"
-    const compound = /^(?:(\d{1,2})\s*h(?:ours?|rs?)?)?\s*(?:(\d{1,3})\s*m(?:in(?:utes?)?)?)?$/.exec(text);
-    if (compound && (compound[1] || compound[2])) {
-        const ms = Number(compound[1] ?? 0) * HOUR_MS + Number(compound[2] ?? 0) * MINUTE_MS;
-        return ms > 0 ? new Date(now.getTime() + ms) : undefined;
-    }
-    // A bare number means minutes.
-    if (/^\d{1,4}$/.test(text)) {
-        const minutes = Number(text);
-        return minutes > 0 ? new Date(now.getTime() + minutes * MINUTE_MS) : undefined;
-    }
-    // "at 15:30", "15:30", "3:30pm", "3pm"
-    const clock = /^(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(text);
-    if (clock) {
-        return resolveClockTime(clock, now);
-    }
-    return undefined;
 }

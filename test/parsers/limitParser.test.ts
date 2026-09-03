@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   detectLimit,
-  detectLimitInLines,
   looksLikeCode,
   formatDuration,
   MAX_NOTICE_LENGTH,
@@ -55,15 +54,9 @@ test('resolves the epoch format to the exact instant', () => {
   assert.equal(hit?.resumeAt.toISOString(), '2026-08-03T17:00:00.000Z');
 });
 
-test('line scanner strips ANSI and matches a single line', () => {
-  const buf = `\x1b[31mbuilding\x1b[0m\nClaude AI usage limit reached. Try again in 5 hours\ndone`;
-  assert.ok(detectLimitInLines(buf, NOW, MAXW));
-});
-
-test('line scanner skips lines longer than the notice cap', () => {
-  const long = 'Usage limit reached. Try again in 5 hours' + ' padding'.repeat(60);
-  assert.ok(long.length > MAX_NOTICE_LENGTH);
-  assert.equal(detectLimitInLines(long, NOW, MAXW), undefined);
+test('ANSI escapes are stripped before a notice is matched', () => {
+  const noisy = `\x1b[31mClaude AI usage limit reached. Try again in 5 hours\x1b[0m`;
+  assert.ok(detectLimit(noisy, NOW, MAXW), 'normalize() must strip SGR sequences first');
 });
 
 test('looksLikeCode flags the punctuation prose does not use', () => {
@@ -87,11 +80,6 @@ test('detects the bare "your limit" format from the docs', () => {
 test('detectLimit guards against source code internally', () => {
   const code = 'const LIMIT_HINTS = [/usage limit reached/i]; // try again in 5 hours';
   assert.equal(detectLimit(code, NOW, MAXW), undefined);
-});
-
-test('the line scanner inherits the source-code guard', () => {
-  const code = 'if (usage limit reached) { return retryIn(5 hours); }';
-  assert.equal(detectLimitInLines(code, NOW, MAXW), undefined);
 });
 
 test('detectLimit rejects text longer than the notice cap', () => {

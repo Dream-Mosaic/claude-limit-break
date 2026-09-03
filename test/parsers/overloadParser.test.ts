@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectOverload, detectOverloadInLines } from '../../src/parsers/overloadParser';
+import { detectOverload } from '../../src/parsers/overloadParser';
 
 test('detects transient server failures', () => {
   const positives = [
@@ -42,11 +42,6 @@ test('reports the status code when one is present', () => {
 
 test('rejects text longer than the notice cap', () => {
   assert.equal(detectOverload('API Error: 500 ' + 'x'.repeat(500)), undefined);
-});
-
-test('line scanner takes the newest error from a repainted screen', () => {
-  const buf = 'API Error: 500 Internal Server Error\nretrying\nAPI Error: 503 Service Unavailable';
-  assert.equal(detectOverloadInLines(buf)?.status, 503);
 });
 
 test('recognises a bare socket hang up, which is how Node prints it', () => {
