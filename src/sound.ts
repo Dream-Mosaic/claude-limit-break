@@ -16,6 +16,9 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/** Default sound file used on Linux when no override is supplied. */
+const LINUX_DEFAULT_SOUND = '/usr/share/sounds/freedesktop/stereo/message.oga';
+
 const LINUX_PLAYERS: { file: string; args: (path: string) => string[] }[] = [
   { file: 'paplay', args: (p) => [p] },
   { file: 'aplay', args: (p) => ['-q', p] },
@@ -45,9 +48,9 @@ export function buildSoundCommand(
     default: {
       // No single player is guaranteed on Linux. Each is spawned directly with
       // its own argument shape; playAlertSound tries the next when one is missing.
-      const path = file ?? '/usr/share/sounds/freedesktop/stereo/message.oga';
+      const soundFile = file ?? LINUX_DEFAULT_SOUND;
       const first = LINUX_PLAYERS[0]!;
-      return { file: first.file, args: first.args(path) };
+      return { file: first.file, args: first.args(soundFile) };
     }
   }
 }
@@ -63,8 +66,8 @@ export function playAlertSound(options: { file?: string } = {}): void {
     tryEach([cmd]);
     return;
   }
-  const path = file ?? '/usr/share/sounds/freedesktop/stereo/message.oga';
-  tryEach(LINUX_PLAYERS.map((p) => ({ file: p.file, args: p.args(path) })));
+  const soundFile = file ?? LINUX_DEFAULT_SOUND;
+  tryEach(LINUX_PLAYERS.map((p) => ({ file: p.file, args: p.args(soundFile) })));
 }
 
 function tryEach(candidates: { file: string; args: string[] }[]): void {
@@ -77,7 +80,11 @@ function tryEach(candidates: { file: string; args: string[] }[]): void {
     const child = spawn(next.file, next.args, { stdio: 'ignore', detached: true, windowsHide: true });
     const killer = setTimeout(() => child.kill(), PLAY_TIMEOUT_MS);
     killer.unref();
-    child.on('error', () => tryEach(candidates.slice(1)));
+    child.on('error', () => {
+      clearTimeout(killer);
+      tryEach(candidates.slice(1));
+    });
+    child.on('exit', () => clearTimeout(killer));
     child.unref();
   } catch {
     tryEach(candidates.slice(1));
