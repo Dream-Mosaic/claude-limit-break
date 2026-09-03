@@ -73,6 +73,32 @@ test('every setting the code reads is declared in the manifest, and every declar
   }
 });
 
+test('every enum setting describes each of its choices', () => {
+  // enumDescriptions is positional: one short line per enum value, in order.
+  // Add a value without a description and the settings UI silently mislabels
+  // the rest, which matters most for headlessPermissionMode, whose first
+  // choice is the empty string and is unreadable without one.
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
+  );
+  const props: Record<string, { enum?: unknown[]; enumDescriptions?: unknown[] }> =
+    manifest.contributes.configuration.properties;
+  let checked = 0;
+  for (const [key, prop] of Object.entries(props)) {
+    if (!prop.enum) {
+      continue;
+    }
+    checked += 1;
+    assert.ok(prop.enumDescriptions, `${key} offers a choice list with no enumDescriptions`);
+    assert.equal(
+      prop.enumDescriptions.length,
+      prop.enum.length,
+      `${key}: ${prop.enum.length} choices but ${prop.enumDescriptions.length} descriptions`,
+    );
+  }
+  assert.ok(checked > 0, 'the manifest must still declare enum settings for this to assert anything');
+});
+
 test('execution-adjacent settings are machine-scoped', () => {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),

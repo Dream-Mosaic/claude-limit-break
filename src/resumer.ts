@@ -89,7 +89,14 @@ export function resolveClaudeLauncher(
   readShim: (p: string) => string | undefined,
 ): Launcher | undefined {
   const p = platform === 'win32' ? path.win32 : path.posix;
-  const found = configured.trim() || which('claude');
+  const trimmed = configured.trim();
+  // A configured bare name has to go through PATH like an unset one does.
+  // "claude" on Windows is claude.cmd, an npm shim - the exact case this
+  // module exists to unwrap - and handing VS Code shellPath: "claude" spawns
+  // nothing. A value with a separator in it is already a path; use it as
+  // given. A name that PATH does not know fails closed rather than quietly
+  // becoming "claude", which is not the program that was asked for.
+  const found = trimmed ? (/[\\/]/.test(trimmed) ? trimmed : which(trimmed)) : which('claude');
   if (!found) {
     return undefined;
   }

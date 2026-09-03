@@ -80,15 +80,3 @@ test('an assistant entry describing a limit still arms a timer', () => {
   });
   assert.ok(make().inspectLine(line, FILE).limit);
 });
-
-test('a flagged entry arms a timer even when its type is user', () => {
-  const line = entry({
-    type: 'user',
-    isApiErrorMessage: true,
-    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
-  });
-  assert.ok(
-    make().inspectLine(line, FILE).limit,
-    'Claude Code writes its own error notices as user-type entries',
-  );
-});

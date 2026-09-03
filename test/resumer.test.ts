@@ -78,6 +78,32 @@ test('an explicitly configured binary is used as-is', () => {
   assert.deepEqual(l, { file: '/opt/claude/bin/claude', args: [] });
 });
 
+test('a configured bare name is resolved on PATH, so a windows shim is still unwrapped', () => {
+  // claudeCommand: "claude" is the obvious thing to type, and before this it
+  // produced shellPath: "claude" - a .cmd shim name that cannot be spawned.
+  const shim = '@ECHO off\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n';
+  const l = resolveClaudeLauncher(
+    'claude',
+    'win32',
+    (c) => (c === 'claude' ? 'C:\\npm\\claude.cmd' : c === 'node' ? 'C:\\nodejs\\node.exe' : undefined),
+    () => shim,
+  );
+  assert.deepEqual(l, {
+    file: 'C:\\nodejs\\node.exe',
+    args: ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'],
+  });
+});
+
+test('a configured name PATH does not know fails closed instead of falling back to claude', () => {
+  const l = resolveClaudeLauncher(
+    'mycc',
+    'linux',
+    (c) => (c === 'claude' ? '/usr/local/bin/claude' : undefined),
+    () => undefined,
+  );
+  assert.equal(l, undefined, 'a named binary that cannot be found must not silently become claude');
+});
+
 test('on posix the binary is found on PATH', () => {
   const l = resolveClaudeLauncher('', 'linux', (c) => (c === 'claude' ? '/usr/local/bin/claude' : undefined), () => undefined);
   assert.deepEqual(l, { file: '/usr/local/bin/claude', args: [] });

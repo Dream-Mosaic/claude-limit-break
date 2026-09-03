@@ -6,7 +6,7 @@ export interface ResolvedSession {
 }
 
 /**
- * Claude Code names each transcript for its session, so the id is a v4 uuid.
+ * Claude Code names each transcript for its session, so the id is uuid-shaped.
  * Validated rather than trusted: this value is handed to a CLI as an argv
  * element, and a filename is attacker-influenced input on a shared machine.
  */

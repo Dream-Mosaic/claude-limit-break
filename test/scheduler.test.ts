@@ -69,7 +69,7 @@ test('a legacy stored job without baseResumeAtMs/jitterMs is migrated on reconst
     resumeAtMs,
     reason: 'limit',
   };
-  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': legacy as PendingJob }), silent);
+  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': legacy }), silent);
   assert.equal(s.current?.baseResumeAtMs, resumeAtMs);
   assert.equal(s.current?.jitterMs, 0);
 });
@@ -104,6 +104,19 @@ test('a zero window produces no jitter', () => {
 });
 
 test('a reversed window is treated as a window, not an error', () => {
-  const ms = randomJitterMs(30, 5);
-  assert.ok(ms >= 5 * 60_000 && ms <= 30 * 60_000);
+  const lo = 5 * 60_000;
+  const hi = 30 * 60_000;
+  let observedMax = 0;
+  for (let i = 0; i < 500; i++) {
+    const ms = randomJitterMs(30, 5);
+    assert.ok(ms >= lo && ms <= hi, `outside [5m, 30m]: ${ms}`);
+    observedMax = Math.max(observedMax, ms);
+  }
+  // Staying inside the band is also true of an implementation that read the
+  // reversed window as empty and returned the lower bound - or zero - every
+  // time. Spanning it is not.
+  assert.ok(
+    observedMax > lo,
+    `every one of 500 draws was the lower bound (${observedMax}); the band is not being used`,
+  );
 });

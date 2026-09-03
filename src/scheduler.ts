@@ -11,7 +11,11 @@ export interface PendingJob {
   prompt: string;
   /** Deadline including jitter. What the scheduler fires on. */
   resumeAtMs: number;
-  /** Deadline the notice actually stated, before jitter. Used for dedupe. */
+  /**
+   * Deadline the notice actually stated, before jitter was added. Recorded so a
+   * padded resume time can be traced back to what Claude said; the dedupe in
+   * schedule() compares resumeAtMs, the deadline actually being waited on.
+   */
   baseResumeAtMs: number;
   jitterMs: number;
   reason: 'limit' | 'overload';
