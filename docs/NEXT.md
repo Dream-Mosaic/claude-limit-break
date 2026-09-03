@@ -33,6 +33,33 @@ resume of a **panel-created** session:
 
 If it doesn't render, the design needs a "reload the panel after resume" step.
 
+### Outstanding manual verification
+
+Task 14 (resume policy and extension wiring) is committed, but the extension
+has never been activated in a real Extension Development Host — `npm test`
+cannot exercise `activate()`, and driving a GUI window is outside what an
+automated session can do. Nobody has confirmed it actually runs. The task
+brief's Step 6 is preserved here verbatim so whoever runs it does not have to
+reconstruct it:
+
+1. Press `F5`. Confirm the Output panel shows `Claude Limit Buster active.`
+2. Run `Claude Limit Buster: Show Log` from the command palette.
+3. In a terminal in that host window, append a synthetic limit line to a real
+   transcript and confirm a notification and a status-bar countdown appear:
+   ```bash
+   ID=$(basename "$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" .jsonl)
+   printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"cwd":"'"$PWD"'","message":{"content":"Claude AI usage limit reached. Try again in 5 minutes"}}' \
+     >> ~/.claude/projects/*/"$ID".jsonl
+   ```
+4. Run `Claude Limit Buster: Resume Now`. A **new** terminal must open,
+   running `claude`, with no text typed into any existing terminal.
+5. **This is the same "Does the panel render a CLI-advanced session on
+   reload?" question above.** If the session in step 3 was created in the
+   Claude Code panel, reopen it from Session history and check whether the
+   resumed turn is rendered. Record the answer in the section above. If it
+   does not render, this task gains a follow-up: prompt the user to reload
+   the panel after a resume.
+
 ## Spike results worth not re-deriving
 
 Verified during design. Commands assume `CLAUDE_CODE_*` env vars are cleared —
@@ -76,5 +103,6 @@ Execute [the implementation plan](superpowers/plans/2026-09-02-claude-limit-bust
 15 tasks, TypeScript reconstruction first, the three parser fixes with the
 corpus as the gate, then `sessionResolver` / `budget` / `resumer`.
 
-Task 14 step 6 answers the outstanding panel-rendering question above; record
-the result here when it does.
+Task 14 (steps 1-5, 7) is done. Its step 6 — the manual smoke test that would
+also answer the outstanding panel-rendering question above — is still open;
+see "Outstanding manual verification" under Verification still outstanding.
