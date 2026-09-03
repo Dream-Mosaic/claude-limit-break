@@ -88,7 +88,7 @@
         },
         "claudeLimitBuster.alertSound": {
           "type": "boolean", "default": true, "scope": "window",
-          "description": "Chime when Claude is waiting on you."
+          "description": "Chime when a Claude turn finishes in a folder open in this window."
         },
         "claudeLimitBuster.alertSoundFile": {
           "type": "string", "default": "", "scope": "machine",

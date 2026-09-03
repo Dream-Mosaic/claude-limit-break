@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { createLogger } from './log';
 import { readSettings } from './config';
 import { TranscriptWatcher } from './transcriptWatcher';
@@ -12,6 +13,30 @@ import { buildTerminalOptions, resolveClaudeLauncher } from './resumer';
 import { execFileSync } from 'node:child_process';
 
 const NS = 'claudeLimitBuster';
+
+/**
+ * Whether a transcript entry's working directory belongs to this window.
+ *
+ * The transcript watcher is global — it sees every Claude session in every
+ * project under ~/.claude/projects — so anything that reacts per turn has to
+ * ask this first, or every window reacts to every project on the machine.
+ *
+ * Compared as resolved paths with a separator boundary rather than a bare
+ * startsWith, so /work/app does not swallow /work/app-old, and folded to lower
+ * case because a Windows path recorded by the CLI need not match the casing VS
+ * Code reports for the same folder.
+ */
+export function isInsideWorkspace(cwd: string | undefined, folders: readonly string[]): boolean {
+  if (!cwd) {
+    return false;
+  }
+  const key = (p: string) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+  const target = key(cwd);
+  return folders.some((folder) => {
+    const root = key(folder);
+    return target === root || target.startsWith(root + path.sep);
+  });
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel('Claude Limit Buster');
@@ -103,11 +128,18 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduler,
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
-    watcher.onInputNeeded(() => {
+    watcher.onInputNeeded((hit) => {
       const s = settings();
-      if (s.alertSound) {
-        playAlertSound({ file: s.alertSoundFile });
+      if (!s.enabled || !s.alertSound) {
+        return;
       }
+      // A turn ends roughly once per Claude response, in every session on the
+      // machine. Only this window's own folders are worth making a noise about.
+      const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+      if (!isInsideWorkspace(hit.cwd, folders)) {
+        return;
+      }
+      playAlertSound({ file: s.alertSoundFile });
     }),
     scheduler.onChange((job) => status.update(job)),
     scheduler.onFire((job) => {

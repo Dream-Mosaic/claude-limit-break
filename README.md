@@ -12,8 +12,8 @@ Detection reads Claude Code's own session transcripts rather than watching a
 terminal, so it works whether Claude is running in the VS Code panel or in a
 terminal, and whether or not the session was started from VS Code at all.
 
-It also chimes when Claude is waiting on you, so you can walk away from a long
-run without missing a permission prompt.
+It also chimes when a Claude turn finishes in a folder open in this window, so
+you can walk away from a long run and hear when it is your turn again.
 
 ## How it resumes
 
