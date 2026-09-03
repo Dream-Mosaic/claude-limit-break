@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, looksLikeCode, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
+import { detectLimit, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -241,22 +241,29 @@ export class TranscriptWatcher {
         const apiError = isApiErrorEntry(entry);
         const maxWait = this.getMaxWaitHours();
         const now = new Date();
-        for (const candidate of candidates) {
-            // Only short strings are considered: a real banner is one line, whereas a
-            // long string is a file the session happened to read. Without this, a
-            // transcript containing source code about rate limits arms a timer.
-            if (candidate.length > MAX_NOTICE_LENGTH) {
-                continue;
-            }
-            // An unflagged entry quoting banner text is almost always source code or
-            // a conversation *about* limits - as happens while developing this very
-            // extension. Skip anything that reads like code.
-            if (!flagged && looksLikeCode(candidate)) {
-                continue;
-            }
-            const detection = detectLimit(candidate, now, maxWait);
-            if (detection) {
-                return { limit: { detection, cwd, file } };
+
+        // The user pasting a limit notice into the chat - or asking about one - must
+        // never arm a resume timer. This is the same rule the overload scan below has
+        // always had; it was never applied to limits, and 4 of 6 ordinary user
+        // questions armed a timer as a result.
+        //
+        // `flagged` has to come first: Claude Code writes its own API-error notices as
+        // synthetic entries that can carry type "user", so a bare type check would
+        // suppress exactly the detection this extension exists for.
+        if (flagged || apiError || entry.type !== 'user') {
+            for (const candidate of candidates) {
+                // Only short strings are considered: a real banner is one line, whereas a
+                // long string is a file the session happened to read. Without this, a
+                // transcript containing source code about rate limits arms a timer.
+                if (candidate.length > MAX_NOTICE_LENGTH) {
+                    continue;
+                }
+                // Trusted entries skip the source-code guard inside detectLimit, which is
+                // where that guard now lives.
+                const detection = detectLimit(candidate, now, maxWait, { trusted: flagged });
+                if (detection) {
+                    return { limit: { detection, cwd, file } };
+                }
             }
         }
         // No limit here. A transient server error is worth reporting instead, but

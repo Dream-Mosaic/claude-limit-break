@@ -59,3 +59,36 @@ test('long strings in an entry are skipped as file contents, not banners', () =>
   });
   assert.equal(make().inspectLine(line, FILE).limit, undefined);
 });
+
+test('an ordinary user question about limits does not arm a timer', () => {
+  const questions = [
+    'my usage limit resets at 3pm right?',
+    'why does my session limit reset at 1:40am instead of midnight?',
+    'what happens when I hit the usage limit - does it try again in 5 hours?',
+    'is the rate limit reached message the one that says try again in 2 hours?',
+  ];
+  for (const q of questions) {
+    const line = entry({ type: 'user', message: { content: q } });
+    assert.equal(make().inspectLine(line, FILE).limit, undefined, q);
+  }
+});
+
+test('an assistant entry describing a limit still arms a timer', () => {
+  const line = entry({
+    type: 'assistant',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  assert.ok(make().inspectLine(line, FILE).limit);
+});
+
+test('a flagged entry arms a timer even when its type is user', () => {
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  assert.ok(
+    make().inspectLine(line, FILE).limit,
+    'Claude Code writes its own error notices as user-type entries',
+  );
+});
