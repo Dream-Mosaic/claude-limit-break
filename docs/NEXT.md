@@ -14,6 +14,34 @@ State as of the initial commits. Read
   attribution detail that can silently break at release time.
 - **Public repo, no Marketplace listing**, `.vsix` attached to releases.
 
+## Known limitations
+
+**Two open windows can resume the same session twice.** Every VS Code window
+runs its own `TranscriptWatcher`, and that watcher's root is the global
+`~/.claude/projects` rather than the workspace, so both windows see the same
+limit notice. Each window also runs its own `ResumeScheduler`, which reads
+`globalState` once when it is constructed and then keeps the pending job in
+memory. Nothing coordinates them: both schedule the cooldown, both fire it, and
+one limit can launch two concurrent `claude --resume` runs against the same
+session ID. The cost is a doubled resume — two terminals, two cold prompt
+caches, roughly twice the tokens the budget check estimated for one.
+
+This is not fixed in code, deliberately. Both candidate fixes turn on how VS
+Code propagates a `Memento` write between windows, and that cannot be
+established without a running Extension Development Host — the same thing
+blocking the manual verification below. Shipping an unverifiable concurrency fix
+is worse than stating the limitation. The candidates, for whoever can run one:
+
+- **Re-read and stand down.** Have `tick()` read `globalState` again before
+  firing, and abandon the job when the stored value is gone or no longer
+  matches — so the window that did not clear the key does not also resume.
+- **Claim the fire.** Write a claim (a window id and a timestamp) with a
+  compare-and-set against the stored job, and resume only from the window whose
+  claim stuck.
+
+Either way the mechanism has to be measured first: whether a `Memento.update`
+in one window is visible in another at all, and how soon.
+
 ## Verification still outstanding
 
 **Does the panel render a CLI-advanced session on reload?** The docs say the

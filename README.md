@@ -3,10 +3,6 @@
 A VS Code extension that waits out Claude Code usage limits and resumes your
 session — without typing into your terminal.
 
-> **Status: design complete, implementation not started.**
-> The [design document](docs/design/2026-09-01-design.md) is the current state
-> of this repository. There is no working extension yet.
-
 ## What it does
 
 When a Claude Code session stops — a usage limit, a `529`, a server error — it
@@ -50,14 +46,21 @@ fixed number of times with no idea what each attempt costs.
 
 ## Install
 
-Not yet installable. When there is something to build, it will be a `.vsix`
-attached to a GitHub release:
+There is no Marketplace listing and there is not intended to be one, so build
+the `.vsix` yourself:
+
+```bash
+npm install
+npx --yes @vscode/vsce package
+```
+
+That writes `claude-limit-buster-<version>.vsix` beside the manifest. Install it
+from the Extensions view — the `...` menu, **Install from VSIX...** — or from a
+terminal:
 
 ```bash
 code --install-extension claude-limit-buster-<version>.vsix
 ```
-
-There is no Marketplace listing and there is not intended to be one.
 
 ## Development
 
@@ -66,9 +69,11 @@ npm install
 npm test
 ```
 
-The parser suite in [test/corpus](test/corpus) is the regression gate for
-detection. See [docs/UPSTREAM.md](docs/UPSTREAM.md) for how detection is built
-and [docs/NEXT.md](docs/NEXT.md) for current state.
+The parser suites in [test/parsers](test/parsers), together with the
+entry-level cases in
+[test/transcriptWatcher.test.ts](test/transcriptWatcher.test.ts), are the
+regression gate for detection. See [docs/UPSTREAM.md](docs/UPSTREAM.md) for how
+detection is built and [docs/NEXT.md](docs/NEXT.md) for current state.
 
 ## License
 
