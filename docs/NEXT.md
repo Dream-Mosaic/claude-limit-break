@@ -100,8 +100,8 @@ the third under the design conversation's project directory.
 ## Then
 
 All 15 tasks in [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md)
-are implemented: TypeScript reconstruction, the three parser fixes with the
-corpus as the gate, `sessionResolver` / `budget` / `resumer`, and CI.
+are implemented: TypeScript reconstruction, the three parser fixes with their
+corpus cases now standing as regression tests, `sessionResolver` / `budget` / `resumer`, and CI.
 
 The one item left open is the manual smoke test under "Outstanding manual
 verification" above — nobody has pressed `F5` in a real Extension Development
