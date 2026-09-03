@@ -17,7 +17,86 @@
   },
   "activationEvents": ["onStartupFinished"],
   "main": "./out/src/extension.js",
-  "contributes": {},
+  "contributes": {
+    "commands": [
+      { "command": "claudeLimitBuster.resumeNow", "title": "Claude Limit Buster: Resume Now" },
+      { "command": "claudeLimitBuster.cancel", "title": "Claude Limit Buster: Cancel Pending Resume" },
+      { "command": "claudeLimitBuster.showLog", "title": "Claude Limit Buster: Show Log" }
+    ],
+    "configuration": {
+      "title": "Claude Limit Buster",
+      "properties": {
+        "claudeLimitBuster.enabled": {
+          "type": "boolean", "default": true, "scope": "window",
+          "description": "Watch Claude Code transcripts for usage limits and server errors."
+        },
+        "claudeLimitBuster.autoResume": {
+          "type": "boolean", "default": true, "scope": "window",
+          "description": "Resume automatically when the cooldown elapses. When off, the status bar offers a manual resume."
+        },
+        "claudeLimitBuster.resumeMode": {
+          "type": "string", "enum": ["interactive", "headless"], "default": "interactive",
+          "enumDescriptions": [
+            "Open a new terminal running Claude at your normal autonomy level.",
+            "Run Claude in the background with -p. Requires an explicit permission mode below, or tool calls are denied."
+          ],
+          "scope": "machine",
+          "markdownDescription": "`interactive` opens a new terminal running Claude at your normal autonomy level. `headless` runs it with `-p` and needs an explicit permission mode to do any tool work. Machine-scoped: a workspace cannot change how the extension launches Claude."
+        },
+        "claudeLimitBuster.headlessPermissionMode": {
+          "type": "string", "enum": ["", "default", "acceptEdits", "plan"], "default": "",
+          "enumDescriptions": [
+            "No permission mode is passed. Tool calls are denied.",
+            "Same effect as leaving this empty, for headless runs.",
+            "Allow file edits without asking.",
+            "Let Claude plan without making changes."
+          ],
+          "scope": "machine",
+          "markdownDescription": "Permission mode passed to headless resumes. Empty means none, so tool calls are denied. Machine-scoped: a workspace must not be able to grant autonomy."
+        },
+        "claudeLimitBuster.claudeCommand": {
+          "type": "string", "default": "", "scope": "machine",
+          "markdownDescription": "Path to the `claude` executable. Empty auto-detects from PATH. Machine-scoped: this names the program that gets run."
+        },
+        "claudeLimitBuster.resumePrompt": {
+          "type": "string", "default": "Continue where you left off.", "scope": "window",
+          "description": "Prompt sent when resuming. Passed as a single argument, never through a shell."
+        },
+        "claudeLimitBuster.maxResumeTokens": {
+          "type": "number", "default": 150000, "scope": "window",
+          "markdownDescription": "Refuse to resume when the estimated cost exceeds this. A limit wait guarantees a cold cache, so a resume reprocesses the whole session. Measured against the **pre-flight estimate**, not actual usage. `0` disables the check."
+        },
+        "claudeLimitBuster.maxWaitHours": {
+          "type": "number", "default": 24, "scope": "window",
+          "description": "Ignore a reset time further out than this, which is usually a misparse."
+        },
+        "claudeLimitBuster.transcriptPollSeconds": {
+          "type": "number", "default": 5, "scope": "window",
+          "description": "Polling backstop interval, for when recursive file watching is unreliable."
+        },
+        "claudeLimitBuster.randomDelayMinMinutes": {
+          "type": "number", "default": 5, "scope": "window",
+          "description": "Minimum random padding added after a reset time."
+        },
+        "claudeLimitBuster.randomDelayMaxMinutes": {
+          "type": "number", "default": 30, "scope": "window",
+          "description": "Maximum random padding added after a reset time."
+        },
+        "claudeLimitBuster.notify": {
+          "type": "boolean", "default": true, "scope": "window",
+          "description": "Show a notification when a limit is detected and when a resume fires."
+        },
+        "claudeLimitBuster.alertSound": {
+          "type": "boolean", "default": true, "scope": "window",
+          "description": "Chime when Claude is waiting on you."
+        },
+        "claudeLimitBuster.alertSoundFile": {
+          "type": "string", "default": "", "scope": "machine",
+          "markdownDescription": "Sound file to play. Empty uses the system default. Machine-scoped: the path reaches a media player."
+        }
+      }
+    }
+  },
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
