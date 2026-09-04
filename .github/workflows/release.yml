@@ -1,0 +1,85 @@
+name: Release
+
+# Runs on every merge to main, but only publishes when package.json's version
+# names a tag that does not exist yet. That is what makes it safe to fire on
+# every push: a docs fix reaches the no-op path and says so, while a version
+# bump cuts the release. The version is never derived or auto-incremented here
+# - it is whatever a human put in package.json.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Two merges in quick succession must not race to create the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Is this version released yet?
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are the record of what has already been released, so the
+          # shallow default would make every version look new.
+          fetch-depth: 0
+      - id: version
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already tagged. Nothing to release."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "v$version has no tag yet. Releasing it."
+          fi
+
+  publish:
+    name: Publish v${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VSIX: claude-limit-buster-${{ needs.check.outputs.version }}.vsix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      # Re-run the suite here rather than trusting that CI passed on this
+      # commit. A release that publishes untested code is the one failure this
+      # workflow exists to prevent, and a minute of tests is cheap insurance.
+      - run: npm test
+
+      - name: Package
+        run: npx --yes @vscode/vsce package --out "$VSIX"
+
+      - name: Verify the package
+        run: bash scripts/check-vsix.sh "$VSIX"
+
+      # gh creates the tag at this commit as part of creating the release, so
+      # there is no separate tag push to keep in step with it.
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--title "v$VERSION" --generate-notes)
+          # Everything below 1.0.0 goes out marked pre-release.
+          case "$VERSION" in
+            0.*) args+=(--prerelease) ;;
+          esac
+          gh release create "v$VERSION" "$VSIX" "${args[@]}"
+          echo "Released v$VERSION with $VSIX attached."

@@ -19,6 +19,45 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # Shipping code changed without a version bump means the release workflow
+  # finds a tag that already exists and quietly publishes nothing - the change
+  # lands on main and never reaches a .vsix. This check makes that impossible
+  # to do by accident.
+  #
+  # Add the `no-release` label to a pull request to skip it: for a refactor
+  # split across several PRs, or any src/ change you deliberately do not want
+  # released yet. A pull request that touches no src/ files skips itself.
+  version:
+    name: Version bump
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'no-release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The check compares against the base branch, which the shallow
+          # default does not fetch.
+          fetch-depth: 0
+      - name: A change to src/ needs a version bump
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git diff --name-only "origin/$BASE...HEAD" -- src/)" ]; then
+            echo "No src/ changes in this pull request; no version bump needed."
+            exit 0
+          fi
+          git show "origin/$BASE:package.json" > base-package.json
+          base=$(node -p "require('./base-package.json').version")
+          head=$(node -p "require('./package.json').version")
+          rm -f base-package.json
+          if [ "$base" = "$head" ]; then
+            echo "::error::src/ changed but the version is still $head. Bump it in package.json, or add the no-release label."
+            exit 1
+          fi
+          echo "Version goes $base -> $head. Merging this will cut a release."
+
   package:
     runs-on: ubuntu-latest
     needs: test
@@ -29,25 +68,8 @@ jobs:
           node-version: '22'
       - run: npm ci
       - run: npx --yes @vscode/vsce package --out limit-buster.vsix
-      - name: Attribution files must ship inside the vsix
-        run: |
-          set -euo pipefail
-          # vsce renames LICENSE to extension/LICENSE.txt on package, so this
-          # substring grep is what makes the LICENSE case match at all.
-          # Do not tighten it to an exact match — that would fail forever.
-          for f in LICENSE THIRDPARTY.md; do
-            unzip -l limit-buster.vsix | grep -q "extension/$f" \
-              || { echo "::error::$f is missing from the .vsix"; exit 1; }
-          done
-          echo "LICENSE and THIRDPARTY.md are present."
-      - name: Development artifacts must not ship inside the vsix
-        run: |
-          set -euo pipefail
-          if unzip -l limit-buster.vsix | grep -q "\.superpowers"; then
-            echo "::error::.superpowers is present in the .vsix"
-            exit 1
-          fi
-          echo ".superpowers is absent from the .vsix."
+      - name: Verify the package
+        run: bash scripts/check-vsix.sh limit-buster.vsix
       - uses: actions/upload-artifact@v4
         with:
           name: vsix

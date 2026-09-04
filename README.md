@@ -46,8 +46,12 @@ fixed number of times with no idea what each attempt costs.
 
 ## Install
 
-There is no Marketplace listing and there is not intended to be one, so build
-the `.vsix` yourself:
+There is no Marketplace listing and there is not intended to be one. Every
+release attaches a built `.vsix`, so the quickest route is to download one from
+the [Releases page](../../releases) and install it from the Extensions view —
+the `...` menu, **Install from VSIX...**.
+
+To build it yourself instead:
 
 ```bash
 npm install
@@ -61,6 +65,23 @@ terminal:
 ```bash
 code --install-extension claude-limit-buster-<version>.vsix
 ```
+
+## Versioning and releases
+
+`package.json` holds the version and nothing derives it. Tags are `v<version>`
+and only the release workflow creates them.
+
+Merging to `main` runs that workflow. It compares the version against the
+existing tags: if the tag already exists it does nothing, and if it does not it
+runs the tests, packages, verifies the archive, and publishes a GitHub release
+with the `.vsix` attached. Anything below `1.0.0` is marked pre-release. It
+never publishes to the Marketplace.
+
+So a release is one line in a pull request — the version bump. CI enforces the
+other half: a pull request that changes `src/` without bumping the version
+fails, because that change would otherwise land on `main` and never reach a
+`.vsix`. Label the pull request `no-release` to skip that check when the
+omission is deliberate.
 
 ## Development
 
