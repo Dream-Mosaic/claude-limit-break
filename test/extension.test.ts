@@ -327,3 +327,42 @@ test('workspace containment is a bounded, case-insensitive path comparison', () 
   assert.equal(isInsideWorkspace(undefined, [root]), false, 'an unknown cwd is not inside anything');
   assert.equal(isInsideWorkspace(root, []), false, 'a window with no folders owns nothing');
 });
+
+test('a stale offer cannot resume a session the command already resumed', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'the session must have offered a manual resume');
+
+    // Resume it from the command palette, leaving the notification on screen.
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 1, 'the command resumes it once');
+    assert.deepEqual(argsOf(0), ['--resume', SESSION, PROMPT]);
+
+    // Now answer the offer that is still sitting there. The job is gone, so
+    // this must not start a second Claude on the same session.
+    offer.answer('Resume Now');
+    await flush();
+    assert.equal(
+      vscodeFake.terminals.length,
+      1,
+      'a stale offer must not launch a second resume for a session already resumed',
+    );
+    assert.ok(
+      vscodeFake.info.some((m) => m.message.includes('already resumed or cancelled')),
+      'the stale click must say why nothing happened rather than doing nothing',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});

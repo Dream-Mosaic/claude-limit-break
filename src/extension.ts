@@ -64,11 +64,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // the first, and its notification would then resume the wrong session.
   const readyJobs: PendingJob[] = [];
 
+  /** Drop a remembered job. Reports whether it was still there to drop. */
   const forgetReady = (sessionId: string) => {
     const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
-    if (at >= 0) {
-      readyJobs.splice(at, 1);
+    if (at < 0) {
+      return false;
     }
+    readyJobs.splice(at, 1);
+    return true;
   };
 
   /** Remember a job for manual resume, replacing any earlier one for the same session. */
@@ -175,7 +178,17 @@ export function activate(context: vscode.ExtensionContext): void {
             // This job, closed over here - not "whatever is ready now". Another
             // session can come ready while this notification is still on
             // screen, and the offer names a session, so it must honour it.
-            forgetReady(job.sessionId);
+            //
+            // Removing it is also how this click claims it. The notification
+            // outlives the job: the same session can be resumed from the
+            // command palette first, and without the claim a later click here
+            // would launch a second `claude --resume` on it.
+            if (!forgetReady(job.sessionId)) {
+              void vscode.window.showInformationMessage(
+                `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+              );
+              return;
+            }
             resume(job);
           }
         });
