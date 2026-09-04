@@ -44,7 +44,10 @@ jobs:
           fi
 
   publish:
-    name: Publish v${{ needs.check.outputs.version }}
+    # Deliberately not interpolating the version into the name: on a skipped
+    # job the expression cannot resolve and GitHub renders it raw, which is
+    # what most runs of this workflow are.
+    name: Publish
     needs: check
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
