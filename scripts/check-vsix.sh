@@ -20,36 +20,34 @@ if [ ! -f "$vsix" ]; then
   exit 2
 fi
 
-# Read the archive once, and insist it is readable before trusting anything it
-# says. A half-written .vsix lists only its early entries, so checking files
-# one at a time against a truncated archive reports whichever notice happens to
-# sit late in the zip as "missing" - an error that sends you looking in the
-# wrong place entirely.
-if ! listing=$(unzip -l "$vsix" 2>&1); then
+# Read the archive once, as bare entry names, and insist it is readable before
+# trusting anything it says. A half-written .vsix lists only its early entries,
+# so checking files one at a time against a truncated archive reports whichever
+# notice happens to sit late in the zip as "missing" - an error that sends you
+# looking in the wrong place entirely.
+if ! names=$(unzip -Z1 "$vsix" 2>&1); then
   echo "::error::could not read $vsix as an archive - it may be truncated"
-  echo "$listing"
+  echo "$names"
   exit 1
 fi
 
-# A well-formed listing ends with a totals line naming a file count. Without
-# this, a zip that unzip parses leniently could still be short.
-if [[ ! "$listing" =~ ([0-9]+)[[:space:]]+files? ]]; then
-  echo "::error::$vsix does not look like a complete archive listing"
-  echo "$listing"
+count=$(printf '%s\n' "$names" | grep -c . || true)
+if [ "$count" -lt 2 ]; then
+  echo "::error::$vsix holds $count entries, which is not a complete package"
   exit 1
 fi
-echo "Read $vsix: ${BASH_REMATCH[1]} entries."
+echo "Read $vsix: $count entries."
 
 failed=0
 
 # MIT requires the notice to accompany the distributed artifact, and the
 # artifact is the .vsix, not the repository. Nothing else would catch this.
 #
-# vsce renames LICENSE to extension/LICENSE.txt when packaging, so these are
-# substring matches. Do not tighten them to exact paths - that would fail
-# forever.
+# vsce renames LICENSE to extension/LICENSE.txt when packaging, so the match
+# has to tolerate an added extension - but anchored, so a stray
+# LICENSE_THIRDPARTY.md could not satisfy the LICENSE requirement by accident.
 for f in LICENSE THIRDPARTY.md; do
-  if [[ "$listing" == *"extension/$f"* ]]; then
+  if printf '%s\n' "$names" | grep -qE "^extension/${f}(\.[A-Za-z]+)?$"; then
     echo "ok: $f ships inside the .vsix"
   else
     echo "::error::$f is missing from the .vsix"
@@ -60,7 +58,7 @@ done
 # .superpowers is gitignored, but vsce reads .vscodeignore and ignores
 # .gitignore - so the whole development workspace once shipped to users inside
 # the package. Assert it stays out.
-if [[ "$listing" == *".superpowers"* ]]; then
+if printf '%s\n' "$names" | grep -q "\.superpowers"; then
   echo "::error::.superpowers is present in the .vsix"
   failed=1
 else

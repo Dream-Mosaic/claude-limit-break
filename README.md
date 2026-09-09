@@ -77,11 +77,24 @@ runs the tests, packages, verifies the archive, and publishes a GitHub release
 with the `.vsix` attached. Anything below `1.0.0` is marked pre-release. It
 never publishes to the Marketplace.
 
-So a release is one line in a pull request — the version bump. CI enforces the
-other half: a pull request that changes `src/` without bumping the version
-fails, because that change would otherwise land on `main` and never reach a
-`.vsix`. Label the pull request `no-release` to skip that check when the
-omission is deliberate.
+So a release is one line in a pull request — the version bump — and it can be
+its own pull request, after the changes it releases have already merged.
+
+Nothing blocks a pull request for not bumping the version. Instead, when a merge
+to `main` finds the version already tagged, the release workflow compares `src/`
+against that tag and warns if it has moved on. That asks the question that
+actually matters — has `main` drifted from the last release — rather than asking
+each pull request to guess its own version bump before review has decided
+whether it is a patch or a minor.
+
+## Staying up to date
+
+VS Code disables automatic updates for an extension installed from a `.vsix`,
+and its update check only ever queries a marketplace — an extension that has
+never been listed on one has no identity to check against, so **Show Outdated
+Extensions** will never mention it. Nothing will tell you a new version exists.
+
+Watch this repository for releases to find out: **Watch → Custom → Releases**.
 
 ## Development
 

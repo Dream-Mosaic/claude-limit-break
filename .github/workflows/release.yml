@@ -5,17 +5,21 @@ name: Release
 # every push: a docs fix reaches the no-op path and says so, while a version
 # bump cuts the release. The version is never derived or auto-incremented here
 # - it is whatever a human put in package.json.
+#
+# There is deliberately no `concurrency` group. One would serialise runs, but
+# GitHub keeps at most a single pending run per group and evicts the rest, so
+# two quick merges could drop the middle run - and with it, a version that then
+# never gets a .vsix and never gets retried, because its tag would still be
+# missing while the newer tag exists. Concurrent runs are safe instead: the tag
+# check makes different versions independent, and two runs racing on the SAME
+# version end with one failing loudly on an already-published release rather
+# than either of them silently skipping.
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write
-
-# Two merges in quick succession must not race to create the same tag.
-concurrency:
-  group: release
-  cancel-in-progress: false
+  contents: read
 
 jobs:
   check:
@@ -35,9 +39,20 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Keyed on the tag rather than on the release, because a tag with no
+          # release is how a version is deliberately reserved from publishing.
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null 2>&1; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "v$version is already tagged. Nothing to release."
+            # The one thing worth saying on the no-op path: main's source has
+            # moved on from the last released tag while the version stayed put,
+            # so those changes are sitting on main unreleased. This is the check
+            # a pull-request-time version gate was only approximating - it asks
+            # about the release, not about one pull request, so a single bump
+            # answers it for every change since the tag.
+            if [ -n "$(git diff --name-only "v$version" HEAD -- src/)" ]; then
+              echo "::warning title=Unreleased source changes::src/ has changed since v$version was tagged, but package.json still says $version. Bump the version to release those changes."
+            fi
           else
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "v$version has no tag yet. Releasing it."
@@ -51,8 +66,13 @@ jobs:
     needs: check
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      # Only this job writes. The check job above stays read-only.
+      contents: write
     env:
       VSIX: claude-limit-buster-${{ needs.check.outputs.version }}.vsix
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -71,18 +91,43 @@ jobs:
       - name: Verify the package
         run: bash scripts/check-vsix.sh "$VSIX"
 
-      # gh creates the tag at this commit as part of creating the release, so
-      # there is no separate tag push to keep in step with it.
-      - name: Tag and release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.check.outputs.version }}
+      # Draft first, then upload, then publish - never one shot.
+      #
+      # `gh release create` can fail AFTER the server has already created the
+      # release and its tag, which would leave a tagged version with no .vsix
+      # attached. The check job keys off tag existence, so that state is
+      # permanent: every later run would see the tag, decide the version was
+      # released, and never retry. A draft creates no tag until it is
+      # published, so a failure anywhere below leaves nothing but a draft and
+      # the next push starts over cleanly.
+      - name: Draft the release
         run: |
           set -euo pipefail
-          args=(--title "v$VERSION" --generate-notes)
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "A draft for v$VERSION already exists - an earlier run failed part way. Reusing it."
+            exit 0
+          fi
+          args=(--draft --title "v$VERSION" --generate-notes)
           # Everything below 1.0.0 goes out marked pre-release.
           case "$VERSION" in
             0.*) args+=(--prerelease) ;;
           esac
-          gh release create "v$VERSION" "$VSIX" "${args[@]}"
+          gh release create "v$VERSION" "${args[@]}"
+
+      - name: Attach the vsix
+        run: gh release upload "v$VERSION" "$VSIX" --clobber
+
+      - name: The asset must be attached before the release goes live
+        run: |
+          set -euo pipefail
+          if ! gh release view "v$VERSION" --json assets -q '.assets[].name' | grep -qxF "$VSIX"; then
+            echo "::error::$VSIX did not attach to the draft. Leaving it unpublished so the next run retries."
+            exit 1
+          fi
+          echo "$VSIX is attached."
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          gh release edit "v$VERSION" --draft=false
           echo "Released v$VERSION with $VSIX attached."
