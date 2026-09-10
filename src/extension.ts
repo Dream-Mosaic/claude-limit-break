@@ -11,6 +11,7 @@ import { randomJitterMs } from './randomDelay';
 import { playAlertSound } from './sound';
 import { buildTerminalOptions, resolveClaudeLauncher, cwdExists } from './resumer';
 import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
+import { GRACE_MS, stallVerdict } from './stallWatch';
 import { execFileSync } from 'node:child_process';
 
 const NS = 'claudeLimitBuster';
@@ -126,6 +127,21 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /** Transcript size, or undefined when it cannot be read at all. */
+  const transcriptBytes = (p: string): number | undefined => {
+    try {
+      return fs.statSync(p).size;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Outstanding stall checks, so a window that closes mid-grace does not leave
+   * a timer holding the extension host open.
+   */
+  const stallChecks = new Set<NodeJS.Timeout>();
+
   /**
    * Attempts to launch a resume. Returns whether a terminal launch was
    * actually attempted - false covers everything that stops before
@@ -192,10 +208,49 @@ export function activate(context: vscode.ExtensionContext): void {
     const terminal = vscode.window.createTerminal(opts);
     terminal.show();
     log.info(`Resumed ${job.sessionId} in a new terminal.`);
+
+    // A terminal existing is not a resume happening. Two observed failures
+    // leave one sitting there looking healthy: an untrusted folder parks
+    // `claude` at its own trust prompt waiting for a keypress nobody is there
+    // to give (#5), and a launch that fails inside the terminal process does
+    // so asynchronously, after this function has already logged success (#4).
+    // A resumed session that is actually working appends to its transcript,
+    // so that is what gets checked - once, after a grace period long enough
+    // for a cold cache to be rebuilt.
+    const bytesAtLaunch = transcriptBytes(job.transcript) ?? 0;
+    const check = setTimeout(() => {
+      stallChecks.delete(check);
+      const bytesNow = transcriptBytes(job.transcript);
+      const verdict = stallVerdict({ bytesAtLaunch, bytesNow });
+      if (verdict === 'grew') {
+        log.info(`Resume of ${job.sessionId} is producing work; its transcript has grown.`);
+        return;
+      }
+      const trustFirst =
+        job.folderTrusted === false
+          ? ' This folder is not trusted by the Claude CLI, which is the most likely reason: Claude is waiting at its trust prompt.'
+          : ' Claude may be waiting at a prompt, or may have exited.';
+      log.warn(
+        `Resume of ${job.sessionId} did not produce any work: ${job.transcript} was ${bytesAtLaunch} bytes at launch and ` +
+          `${bytesNow ?? 'unreadable'} now.${trustFirst}`,
+      );
+      void vscode.window.showWarningMessage(
+        `Claude Limit Buster: the resume of session ${job.sessionId.slice(0, 8)} does not appear to have started.${trustFirst}`,
+      );
+    }, GRACE_MS);
+    stallChecks.add(check);
     return true;
   };
 
   context.subscriptions.push(
+    {
+      dispose: () => {
+        for (const t of stallChecks) {
+          clearTimeout(t);
+        }
+        stallChecks.clear();
+      },
+    },
     channel,
     status,
     watcher,

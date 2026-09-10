@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { stallVerdict as realStallVerdict } from '../src/stallWatch';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -57,11 +59,13 @@ class FakeWatcher {
    * resume() now stats it for real, via node:fs, so a test that expects a
    * resume to actually launch needs a real path, not a placeholder string.
    */
-  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD): void {
+  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD, file?: string): void {
     this.hitEmitter.fire({
       detection: { resumeAt, text: 'Claude AI usage limit reached. Try again in 5 hours' },
       cwd,
-      file: `/h/.claude/projects/p/${sessionId}.jsonl`,
+      // `file` is overridable so a stall test can point at a real transcript
+      // it controls: the stall check stats this path for growth.
+      file: file ?? `/h/.claude/projects/p/${sessionId}.jsonl`,
     });
   }
 
@@ -94,6 +98,10 @@ let trustedCwds: Set<string> | 'all' = 'all';
 
 stubModule('./transcriptWatcher', { TranscriptWatcher: FakeWatcher });
 stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.push(o) });
+// The real 60s grace would make every stall test take a minute. The verdict
+// logic itself is the real one - only the wait is shortened.
+stubModule('./stallWatch', { GRACE_MS: 300, stallVerdict: realStallVerdict });
+
 stubModule('./trust', {
   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
   readClaudeUserConfig: () => undefined,
@@ -589,6 +597,82 @@ test('a trusted folder gets the ordinary schedule notice, with no trust warning 
     assert.doesNotMatch(tooltip?.value ?? '', /not trusted/i);
   } finally {
     trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('a resume whose transcript never grows is reported as a stall, not left logged as a success', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    // The default transcript path does not exist, so it cannot grow - the same
+    // shape as a resume that stopped at Claude's trust prompt and wrote nothing.
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'the resume must have launched for this test to mean anything');
+
+    await new Promise((r) => setTimeout(r, 600));
+
+    assert.ok(
+      vscodeFake.warnings.some((m) => m.includes(SESSION.slice(0, 8))),
+      `expected a stall warning naming the session; saw ${JSON.stringify(vscodeFake.warnings)}`,
+    );
+    assert.ok(
+      vscodeFake.outputLines.some((l) => /did not|stall/i.test(l) && l.includes(SESSION)),
+      `expected the stall to reach the log; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a resume whose transcript grows is confirmed, and warns about nothing', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  // The filename must be the session id: resolveSession validates it is
+  // uuid-shaped before handing it to a CLI as an argv element.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-stall-'));
+  const transcript = path.join(dir, `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, 'one line\n');
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+
+    // Wait for the launch itself rather than a fixed delay: the grace
+    // period starts when the terminal is created, so the growth has to
+    // land inside it.
+    const deadline = Date.now() + 4000;
+    while (vscodeFake.terminals.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(vscodeFake.terminals.length, 1, 'the resume must have launched');
+
+    // What a working resume does: append to the transcript it was resumed into.
+    fs.appendFileSync(transcript, 'a turn the resumed session wrote\n');
+    await new Promise((r) => setTimeout(r, 600));
+
+    assert.deepEqual(vscodeFake.warnings, [], 'a resume that produced work must not be called a stall');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
     teardown(ctx);
   }
 });
