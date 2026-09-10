@@ -12,3 +12,5 @@ tsconfig.json
 .superpowers/**
 .github/**
 scripts/**
+.vscode-test/**
+.vscode-test.mjs

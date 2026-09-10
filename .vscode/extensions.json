@@ -1,0 +1,11 @@
+{
+  // The eslint recommendation the VS Code extension template ships is
+  // deliberately absent: this project has no eslint config. `strict` plus
+  // `noUncheckedIndexedAccess` in tsconfig.json do that work, and a trial run
+  // of typescript-eslint's type-checked rules over this repo found one finding
+  // in src/ - a false positive on a narrowed JSON.parse - against 121 in
+  // test/, almost all of them the rule set arguing with node:test.
+  "recommendations": [
+    "ms-vscode.extension-test-runner"
+  ]
+}

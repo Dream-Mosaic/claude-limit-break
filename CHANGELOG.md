@@ -32,6 +32,11 @@ Development Host. Everything below ships in the first published version.
 - Settings under `claudeLimitBuster.*`. Everything that influences what gets
   executed is machine-scoped, so a workspace cannot set it.
 
+### Development
+
+- Integration tests run the extension inside a real VS Code
+  (`npm run test:integration`), alongside the fast unit suite (`npm test`).
+
 ### Known limitations
 
 - Two VS Code windows each run their own watcher and scheduler, so one limit can

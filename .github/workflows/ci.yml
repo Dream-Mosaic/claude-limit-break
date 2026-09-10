@@ -22,6 +22,22 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # Boots a real VS Code and activates the extension inside it. The unit suite
+  # runs against a hand-written fake `vscode`, which cannot tell whether the
+  # extension activates at all, so this is the only job that proves it does.
+  # Linux runners have no display, hence xvfb.
+  integration:
+    name: Integration (real VS Code)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: xvfb-run -a npm run test:integration
+
   package:
     runs-on: ubuntu-latest
     needs: test

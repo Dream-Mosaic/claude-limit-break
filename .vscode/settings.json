@@ -1,0 +1,16 @@
+{
+  // `out/` holds a compiled twin of every file in `src/` and `test/`, so
+  // without this every symbol search returns each hit twice.
+  "search.exclude": {
+    "out": true,
+    ".vscode-test": true
+  },
+  // The compiled output is worth seeing in the tree when debugging a source
+  // map, so it is excluded from search but not hidden.
+  "files.exclude": {
+    ".vscode-test": true
+  },
+  // The npm scripts are the build; tsc auto-detection only adds duplicates
+  // beside them in the task list.
+  "js/ts.tsc.autoDetect": "off"
+}
