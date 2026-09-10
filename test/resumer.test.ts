@@ -5,6 +5,7 @@ import {
   buildHeadlessArgs,
   buildTerminalOptions,
   resolveClaudeLauncher,
+  cwdExists,
 } from '../src/resumer';
 import type { ResolvedSession } from '../src/sessionResolver';
 
@@ -157,4 +158,16 @@ test('a shim that cannot be resolved fails closed rather than falling back to a 
     () => shim,
   );
   assert.equal(l, undefined);
+});
+
+test('an existing cwd is reported fine', () => {
+  assert.equal(cwdExists('/projects/example', (p) => p === '/projects/example'), true);
+});
+
+test('a cwd that is gone is reported, not thrown - resume() decides what to do about it', () => {
+  assert.equal(cwdExists('/projects/renamed-away', () => false), false);
+});
+
+test('no cwd at all is fine: VS Code applies its own default, same as always', () => {
+  assert.equal(cwdExists(undefined, () => false), true);
 });

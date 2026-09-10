@@ -9,7 +9,7 @@ import { CountdownStatusBar } from './statusBar';
 import { planResume } from './policy';
 import { randomJitterMs } from './randomDelay';
 import { playAlertSound } from './sound';
-import { buildTerminalOptions, resolveClaudeLauncher } from './resumer';
+import { buildTerminalOptions, resolveClaudeLauncher, cwdExists } from './resumer';
 import { execFileSync } from 'node:child_process';
 
 const NS = 'claudeLimitBuster';
@@ -100,7 +100,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const resume = (job: PendingJob) => {
+  /**
+   * Attempts to launch a resume. Returns whether a terminal launch was
+   * actually attempted - false covers everything that stops before
+   * createTerminal (no claude executable found, a cwd that no longer
+   * exists). Callers rely on this to decide whether the job has been
+   * discharged or is still outstanding: every call site here used to drop
+   * the job the moment it decided to resume it, before knowing whether the
+   * launch would actually start.
+   */
+  const resume = (job: PendingJob): boolean => {
     const s = settings();
     if (s.resumeMode === 'headless') {
       // Headless mode is declared in settings but not yet routed here; it is a
@@ -128,7 +137,24 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showErrorMessage(
         'Claude Limit Buster: could not find the claude executable. Set claudeLimitBuster.claudeCommand.',
       );
-      return;
+      return false;
+    }
+    // vscode.window.createTerminal does not throw on a bad cwd - VS Code
+    // reports "Starting directory (cwd) ... does not exist" asynchronously,
+    // inside the terminal process, well after this function would already
+    // have logged success. The cwd is whatever the session started in,
+    // recorded whenever that transcript entry was written - possibly weeks
+    // ago, and a renamed project or an unplugged drive is enough to make it
+    // stale. Checking first turns that into a synchronous refusal that names
+    // the path and the transcript it came from, instead of a generic VS Code
+    // error days later that names neither.
+    if (!cwdExists(job.cwd, fs.existsSync)) {
+      log.error(`Cannot resume ${job.sessionId}: cwd "${job.cwd}" no longer exists (recorded in ${job.transcript}).`);
+      void vscode.window.showErrorMessage(
+        `Claude Limit Buster: the folder for session ${job.sessionId.slice(0, 8)} no longer exists: ${job.cwd}. ` +
+          'The resume was not started. Use "Resume Now" again once the folder is back, or check the transcript.',
+      );
+      return false;
     }
     const opts = buildTerminalOptions(
       { sessionId: job.sessionId, transcript: job.transcript, cwd: job.cwd, bytes: 0 },
@@ -140,6 +166,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const terminal = vscode.window.createTerminal(opts);
     terminal.show();
     log.info(`Resumed ${job.sessionId} in a new terminal.`);
+    return true;
   };
 
   context.subscriptions.push(
@@ -189,7 +216,12 @@ export function activate(context: vscode.ExtensionContext): void {
               );
               return;
             }
-            resume(job);
+            // forgetReady above is how this click claims the job; if the
+            // launch never actually started, the claim must be undone or the
+            // job is gone with no way back.
+            if (!resume(job)) {
+              rememberReady(job);
+            }
           }
         });
         return;
@@ -199,26 +231,42 @@ export function activate(context: vscode.ExtensionContext): void {
           `Claude Limit Buster: resuming session ${job.sessionId.slice(0, 8)}.`,
         );
       }
-      resume(job);
+      // The scheduler already cleared this job before firing (its own
+      // re-entrancy guard, see consume()), so if the launch never started this
+      // is the only place still holding it - without rememberReady it would
+      // simply be gone.
+      if (!resume(job)) {
+        rememberReady(job);
+      }
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, () => {
       // Exactly one job moves, and only its own source is touched. Cancelling
       // the scheduler while resuming a ready job - or dropping a ready job
       // while resuming the scheduler's - would throw away work nobody asked to
       // discard.
+      //
+      // Each branch below removes the job from its source only once resume()
+      // reports the launch actually started. resume() can fail (missing cwd,
+      // no claude executable), and doing the removal first - as this used to -
+      // left a failed resume with no path back to the job.
       const counting = scheduler.current;
       if (counting) {
-        scheduler.cancel();
-        resume(counting);
+        if (resume(counting)) {
+          scheduler.cancel();
+        }
         return;
       }
       // Oldest first: the session that has been waiting longest goes first.
-      const ready = readyJobs.shift();
+      // Peeked, not shifted, so a failed resume leaves it exactly where it was
+      // instead of needing to be spliced back in.
+      const ready = readyJobs[0];
       if (!ready) {
         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
         return;
       }
-      resume(ready);
+      if (resume(ready)) {
+        forgetReady(ready.sessionId);
+      }
     }),
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
       // "Cancel Pending Resume" means all of it, but say how much it threw

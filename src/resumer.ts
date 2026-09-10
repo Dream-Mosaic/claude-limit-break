@@ -51,6 +51,25 @@ export function buildHeadlessArgs(sessionId: string, prompt: string, permissionM
   return args;
 }
 
+/**
+ * Whether `cwd` is safe to hand to vscode.window.createTerminal.
+ *
+ * createTerminal does not throw on a missing directory - VS Code reports
+ * "Starting directory (cwd) ... does not exist" asynchronously, inside the
+ * terminal process, well after a caller that logs success right after calling
+ * it would already have done so. Checking first turns that into a result the
+ * caller can act on - keep the job, tell the user, name the transcript -
+ * before anything is launched.
+ *
+ * No cwd at all is fine: VS Code falls back to its own default, same as
+ * always. `exists` is injected rather than importing node:fs directly so this
+ * stays a pure function callable without a filesystem, matching
+ * buildTerminalOptions below.
+ */
+export function cwdExists(cwd: string | undefined, exists: (p: string) => boolean): boolean {
+  return cwd === undefined || exists(cwd);
+}
+
 export function buildTerminalOptions(
   session: ResolvedSession,
   prompt: string,

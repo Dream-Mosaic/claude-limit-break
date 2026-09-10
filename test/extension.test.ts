@@ -52,11 +52,15 @@ class FakeWatcher {
    * `resumeAt`. This runs through the real policy and the real scheduler; the
    * transcript path does not exist, which resolveSession treats as an unknown
    * size, so the budget check passes.
+   *
+   * `cwd` defaults to a directory that genuinely exists on disk (REAL_CWD):
+   * resume() now stats it for real, via node:fs, so a test that expects a
+   * resume to actually launch needs a real path, not a placeholder string.
    */
-  limitFor(sessionId: string, resumeAt: Date): void {
+  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD): void {
     this.hitEmitter.fire({
       detection: { resumeAt, text: 'Claude AI usage limit reached. Try again in 5 hours' },
-      cwd: '/projects/example',
+      cwd,
       file: `/h/.claude/projects/p/${sessionId}.jsonl`,
     });
   }
@@ -88,6 +92,13 @@ const { activate, isInsideWorkspace } =
 const LAUNCHER = '/opt/claude/bin/claude';
 const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
 const PROMPT = 'Continue where you left off.';
+
+// resume() now checks the cwd on the real filesystem before launching, so
+// fixtures that expect a launch need a directory that is actually there.
+// os.tmpdir() always exists; the "missing" one is a path under it that is
+// never created.
+const REAL_CWD = os.tmpdir();
+const MISSING_CWD = path.join(os.tmpdir(), 'clb-does-not-exist', SESSION);
 
 interface FakeContext {
   subscriptions: { dispose(): void }[];
@@ -135,12 +146,12 @@ const manualConfig = () => ({
   randomDelayMaxMinutes: 0,
 });
 
-const pastJob = () => {
+const pastJob = (cwd: string = REAL_CWD) => {
   const resumeAtMs = Date.now() - 1000;
   return {
     sessionId: SESSION,
     transcript: `/h/p/${SESSION}.jsonl`,
-    cwd: '/projects/example',
+    cwd,
     prompt: PROMPT,
     resumeAtMs,
     baseResumeAtMs: resumeAtMs,
@@ -362,6 +373,132 @@ test('a stale offer cannot resume a session the command already resumed', async 
       vscodeFake.info.some((m) => m.message.includes('already resumed or cancelled')),
       'the stale click must say why nothing happened rather than doing nothing',
     );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+const TRANSCRIPT = `/h/.claude/projects/p/${SESSION}.jsonl`;
+
+test('an autoResume that lands on a deleted folder is refused, blames the right path, and keeps the job', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+
+    assert.equal(vscodeFake.terminals.length, 0, 'createTerminal must never be reached for a missing cwd');
+    assert.ok(
+      !vscodeFake.outputLines.some((l) => l.includes(`Resumed ${SESSION}`)),
+      'nothing may claim the resume succeeded when it never launched',
+    );
+    assert.ok(
+      vscodeFake.errors.some((m) => m.includes(MISSING_CWD) && m.includes(SESSION.slice(0, 8))),
+      `no error named the missing folder and the session; saw ${JSON.stringify(vscodeFake.errors)}`,
+    );
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes(MISSING_CWD) && l.includes(TRANSCRIPT)),
+      'the log must name both the missing path and the transcript it came from',
+    );
+
+    // The job must have been kept, not dropped: it is reachable from Resume
+    // Now instead of vanishing with the scheduler's own pre-fire cleanup.
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+    resumeNow();
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+      0,
+      'a resume that never launched must not make the job disappear',
+    );
+    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+    assert.equal(vscodeFake.terminals.length, 0, 'still no terminal');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('accepting a Resume Now offer into a deleted folder puts the job back rather than discarding it', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'the session must have offered a manual resume');
+
+    offer.answer('Resume Now');
+    await flush();
+
+    assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
+    assert.ok(
+      vscodeFake.errors.some((m) => m.includes(MISSING_CWD)),
+      `no error named the missing folder; saw ${JSON.stringify(vscodeFake.errors)}`,
+    );
+
+    // Answering the offer claims the job by removing it from readyJobs before
+    // resume() runs; since the launch never started, that claim must be
+    // undone rather than left to quietly lose the job.
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+    resumeNow();
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+      0,
+      'the offer failing must not have discarded the job it claimed',
+    );
+    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resumeNow does not cancel the counting-down job until a resume has actually launched', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    // Still counting down: resumeNow must reach it via scheduler.current, the
+    // same branch that used to call scheduler.cancel() before knowing whether
+    // resume() would even start.
+    watcher.limitFor(SESSION, new Date(Date.now() + 600_000), MISSING_CWD);
+
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
+    assert.equal(vscodeFake.errors.length, 1);
+
+    // If cancel() had already run, the job would be gone and this second call
+    // would report "nothing pending" instead of failing the same way again.
+    resumeNow();
+    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+      0,
+      'the counting-down job must not have been cancelled out from under a failed resume',
+    );
+    assert.equal(vscodeFake.terminals.length, 0);
   } finally {
     teardown(ctx);
   }
