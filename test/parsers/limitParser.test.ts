@@ -22,6 +22,11 @@ test('detects every documented limit format', () => {
     ['Session limit reached. Try again in 45 minutes', 'duration-minutes'],
     ['You have reached your usage limit. Try again in 5 hours.', 'phrasing'],
     ['Error 429: rate limit exceeded, try again in 2 hours', '429-routes-here'],
+    // Captured verbatim from a real transcript on 2026-09-09, when two probe
+    // sessions hit an actual limit. The bare epoch form above was written from
+    // the docs; this is what Claude Code really writes, with a status prefix and
+    // a middot ahead of the notice the parser is looking for.
+    [`API Error: Request rejected (429) · Claude AI usage limit reached|${epochAt('2026-08-03T17:00:00Z')}`, 'real-429-prefixed'],
   ];
   for (const [text, tag] of positives) {
     assert.ok(detectLimit(text, NOW, MAXW), `${tag}: ${text}`);
@@ -91,4 +96,18 @@ test('a trusted entry bypasses the source-code guard', () => {
   const banner = 'Claude AI usage limit reached `retry` => try again in 5 hours';
   assert.equal(detectLimit(banner, NOW, MAXW), undefined, 'untrusted: guarded');
   assert.ok(detectLimit(banner, NOW, MAXW, { trusted: true }), 'trusted: allowed');
+});
+
+test('a real captured 429 notice resolves to the instant it names, prefix and all', () => {
+  // Regression for the shape recovered from the 2026-09-09 probe sessions. The
+  // epoch is the reset time; the surrounding "API Error: Request rejected
+  // (429) · " prefix must not shift or defeat it.
+  const resetAt = new Date('2026-08-03T17:00:00Z');
+  const hit = detectLimit(
+    `API Error: Request rejected (429) · Claude AI usage limit reached|${epochAt(resetAt.toISOString())}`,
+    NOW,
+    MAXW,
+  );
+  assert.ok(hit, 'the real notice must be detected');
+  assert.equal(hit.resumeAt.getTime(), resetAt.getTime(), 'the epoch must resolve to the exact instant');
 });
