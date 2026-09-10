@@ -46,8 +46,14 @@ failed=0
 # vsce renames LICENSE to extension/LICENSE.txt when packaging, so the match
 # has to tolerate an added extension - but anchored, so a stray
 # LICENSE_THIRDPARTY.md could not satisfy the LICENSE requirement by accident.
-for f in LICENSE THIRDPARTY.md; do
-  if printf '%s\n' "$names" | grep -qE "^extension/${f}(\.[A-Za-z]+)?$"; then
+# CHANGELOG.md is here for a different reason than the notices: VS Code renders
+# it in the extension's Changelog tab from inside the installed package, and
+# with no Marketplace listing it is the only in-editor account of what changed.
+for f in LICENSE THIRDPARTY.md CHANGELOG.md; do
+  # Case-insensitive: vsce keeps LICENSE but lowercases CHANGELOG.md and
+  # README.md when it packages them. Still anchored, so a stray
+  # LICENSE_THIRDPARTY.md cannot satisfy the LICENSE requirement.
+  if printf '%s\n' "$names" | grep -qiE "^extension/${f}(\.[A-Za-z]+)?$"; then
     echo "ok: $f ships inside the .vsix"
   else
     echo "::error::$f is missing from the .vsix"

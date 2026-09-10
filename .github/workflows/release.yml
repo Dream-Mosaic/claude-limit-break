@@ -75,6 +75,17 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      # Before anything expensive, and before the tag exists. A version whose
+      # changes were never written down is the way a changelog rots.
+      - name: The version being released needs a changelog section
+        run: |
+          set -euo pipefail
+          if ! grep -qE "^## \[?${VERSION//./\\.}\]?" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section. Move the Unreleased notes under it before releasing."
+            exit 1
+          fi
+          echo "CHANGELOG.md documents $VERSION."
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

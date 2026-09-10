@@ -87,6 +87,11 @@ actually matters — has `main` drifted from the last release — rather than as
 each pull request to guess its own version bump before review has decided
 whether it is a patch or a minor.
 
+Releasing a version requires a matching `## [x.y.z]` section in
+[CHANGELOG.md](CHANGELOG.md) — the release fails without one, so the changelog
+cannot quietly rot. VS Code renders it in the extension's Changelog tab, which for a
+`.vsix` install is the only in-editor account of what changed.
+
 ## Staying up to date
 
 VS Code disables automatic updates for an extension installed from a `.vsix`,
