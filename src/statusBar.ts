@@ -37,6 +37,15 @@ export class CountdownStatusBar {
     if (job.cwd) {
       tooltip.appendMarkdown(`Folder: \`${job.cwd}\`\n\n`);
     }
+    if (job.folderTrusted === false) {
+      // Checked at schedule time, not here: by the time this tooltip is read
+      // the countdown may already be near zero, which is too late to trust
+      // the folder before Claude stalls at its trust prompt (#5).
+      tooltip.appendMarkdown(
+        `**This folder is not trusted for the CLI.** Claude will stop at its trust ` +
+          `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
+      );
+    }
     tooltip.appendMarkdown(`_Click to cancel._`);
     this.item.tooltip = tooltip;
 

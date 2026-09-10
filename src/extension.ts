@@ -10,6 +10,7 @@ import { planResume } from './policy';
 import { randomJitterMs } from './randomDelay';
 import { playAlertSound } from './sound';
 import { buildTerminalOptions, resolveClaudeLauncher, cwdExists } from './resumer';
+import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { execFileSync } from 'node:child_process';
 
 const NS = 'claudeLimitBuster';
@@ -92,10 +93,35 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showWarningMessage(`Claude Limit Buster: ${plan.reason}`);
       return;
     }
-    if (scheduler.schedule(plan.job) && s.notify) {
-      const at = new Date(plan.job.resumeAtMs).toLocaleTimeString();
+    // Checked here, at schedule time, rather than when the cooldown fires:
+    // the user is still at the keyboard for this notice, and can trust the
+    // folder before walking away. By fire time they are already gone, which
+    // is exactly why an untrusted folder stalls silently at Claude's own
+    // trust prompt (#5). Never written back here, only read - answering that
+    // prompt is the user's call, not this extension's.
+    const folderTrusted = plan.job.cwd
+      ? isFolderTrusted(
+          plan.job.cwd,
+          readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
+        )
+      : undefined;
+    const job = { ...plan.job, folderTrusted };
+    if (!scheduler.schedule(job)) {
+      return;
+    }
+    if (folderTrusted === false) {
+      log.warn(
+        `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
+      );
+    }
+    if (s.notify) {
+      const at = new Date(job.resumeAtMs).toLocaleTimeString();
+      const trustNote =
+        folderTrusted === false
+          ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
+          : '';
       void vscode.window.showInformationMessage(
-        `Claude Limit Buster: resuming at ${at} (~${plan.estimate.toLocaleString()} tokens).`,
+        `Claude Limit Buster: resuming at ${at} (~${plan.estimate.toLocaleString()} tokens).${trustNote}`,
       );
     }
   };

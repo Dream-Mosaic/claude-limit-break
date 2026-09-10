@@ -19,6 +19,14 @@ export interface PendingJob {
   baseResumeAtMs: number;
   jitterMs: number;
   reason: 'limit' | 'overload';
+  /**
+   * Whether `cwd` was trusted for CLI use at schedule time (see trust.ts).
+   * Checked once here rather than at fire time, because fire time is when the
+   * user has already walked away - too late to do anything about a stall at
+   * Claude's trust prompt (#5). Undefined for a job with no cwd to check, or
+   * one persisted by a version that predates this field.
+   */
+  folderTrusted?: boolean;
 }
 
 export interface MementoLike {
