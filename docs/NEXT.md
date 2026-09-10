@@ -42,57 +42,101 @@ is worse than stating the limitation. The candidates, for whoever can run one:
 Either way the mechanism has to be measured first: whether a `Memento.update`
 in one window is visible in another at all, and how soon.
 
-## Verification still outstanding
+## Verified
 
-**Does the panel render a CLI-advanced session on reload?** The docs say the
-extension and CLI share conversation history, and a CLI resume of a panel session
-was verified to carry full context. What is *not* verified is whether the panel
-displays that turn after reload.
+**Does the panel render a CLI-advanced session on reload? Yes — on a fresh
+reopen.** Confirmed 2026-09-09 in an Extension Development Host. A panel-created
+session was advanced by an interactive CLI resume; the new turn did not appear in
+the tab that was open at the time, and did appear as soon as that tab was closed
+and reopened from Session history.
 
-A first attempt used `--fork-session` to protect the live transcript, which
-guaranteed failure: forks lack the `bridge-session` entries the panel's session
-list keys on, so the fork was never listed. The valid test needs an **in-place**
-resume of a **panel-created** session:
+The mechanism explains both halves. The extension opens a session by spawning the
+CLI with `--resume=<id>` (visible in `extension.js` of Claude Code 2.1.267), so
+the panel is not a separate store — it reads the same transcript from disk. An
+already-open tab is a live process holding its own state and does not re-read;
+a reopen starts a new `--resume`, which replays the file.
 
-1. Open a new Claude Code tab, send a prompt with a marker word.
-2. Find its transcript (newest `.jsonl` containing `"type":"bridge-session"`).
-3. From a terminal: `claude -p --resume <id> "what was the marker word?"`
-4. Reopen that tab from Session history; check whether the CLI turn appears.
+Two flags in the same argv builder, `--resume-session-at` and
+`--resume-drops-turn`, were not investigated. Their defaults could in principle
+affect what a reopen replays.
 
-If it doesn't render, the design needs a "reload the panel after resume" step.
+**What this means for the design.** The panel and this extension resume through
+the identical code path, so there is nothing panel-specific to replicate. The
+follow-up is a notification after a resume — "this session advanced in a
+terminal; reopen the tab to see it" — not a reload mechanism. There is no
+supported way to push that reload: Claude Code 2.1.267 contributes 26 commands,
+none of which take a session id and none of which refresh a panel. See
+`claude-vscode.reopenClosedSession` for the closest thing, and
+https://github.com/anthropics/claude-code/issues/55959 for the upstream request.
 
-### Outstanding manual verification
+A first attempt at this test used `--fork-session` to protect the live
+transcript, which guaranteed failure: forks lack the `bridge-session` entries the
+panel's session list keys on, so the fork was never listed. The valid test needs
+an **in-place** resume of a **panel-created** session, and a **reopen** rather
+than a look at the tab that is already open.
 
-This needs no release and no `.vsix`. Open the repo in VS Code and press `F5`:
-`.vscode/launch.json` compiles and opens a second window — the Extension
-Development Host — with the extension loaded from `out/`. Nothing is installed;
-closing the window is the cleanup. Run `npm: watch` as a task and reload the
-host window to pick up edits.
+### Manual smoke test — run 2026-09-09
 
-Task 14 (resume policy and extension wiring) is committed, but the extension
-has never been activated in a real Extension Development Host — `npm test`
-cannot exercise `activate()`, and driving a GUI window is outside what an
-automated session can do. Nobody has confirmed it actually runs. The task
-brief's Step 6 is preserved here verbatim so whoever runs it does not have to
-reconstruct it:
+Run in a real Extension Development Host (`F5`; `.vscode/launch.json` compiles
+and opens the second window with the extension loaded from `out/`). Nothing is
+installed; closing the window is the cleanup. All five steps pass. It found four
+bugs, filed as issues.
 
-1. Press `F5`. Confirm the Output panel shows `Claude Limit Buster active.`
-2. Run `Claude Limit Buster: Show Log` from the command palette.
-3. In a terminal in that host window, append a synthetic limit line to a real
-   transcript and confirm a notification and a status-bar countdown appear:
-   ```bash
-   ID=$(basename "$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" .jsonl)
-   printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"cwd":"'"$PWD"'","message":{"content":"Claude AI usage limit reached. Try again in 5 minutes"}}' \
-     >> ~/.claude/projects/*/"$ID".jsonl
-   ```
-4. Run `Claude Limit Buster: Resume Now`. A **new** terminal must open,
-   running `claude`, with no text typed into any existing terminal.
-5. **This is the same "Does the panel render a CLI-advanced session on
-   reload?" question above.** If the session in step 3 was created in the
-   Claude Code panel, reopen it from Session history and check whether the
-   resumed turn is rendered. Record the answer in the section above. If it
-   does not render, this task gains a follow-up: prompt the user to reload
-   the panel after a resume.
+| Step | Result |
+|---|---|
+| 1. Output shows `Claude Limit Buster active.` | Pass. Watcher started on 177 transcripts |
+| 2. `Claude Limit Buster: Show Log` | Pass |
+| 3. Synthetic limit line → notification + countdown | Pass. Correct session, folder and reason in the tooltip |
+| 4. `Resume Now` opens a **new** terminal running `claude` | Pass. Nothing typed into any existing terminal |
+| 5. Panel renders the CLI-advanced turn | Pass **on reopen** — see "Verified" above |
+
+Found while running it:
+
+- [#2] the watcher root is the whole `~/.claude/projects` tree, not the workspace.
+- [#3] clicking the status bar cancels the pending resume with no confirmation.
+- [#4] a resume into a missing `cwd` fails silently, logs success, and loses the
+  job. The log is unambiguous — `Pending resume cancelled.` at 01:54:38.393,
+  `Resumed <id> in a new terminal.` at 01:54:38.431, for a terminal that never
+  launched.
+- [#5] an untrusted folder stops `claude` at its trust prompt, so an unattended
+  resume stalls. On this machine 14 of 20 tracked projects were untrusted,
+  including this repo — panel-created sessions do not appear to set the flag,
+  and those are exactly the sessions this extension resumes.
+
+To re-run step 3, append a synthetic limit line to a transcript. Use a
+**panel-created** session other than the one you are working in, and take the
+`cwd` from the file rather than typing it — a Windows path typed through a shell
+loses its backslashes, and `	` becomes a tab:
+
+```powershell
+$t = Get-ChildItem "$env:USERPROFILE\.claude\projects\*\*.jsonl" |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 20 |
+  Where-Object { Select-String -Path $_.FullName -Pattern '"type":"bridge-session"' -Quiet } |
+  Select-Object -First 1
+$cwd = (Get-Content $t.FullName | ForEach-Object { try { (ConvertFrom-Json $_).cwd } catch {} } |
+        Where-Object { $_ } | Select-Object -First 1)
+$line = @{ type='assistant'; isApiErrorMessage=$true; cwd=$cwd
+           message=@{ content='Claude AI usage limit reached. Try again in 5 minutes' } } |
+        ConvertTo-Json -Compress -Depth 5
+[System.IO.File]::AppendAllText($t.FullName, $line + "`n")
+```
+
+```bash
+# bash equivalent
+f=$(ls -t ~/.claude/projects/*/*.jsonl | head -20 | xargs grep -l '"type":"bridge-session"' | head -1)
+node -e 'const fs=require("fs"),f=process.argv[1];
+  const cwd=fs.readFileSync(f,"utf8").split("
+").filter(Boolean)
+    .map(l=>{try{return JSON.parse(l).cwd}catch{}}).find(Boolean);
+  fs.appendFileSync(f,JSON.stringify({type:"assistant",isApiErrorMessage:true,cwd,
+    message:{content:"Claude AI usage limit reached. Try again in 5 minutes"}})+"
+")' "$f"
+```
+
+[#2]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/2
+[#3]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/3
+[#4]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/4
+[#5]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/5
 
 ## Spike results worth not re-deriving
 
@@ -135,9 +179,10 @@ the third under the design conversation's project directory.
 
 All 15 tasks in [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md)
 are implemented: TypeScript reconstruction, the three parser fixes with their
-corpus cases now standing as regression tests, `sessionResolver` / `budget` / `resumer`, and CI.
+corpus cases now standing as regression tests, `sessionResolver` / `budget` /
+`resumer`, and CI. The manual smoke test above has now been run and passes, so
+nothing blocks a release.
 
-The one item left open is the manual smoke test under "Outstanding manual
-verification" above — nobody has pressed `F5` in a real Extension Development
-Host, so step 5 of that test, which is also the panel-rendering question this
-document opens with, still has no answer.
+What is open is [#2] through [#5], all found by that test. [#4] and [#5] are the
+two that matter before anyone relies on an unattended resume: today a resume can
+fail while the log reports success.
