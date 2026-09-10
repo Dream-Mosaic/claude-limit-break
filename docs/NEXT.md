@@ -63,6 +63,12 @@ If it doesn't render, the design needs a "reload the panel after resume" step.
 
 ### Outstanding manual verification
 
+This needs no release and no `.vsix`. Open the repo in VS Code and press `F5`:
+`.vscode/launch.json` compiles and opens a second window — the Extension
+Development Host — with the extension loaded from `out/`. Nothing is installed;
+closing the window is the cleanup. Run `npm: watch` as a task and reload the
+host window to pick up edits.
+
 Task 14 (resume policy and extension wiring) is committed, but the extension
 has never been activated in a real Extension Development Host — `npm test`
 cannot exercise `activate()`, and driving a GUI window is outside what an

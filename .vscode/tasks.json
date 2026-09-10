@@ -1,0 +1,23 @@
+{
+  // `npm: compile` is what launch.json runs before opening the Extension
+  // Development Host. `npm: watch` is the one to start by hand while working:
+  // it recompiles on save, so reloading the host window picks up the change.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "compile",
+      "group": "build",
+      "problemMatcher": "$tsc",
+      "presentation": { "reveal": "silent" }
+    },
+    {
+      "type": "npm",
+      "script": "watch",
+      "isBackground": true,
+      "group": "build",
+      "problemMatcher": "$tsc-watch",
+      "presentation": { "reveal": "never" }
+    }
+  ]
+}
