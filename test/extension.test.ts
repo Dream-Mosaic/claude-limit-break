@@ -75,8 +75,26 @@ class FakeWatcher {
 /** Records chimes instead of spawning a media player. */
 const sounds: { file?: string }[] = [];
 
+/**
+ * Which folders count as trusted for the CLI, for the duration of one test.
+ * 'all' is the default so that every existing test - none of which exercises
+ * trust - sees the same behaviour it always has. A test that cares sets this
+ * to a Set (only members are trusted) and restores 'all' in its `finally`.
+ *
+ * A stub, not the real module, for the same reason ./sound and
+ * ./transcriptWatcher are stubbed: extension.ts would otherwise read the
+ * *real* ~/.claude.json through the real fs.readFileSync it composes with
+ * these functions, which must never happen from a test.
+ */
+let trustedCwds: Set<string> | 'all' = 'all';
+
 stubModule('./transcriptWatcher', { TranscriptWatcher: FakeWatcher });
 stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.push(o) });
+stubModule('./trust', {
+  isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
+  readClaudeUserConfig: () => undefined,
+  defaultClaudeConfigPath: () => '/fake/.claude.json',
+});
 
 // Required, not imported: the stubs above must be registered first, and a
 // compiled `import` would hoist its require() above them.
@@ -363,6 +381,74 @@ test('a stale offer cannot resume a session the command already resumed', async 
       'the stale click must say why nothing happened rather than doing nothing',
     );
   } finally {
+    teardown(ctx);
+  }
+});
+
+test('an untrusted folder is called out while the countdown is still running, not at fire time', () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  trustedCwds = new Set(); // nothing is trusted
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    // A deadline well in the future: this is the schedule-time notice, fired
+    // the moment the limit is detected, long before any cooldown elapses -
+    // the user is still here to trust the folder, unlike at fire time (#5).
+    watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
+
+    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+    assert.ok(notice, `expected a schedule notice; saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.match(
+      notice.message,
+      /not trusted/i,
+      `the schedule notice must call out the untrusted folder; got "${notice.message}"`,
+    );
+
+    // The countdown pill's tooltip carries the same warning for as long as it
+    // is ticking, not just in the one-shot notification.
+    const bar = vscodeFake.statusBarItems[0];
+    const tooltip = bar?.tooltip as { value: string } | undefined;
+    assert.match(
+      tooltip?.value ?? '',
+      /not trusted/i,
+      `expected the status bar tooltip to warn too; got ${JSON.stringify(tooltip?.value)}`,
+    );
+
+    assert.ok(
+      vscodeFake.outputLines.some((l) => /not trusted/i.test(l)),
+      'the untrusted folder must also reach the log, for when notify is off',
+    );
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('a trusted folder gets the ordinary schedule notice, with no trust warning anywhere', () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  trustedCwds = new Set(['/projects/example']);
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
+
+    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+    assert.ok(notice, `expected a schedule notice; saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.doesNotMatch(notice.message, /not trusted/i);
+
+    const bar = vscodeFake.statusBarItems[0];
+    const tooltip = bar?.tooltip as { value: string } | undefined;
+    assert.doesNotMatch(tooltip?.value ?? '', /not trusted/i);
+  } finally {
+    trustedCwds = 'all';
     teardown(ctx);
   }
 });
