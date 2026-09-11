@@ -27,6 +27,11 @@ test('detects every documented limit format', () => {
     // the docs; this is what Claude Code really writes, with a status prefix and
     // a middot ahead of the notice the parser is looking for.
     [`API Error: Request rejected (429) · Claude AI usage limit reached|${epochAt('2026-08-03T17:00:00Z')}`, 'real-429-prefixed'],
+    // Also captured verbatim, 2026-09-10 and 2026-09-11, from this project's own
+    // sessions hitting genuine limits. Note the middot separator, where the form
+    // taken from the docs above uses a hyphen, and the bare hour with no minutes.
+    ["You've hit your session limit · resets 12:40am (America/Chicago)", 'real-clock+tz-middot'],
+    ["You've hit your session limit · resets 2am (America/Chicago)", 'real-bare-hour'],
   ];
   for (const [text, tag] of positives) {
     assert.ok(detectLimit(text, NOW, MAXW), `${tag}: ${text}`);
@@ -110,4 +115,21 @@ test('a real captured 429 notice resolves to the instant it names, prefix and al
   );
   assert.ok(hit, 'the real notice must be detected');
   assert.equal(hit.resumeAt.getTime(), resetAt.getTime(), 'the epoch must resolve to the exact instant');
+});
+
+test('the real session-limit notices this project captured resolve to the right instant', () => {
+  // Two genuine notices, copied out of transcripts rather than written from the
+  // docs. Between them they cover the two ways the observed wording differs from
+  // the documented form: a middot rather than a hyphen before "resets", and an
+  // hour with no minutes. NOW is 2026-08-03T12:00:00Z, so both resolve to the
+  // next occurrence of that clock time in Chicago, which is on CDT (UTC-5).
+  const cases: [string, string][] = [
+    ["You've hit your session limit · resets 12:40am (America/Chicago)", '2026-08-04T05:40:00.000Z'],
+    ["You've hit your session limit · resets 2am (America/Chicago)", '2026-08-04T07:00:00.000Z'],
+  ];
+  for (const [text, expected] of cases) {
+    const hit = detectLimit(text, NOW, MAXW);
+    assert.ok(hit, `not detected: ${text}`);
+    assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for: ${text}`);
+  }
 });
