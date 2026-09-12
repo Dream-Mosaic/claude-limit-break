@@ -38,6 +38,33 @@ test('detects every documented limit format', () => {
   }
 });
 
+test('a bullet glued to the reset time still parses', () => {
+  // Claude-Autopilot's issue #25 was a live break: the CLI started writing
+  // "5-hour limit reached ∙ resets 1am" and their regex, which had the
+  // separator baked in, stopped matching. Their PR #26 then had to handle
+  // three different bullet codepoints.
+  //
+  // This parser never had that exposure, but NOT because of the bullet class in
+  // `normalize` - the patterns simply do not care what sits between the hint and
+  // the time. `5-hour limit reached BANANA resets 1am` parses. Which means the
+  // obvious regression test - the notice with a bullet where the separator goes -
+  // proves nothing: it passes with bullet normalisation deleted. Removing that
+  // line leaves the whole suite green, so nothing here pinned it.
+  //
+  // The one shape that genuinely depends on it is a bullet with no spaces
+  // between `resets` and the time, which reaches the time matcher as a single
+  // token. That is what this test pins. It fails if the bullet class in
+  // `normalize` is removed; the cases above do not.
+  const glued = '5-hour limit reached resets∙1am';
+  assert.ok(detectLimit(glued, NOW, MAXW), 'bullet glued to the time must normalise away');
+
+  // All five separators Claude Code has been seen to use, plus the ASCII form.
+  for (const sep of ['∙', '·', '•', '‧', '●', '-']) {
+    const text = `5-hour limit reached ${sep} resets 1am`;
+    assert.ok(detectLimit(text, NOW, MAXW), `separator ${JSON.stringify(sep)}: ${text}`);
+  }
+});
+
 test('ignores prose and source code that merely discuss limits', () => {
   const negatives: [string, string][] = [
     ['function isLimit() { return /limit reached/.test(s); }', 'source'],
