@@ -171,3 +171,54 @@ test('a cwd that is gone is reported, not thrown - resume() decides what to do a
 test('no cwd at all is fine: VS Code applies its own default, same as always', () => {
   assert.equal(cwdExists(undefined, () => false), true);
 });
+
+// --- Environment (#9) ------------------------------------------------------
+//
+// VS Code starts the resume terminal from the window's environment. When that
+// window was itself opened from inside a Claude session - `code .` typed into
+// one - it carries the variables that session sets for its own children, and
+// the resumed `claude` would start out believing it is that other session's
+// child. These names were read off a shell spawned by a live session.
+
+test('the resume terminal clears the identity of any Claude session it was launched from', () => {
+  const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
+  for (const name of [
+    'CLAUDECODE',
+    'CLAUDE_CODE_SESSION_ID',
+    'CLAUDE_CODE_CHILD_SESSION',
+    'CLAUDE_CODE_ENTRYPOINT',
+    'CLAUDE_CODE_EXECPATH',
+    'CLAUDE_CODE_MESSAGING_SOCKET',
+    'CLAUDE_CODE_MESSAGING_TOKEN',
+    'CLAUDE_CODE_SESSION_ATTENDED',
+    'CLAUDE_PID',
+  ]) {
+    assert.ok(name in opts.env, `${name} must be named in the terminal env`);
+    assert.equal(opts.env[name], null, `${name} must be removed (null), not set to a value`);
+  }
+});
+
+test("a user's own Claude configuration is left alone", () => {
+  // Settings a person exports on purpose, and the port the Claude Code
+  // extension deliberately injects into integrated terminals for IDE
+  // integration. Clearing any of these would change what the resume does.
+  const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
+  for (const name of [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'CLAUDE_CONFIG_DIR',
+    'CLAUDE_CODE_SSE_PORT',
+  ]) {
+    assert.ok(!(name in opts.env), `${name} must not be touched`);
+  }
+});
+
+test('the resume terminal is transient, so a window reload does not launch the resume again', () => {
+  // The API documents isTransient as opting a terminal out of the default
+  // persistence on restart and reload (when enablePersistentSessions is on).
+  // A resume is a one-off launch, not a terminal the window should keep.
+  const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
+  assert.equal(opts.isTransient, true);
+});

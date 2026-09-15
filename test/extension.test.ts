@@ -736,3 +736,39 @@ test('resumeNow on one counting-down session leaves the other one counting down'
     teardown(ctx);
   }
 });
+
+test('Resume Now from the palette into a deleted folder keeps a job that was waiting to be started by hand', async () => {
+  // The fourth resume() call site. The other three - autoResume, the offer
+  // button, and a job still counting down - already keep their job when the
+  // launch fails. This one takes the job from the ready list, and nothing
+  // pinned that it only lets go once a terminal has actually launched.
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.ok(offers()[0], 'the job must be waiting to be started by hand');
+
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
+    assert.equal(vscodeFake.errors.length, 1);
+
+    resumeNow();
+    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+      0,
+      'a failed launch from the palette must not have discarded the ready job',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});

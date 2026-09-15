@@ -14,7 +14,38 @@ export interface TerminalOptionsLike {
   shellPath: string;
   shellArgs: string[];
   isTransient: boolean;
+  /** Merged over the window's environment by VS Code; null removes a variable. */
+  env: Record<string, string | null>;
 }
+
+/**
+ * Variables a running Claude Code session sets for the processes it starts,
+ * read off a shell spawned by one. They describe that session - its id, its
+ * messaging socket and token, that it is the parent of whatever runs next.
+ *
+ * VS Code starts the resume terminal from the window's environment, and a
+ * window opened from inside a Claude session (`code .` typed into one) carries
+ * all of them. The resumed `claude` is a different process resuming a
+ * different session, so it must not start out as that session's child (#9).
+ *
+ * Deliberately a named list rather than a prefix. People export CLAUDE_CODE_*
+ * settings on purpose - CLAUDE_CODE_USE_BEDROCK, for one - and the Claude Code
+ * extension injects CLAUDE_CODE_SSE_PORT into integrated terminals so the CLI
+ * can find the editor. Clearing those would change what the resume does.
+ */
+export const PARENT_SESSION_VARIABLES = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_PID',
+  'CLAUDE_AGENT_SDK_VERSION',
+  'AI_AGENT',
+] as const;
 
 /**
  * Arguments for an interactive resume.
@@ -81,6 +112,7 @@ export function buildTerminalOptions(
     shellPath: launcher.file,
     shellArgs: [...launcher.args, ...buildResumeArgs(session.sessionId, prompt)],
     isTransient: true,
+    env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
   };
 }
 

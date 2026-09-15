@@ -82,3 +82,18 @@ test('readClaudeUserConfig returns undefined on invalid JSON rather than throwin
 test('defaultClaudeConfigPath points at .claude.json under the home directory', () => {
   assert.equal(defaultClaudeConfigPath(), path.join(os.homedir(), '.claude.json'));
 });
+
+test('only an explicit true counts as trusted, never a merely truthy value', () => {
+  // ~/.claude.json is parsed and cast, not validated, so the value is whatever
+  // is in the file. Reading "yes" or 1 as trusted would tell the user a folder
+  // is fine when Claude itself will still stop at its trust prompt.
+  const { isFolderTrusted: trusted } = require('../src/trust') as typeof import('../src/trust');
+  for (const value of ['yes', 'true', 1]) {
+    const config = { projects: { '/p': { hasTrustDialogAccepted: value } } };
+    assert.equal(
+      trusted('/p', config as unknown as Parameters<typeof trusted>[1]),
+      false,
+      `hasTrustDialogAccepted: ${JSON.stringify(value)} must not count as trusted`,
+    );
+  }
+});
