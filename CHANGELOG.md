@@ -9,9 +9,8 @@ project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing has been released yet. `v0.1.0` is tagged to reserve the version, not to
-mark a release — the extension has not yet been run in a real Extension
-Development Host. Everything below ships in the first published version.
+The first published version. `v0.1.0` was tagged to reserve the version, not to
+mark a release.
 
 ### Added
 
@@ -25,10 +24,26 @@ Development Host. Everything below ships in the first published version.
 - Estimates the token cost of a resume before scheduling it and refuses when it
   exceeds `claudeLimitBuster.maxResumeTokens`. A limit wait guarantees a cold
   cache, so a resume reprocesses the whole session.
+- Keeps a separate countdown for every session that hits a limit. The limit
+  belongs to the account, so the sessions working when it lands hit it
+  together, and each of them is resumed.
 - Counts down against wall-clock on a one-second tick, so a cooldown survives
   sleep and a window reload, and pads the deadline with random jitter.
-- Status-bar countdown, an optional chime when a turn in this workspace ends,
-  and `Resume Now` / `Cancel Pending Resume` / `Show Log` commands.
+- Warns when a folder is not trusted by the Claude CLI at the moment the resume
+  is scheduled - in the notification, the status-bar tooltip and the log -
+  while you are still there to trust it. Otherwise Claude stops at its trust
+  prompt with nobody to answer it.
+- Refuses a resume into a folder that no longer exists, naming the folder and
+  the transcript, and keeps the job so it can be retried.
+- Reports a resume that has written nothing to its transcript a minute after
+  launching, rather than leaving it logged as a success.
+- Clears the identity of any Claude session the VS Code window was started from
+  - its session id, messaging socket and token - from the resume terminal, so
+  the resumed `claude` does not start out as that session's child. Settings you
+  export yourself, such as `CLAUDE_CODE_USE_BEDROCK`, are left alone.
+- Status-bar countdown, which says how many sessions are waiting when there is
+  more than one, an optional chime when a turn in this workspace ends, and
+  `Resume Now` / `Cancel Pending Resume` / `Show Log` commands.
 - Settings under `claudeLimitBuster.*`. Everything that influences what gets
   executed is machine-scoped, so a workspace cannot set it.
 
@@ -41,9 +56,20 @@ Development Host. Everything below ships in the first published version.
 
 - Two VS Code windows each run their own watcher and scheduler, so one limit can
   start two concurrent resumes of the same session. See `docs/NEXT.md`.
+- Resuming a session that is still open in a Claude Code panel leaves two live
+  processes on it. Reopen the panel tab before typing into it: an open tab does
+  not show the resumed turn, and a process writing on a stale view of the
+  conversation can fork the transcript ([#6]).
+- With `autoResume` off, a job waiting for `Resume Now` does not survive a window
+  reload ([#11]).
+- A reset time given with no timezone can resolve an hour off on the night of a
+  daylight-saving change ([#10]).
 - Headless resume is declared in settings but not routed; it currently falls
   through to the interactive path and says so in the log.
 - Nothing notifies you that a newer version exists ([#1]). VS Code disables
   auto-update for a `.vsix` install and its update check only queries a gallery.
 
 [#1]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/1
+[#6]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/6
+[#10]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/10
+[#11]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/11

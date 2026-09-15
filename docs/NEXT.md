@@ -1,6 +1,6 @@
 # Next steps
 
-State as of the initial commits. Read
+State as of 2026-09-15, after the pre-release audit. Read
 [design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
 
 ## Settled
@@ -9,9 +9,9 @@ State as of the initial commits. Read
 - **Attribution:** root `LICENSE` for this project, `THIRDPARTY.md` for
   upstream's verbatim notice. No per-file headers.
 - **Packaging gate:** both files must ship inside the `.vsix`, not merely in
-  the repo — keep them out of `.vscodeignore` and assert it in CI with
-  `unzip -l *.vsix | grep -E "LICENSE|THIRDPARTY"`. This is the one
-  attribution detail that can silently break at release time.
+  the repo — keep them out of `.vscodeignore`. `scripts/check-vsix.sh` asserts
+  it in CI, along with `CHANGELOG.md` shipping and `.superpowers` not. This is
+  the one attribution detail that can silently break at release time.
 - **Public repo, no Marketplace listing**, `.vsix` attached to releases.
 
 ## Known limitations
@@ -153,7 +153,7 @@ env $UNSET claude -p --resume <id> "prompt" --output-format json
 |---|---|
 | Session ID discoverable? | **Yes** — transcript filename *is* the `sessionId` |
 | Headless resume carries context? | **Yes** — verified across a panel-created session |
-| Does resume fork? | **No** — same ID, appends to the same `.jsonl` |
+| Does a sequential resume fork? | **No** — same ID, appends to the same `.jsonl`. Two *live* processes can: see [#6] |
 | Does headless inherit permission mode? | **No** — an `acceptEdits` session resumed with `-p` was denied `Write` |
 | Does `--permission-mode acceptEdits` work? | **Yes** |
 | Does interactive terminal resume do tool work? | **Yes** — at the user's normal autonomy, no flag needed |
@@ -177,12 +177,29 @@ the third under the design conversation's project directory.
 
 ## Then
 
-All 15 tasks in [the implementation plan](superpowers/plans/2026-09-02-claude-limit-buster.md)
-are implemented: TypeScript reconstruction, the three parser fixes with their
-corpus cases now standing as regression tests, `sessionResolver` / `budget` /
-`resumer`, and CI. The manual smoke test above has now been run and passes, so
-nothing blocks a release.
+The implementation plan is done, the smoke test passes, and a pre-release audit
+(2026-09-13) has been worked through. Fixed as a result: [#4] (a resume into a
+missing folder), [#5] (the trust prompt), [#9] (an inherited session identity),
+and a scheduler that held one pending resume for the whole machine, so that
+when several sessions hit the account's limit together only one was resumed.
 
-What is open is [#2] through [#5], all found by that test. [#4] and [#5] are the
-two that matter before anyone relies on an unattended resume: today a resume can
-fail while the log reports success.
+Open, roughly in priority order:
+
+- [#6] a resume while the session is still live in a panel. The issue describes
+  the one experiment that settles it; it needs someone at the keyboard. It
+  gates [#7], whose branch also needs a rebase before merging.
+- [#8] four small findings from reviewing the #4 and #5 fixes.
+- [#11] a job waiting for Resume Now is lost on reload.
+- [#10] a reset time with no zone resolves an hour off across a DST change.
+- [#12] test gaps found by mutation testing, mostly in the limit parser.
+- [#2], [#3], [#13], [#1].
+
+[#6]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/6
+[#7]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/7
+[#8]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/8
+[#9]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/9
+[#10]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/10
+[#11]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/11
+[#12]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/12
+[#13]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/13
+[#1]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/1
