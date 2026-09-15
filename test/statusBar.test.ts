@@ -61,3 +61,27 @@ test('the tooltip says nothing about trust when trust is unknown', () => {
     bar.dispose();
   }
 });
+
+test('the pill says how many sessions are waiting when there is more than one', () => {
+  // Without this, a second session's resume is invisible: the pill shows the
+  // soonest one only, which reads exactly like the other one was dropped.
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  try {
+    bar.update(job(), 2);
+    assert.match(vscodeFake.statusBarItems[0]?.text ?? '', /2 sessions/);
+  } finally {
+    bar.dispose();
+  }
+});
+
+test('the pill does not mention a count for a single session', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  try {
+    bar.update(job(), 1);
+    assert.doesNotMatch(vscodeFake.statusBarItems[0]?.text ?? '', /sessions/);
+  } finally {
+    bar.dispose();
+  }
+});

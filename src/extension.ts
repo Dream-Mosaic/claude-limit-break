@@ -270,7 +270,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       playAlertSound({ file: s.alertSoundFile });
     }),
-    scheduler.onChange((job) => status.update(job)),
+    scheduler.onChange((job) => status.update(job, scheduler.jobs.length)),
     scheduler.onFire((job) => {
       const s = settings();
       if (!s.autoResume) {
@@ -332,8 +332,10 @@ export function activate(context: vscode.ExtensionContext): void {
       // left a failed resume with no path back to the job.
       const counting = scheduler.current;
       if (counting) {
+        // Only this session's job: others may still be counting down, and
+        // "Resume Now" moves exactly one.
         if (resume(counting)) {
-          scheduler.cancel();
+          scheduler.cancel(counting.sessionId);
         }
         return;
       }

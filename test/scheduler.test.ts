@@ -31,31 +31,36 @@ const job = (resumeAtMs: number): PendingJob => ({
   reason: 'limit',
 });
 
-test('scheduling stores the job', () => {
+test('scheduling stores the job', (t) => {
   const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
   assert.equal(s.schedule(job(Date.now() + 60_000)), true);
   assert.equal(s.current?.sessionId, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234');
 });
 
-test('a later deadline never replaces an earlier one still counting down', () => {
+test('a later deadline never replaces an earlier one still counting down', (t) => {
   const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
   const early = Date.now() + 60_000;
   s.schedule(job(early));
   assert.equal(s.schedule(job(Date.now() + 600_000)), false);
   assert.equal(s.current?.resumeAtMs, early);
 });
 
-test('an earlier deadline does replace a later one', () => {
+test('an earlier deadline does replace a later one', (t) => {
   const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
   s.schedule(job(Date.now() + 600_000));
   const sooner = Date.now() + 60_000;
   assert.equal(s.schedule(job(sooner)), true);
   assert.equal(s.current?.resumeAtMs, sooner);
 });
 
-test('a pending job survives reconstruction from the memento', () => {
+test('a pending job survives reconstruction from the memento', (t) => {
   const m = memento();
-  new ResumeScheduler(m, silent).schedule(job(Date.now() + 60_000));
+  const first = new ResumeScheduler(m, silent);
+  t.after(() => first.dispose());
+  first.schedule(job(Date.now() + 60_000));
   assert.equal(new ResumeScheduler(m, silent).current?.prompt, 'continue');
 });
 
@@ -119,4 +124,95 @@ test('a reversed window is treated as a window, not an error', () => {
     observedMax > lo,
     `every one of 500 draws was the lower bound (${observedMax}); the band is not being used`,
   );
+});
+
+// --- More than one session -------------------------------------------------
+//
+// A usage limit belongs to the account, not to a session, so every session that
+// is working when it lands hits it at once. On the machine this was written on,
+// 16 of 61 real limit episodes had two or three sessions reporting the same
+// reset within minutes. One slot for all of them resumed only one.
+
+const SESSION_A = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
+
+const jobFor = (sessionId: string, resumeAtMs: number): PendingJob => ({
+  ...job(resumeAtMs),
+  sessionId,
+  transcript: `/h/p/${sessionId}.jsonl`,
+});
+
+test('a second session is scheduled alongside the first, not instead of it', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const now = Date.now();
+  assert.equal(s.schedule(jobFor(SESSION_A, now + 60_000)), true);
+  assert.equal(s.schedule(jobFor(SESSION_B, now + 30_000)), true);
+  assert.deepEqual(
+    s.jobs.map((j) => j.sessionId),
+    [SESSION_B, SESSION_A],
+    'both sessions must be pending, soonest first',
+  );
+  assert.equal(s.current?.sessionId, SESSION_B, 'current is the soonest job');
+});
+
+test('another session with a later deadline is kept, not ignored', (t) => {
+  // The dedupe rule - a later deadline never replaces an earlier one - exists
+  // so repeated notices for ONE cooldown cannot push that resume out. Applied
+  // across sessions it silently discards a different session's resume.
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const now = Date.now();
+  s.schedule(jobFor(SESSION_A, now + 60_000));
+  assert.equal(s.schedule(jobFor(SESSION_B, now + 600_000)), true);
+  assert.equal(s.jobs.length, 2);
+});
+
+test('every due job fires once, whichever session it belongs to', async (t) => {
+  const past = Date.now() - 1000;
+  const s = new ResumeScheduler(
+    memento({ 'claudeLimitBuster.pending': [jobFor(SESSION_A, past), jobFor(SESSION_B, past)] }),
+    silent,
+  );
+  t.after(() => s.dispose());
+  const fired: string[] = [];
+  s.onFire((j) => fired.push(j.sessionId));
+  s.start();
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.deepEqual([...fired].sort(), [SESSION_A, SESSION_B].sort());
+  assert.deepEqual(s.jobs, [], 'nothing is left pending once both have fired');
+});
+
+test('several pending jobs survive reconstruction from the memento', (t) => {
+  const m = memento();
+  const first = new ResumeScheduler(m, silent);
+  t.after(() => first.dispose());
+  const now = Date.now();
+  first.schedule(jobFor(SESSION_A, now + 60_000));
+  first.schedule(jobFor(SESSION_B, now + 120_000));
+  assert.deepEqual(
+    new ResumeScheduler(m, silent).jobs.map((j) => j.sessionId),
+    [SESSION_A, SESSION_B],
+  );
+});
+
+test('cancelling one session leaves the others counting down', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const now = Date.now();
+  s.schedule(jobFor(SESSION_A, now + 60_000));
+  s.schedule(jobFor(SESSION_B, now + 120_000));
+  s.cancel(SESSION_A);
+  assert.deepEqual(s.jobs.map((j) => j.sessionId), [SESSION_B]);
+});
+
+test('cancel with no session named clears every pending job', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const now = Date.now();
+  s.schedule(jobFor(SESSION_A, now + 60_000));
+  s.schedule(jobFor(SESSION_B, now + 120_000));
+  s.cancel();
+  assert.deepEqual(s.jobs, []);
+  assert.equal(s.current, undefined);
 });

@@ -15,18 +15,27 @@ export class CountdownStatusBar {
     this.item.name = 'Claude Limit Buster';
   }
 
-  update(job: PendingJob | undefined): void {
+  /**
+   * `waiting` is how many sessions have a resume pending. The pill shows the
+   * soonest; without the count, a second session's resume would be invisible,
+   * which reads exactly like it had been dropped.
+   */
+  update(job: PendingJob | undefined, waiting = 1): void {
     if (!job) {
       this.item.hide();
       return;
     }
     const remaining = job.resumeAtMs - Date.now();
     const at = new Date(job.resumeAtMs);
-    this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}`;
+    const others = waiting > 1 ? ` (${waiting} sessions)` : '';
+    this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
 
     const tooltip = new vscode.MarkdownString(undefined, true);
     tooltip.appendMarkdown(`**Claude Limit Buster**\n\n`);
     tooltip.appendMarkdown(`Resuming at **${at.toLocaleString()}**\n\n`);
+    if (waiting > 1) {
+      tooltip.appendMarkdown(`**${waiting} sessions** are waiting to resume; this one is due first.\n\n`);
+    }
     if (job.jitterMs > 0) {
       tooltip.appendMarkdown(
         `Padded by a random **${formatDuration(job.jitterMs)}** past the reset time\n\n`,
@@ -46,7 +55,7 @@ export class CountdownStatusBar {
           `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
       );
     }
-    tooltip.appendMarkdown(`_Click to cancel._`);
+    tooltip.appendMarkdown(waiting > 1 ? `_Click to cancel all of them._` : `_Click to cancel._`);
     this.item.tooltip = tooltip;
 
     // Nudge the colour as the deadline approaches so it reads at a glance.

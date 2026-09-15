@@ -676,3 +676,63 @@ test('a resume whose transcript grows is confirmed, and warns about nothing', as
     teardown(ctx);
   }
 });
+
+test('two sessions that hit the same limit are both resumed', async () => {
+  // The usage limit is account-wide, so this is the ordinary case, not an edge
+  // one: every session working when it lands reports it within seconds.
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    const reset = new Date(Date.now() - 1000);
+    watcher.limitFor(SESSION, reset);
+    watcher.limitFor(SESSION_B, reset);
+    await oneTick();
+
+    const resumed = vscodeFake.terminals.map(
+      (t) => (t.options as { shellArgs: string[] }).shellArgs[1],
+    );
+    assert.deepEqual(
+      [...resumed].sort(),
+      [SESSION, SESSION_B].sort(),
+      `both sessions must be resumed; got ${JSON.stringify(resumed)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resumeNow on one counting-down session leaves the other one counting down', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
+    watcher.limitFor(SESSION_B, new Date(Date.now() + 300_000));
+
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow, 'resumeNow must be registered');
+
+    resumeNow();
+    assert.deepEqual(argsOf(0), ['--resume', SESSION_B, PROMPT], 'the soonest session goes first');
+
+    resumeNow();
+    assert.equal(vscodeFake.terminals.length, 2, 'the other session must still have been counting down');
+    assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
+  } finally {
+    teardown(ctx);
+  }
+});
