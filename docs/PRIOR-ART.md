@@ -193,11 +193,14 @@ show plausible stale numbers rather than an error.
 
 ## Where nobody has an answer
 
-**The fork.** *(Corrected twice. See [Second audit](#second-audit-2026-09-13).)*
+**The fork.** *(Corrected twice, then settled by experiment on 2026-09-20. See
+[Second audit](#second-audit-2026-09-13).)*
 
 The first draft recorded "resuming a live session forks the transcript" as
 established. The re-derivation of 2026-09-11 then declared that claim collapsed.
-Both overstated, in opposite directions. What is derived:
+Both overstated, in opposite directions. Point 4 below is no longer an open
+question; the rest of this section stands as the record of how long it took to
+stop arguing about it and run the test. What is derived:
 
 1. **A second live process writing on a stale parent forks the transcript.** In
    the probe session behind issue #6, two user turns share one `parentUuid`. The
@@ -218,9 +221,16 @@ Both overstated, in opposite directions. What is derived:
    explanation — `--resume` following a stale `last-prompt` record — was tested
    and ruled out; the trigger is unknown.
 
-What is not measured is the case this extension produces: an external resume
-appends a turn, then the user types into a panel tab still open on its
-pre-resume state. Issue #6 describes the one experiment that settles it.
+4. **The case this extension produces forks, and the resumed turn is the one
+   that is lost.** *(Derived 2026-09-20 — the experiment issue #6 asked for was
+   run.)* An external resume appended a turn; the panel tab, still open on its
+   pre-resume state, anchored the user's next message to the node from before the
+   resume. The panel's branch is the one a later resume and a reopened tab both
+   follow, so the resumed turn is left on disk and unreachable. Neither model
+   reports anything wrong: the panel's context lacks the resumed turn, and the
+   resumed process's context lacks the panel's. Reopening the tab resyncs it.
+   Full write-up in
+   [research/2026-09-20-panel-fork-experiment.md](research/2026-09-20-panel-fork-experiment.md).
 
 Neither prior-art project guards against resuming a live session.
 Claude-Autopilot cannot hit the situation, because it never issues a second
@@ -352,8 +362,9 @@ more place. Neither looked like a guess when it was written.
 
 ## What is still unverified
 
-- **Whether an external resume forks a session still open in a panel tab.**
-  Issue #6 describes the experiment.
+- **Whether `claude agents --json` can be trusted to say a panel tab is live** —
+  whether a row survives a closed tab and how long a dead one lingers. Only
+  matters for a tab in another VS Code window, where the tab API cannot reach it.
 - **What triggers the systemic panel forks.** Seven cases, clustered in time; the
   one hypothesis tested was ruled out.
 - **Issue #7's integration findings for the real Claude Code panel.** Both were

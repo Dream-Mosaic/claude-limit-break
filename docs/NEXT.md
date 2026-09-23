@@ -153,7 +153,7 @@ env $UNSET claude -p --resume <id> "prompt" --output-format json
 |---|---|
 | Session ID discoverable? | **Yes** — transcript filename *is* the `sessionId` |
 | Headless resume carries context? | **Yes** — verified across a panel-created session |
-| Does a sequential resume fork? | **No** — same ID, appends to the same `.jsonl`. Two *live* processes can: see [#6] |
+| Does a sequential resume fork? | **No** — same ID, appends to the same `.jsonl`. A resume into a session still open in a panel does: see [#6] and [the experiment](research/2026-09-20-panel-fork-experiment.md) |
 | Does headless inherit permission mode? | **No** — an `acceptEdits` session resumed with `-p` was denied `Write` |
 | Does `--permission-mode acceptEdits` work? | **Yes** |
 | Does interactive terminal resume do tool work? | **Yes** — at the user's normal autonomy, no flag needed |
@@ -170,6 +170,12 @@ Not cleaned up. Delete when done:
 - `8dd2b36d-cc84-4b0b-9a77-15955eef9698` — headless baseline
 - `a9c386a5-3d6e-4728-a5a3-f4f3f92b98a8` — permission-inheritance test
 - `bed357a1-5197-4e8b-9866-85f31ecf6340` — fork of the design conversation
+- `0974ef20-b626-4aa3-9fe2-c35aaae9c9d4` — the 2026-09-20 panel-fork
+  experiment, under
+  `~/.claude/projects/c--Users-thegr-AppData-Local-Temp-clb6-20260919-2208/`.
+  **Keep until [#7] ships**: it is the evidence behind
+  [the write-up](research/2026-09-20-panel-fork-experiment.md), and
+  `scripts/fork6.js` can be re-run against it.
 
 First two under
 `~/.claude/projects/<temp-scratch-project>/`,
@@ -185,11 +191,18 @@ when several sessions hit the account's limit together only one was resumed.
 
 Open, roughly in priority order:
 
-- [#6] a resume while the session is still live in a panel. The issue describes
-  the one experiment that settles it; it needs someone at the keyboard. It
-  gates [#7], whose branch also needs a rebase before merging.
+- [#7] offer to reopen the stale panel tab after a resume. No longer gated:
+  the 2026-09-20 experiment showed that typing into a tab left open across a
+  resume forks the transcript and abandons the resumed turn, so this is loss
+  prevention rather than polish. Its branch needs a rebase, and its liveness
+  check should move off `~/.claude/sessions/<pid>.json` and onto
+  `claude agents --json`.
+- [#11] a job waiting for Resume Now is lost on reload. Bundled with [#7]:
+  reopening is the remedy [#7] recommends, so it must not cost a pending job.
+- [#6] stays open as the record of the behaviour until [#7] ships. What is left
+  in it is whether `claude agents --json` reliably says a panel tab is live,
+  which only matters for a tab in another window.
 - [#8] four small findings from reviewing the #4 and #5 fixes.
-- [#11] a job waiting for Resume Now is lost on reload.
 - [#10] a reset time with no zone resolves an hour off across a DST change.
 - [#12] test gaps found by mutation testing, mostly in the limit parser.
 - [#2], [#3], [#13], [#1].
