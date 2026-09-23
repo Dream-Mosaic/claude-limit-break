@@ -220,3 +220,7 @@ test("LIMIT_HINTS: you've/have hit...limit", () => {
 test('LIMIT_HINTS: out of (tokens|credits|usage|quota)', () => {
   assert.ok(looksLikeLimitMessage('You are out of tokens for this session. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: \\d+-hour limit', () => {
+  assert.ok(looksLikeLimitMessage('5-hour limit exceeded. Try again in 3 hours'));
+});
