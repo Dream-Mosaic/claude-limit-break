@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   detectLimit,
   looksLikeCode,
+  looksLikeLimitMessage,
+  normalize,
   formatDuration,
   MAX_NOTICE_LENGTH,
 } from '../../src/parsers/limitParser';
@@ -192,4 +194,13 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
     assert.ok(hit, `not detected (${label}): ${text}`);
     assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for ${label}`);
   }
+});
+
+// Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
+// deleted without any test failing - nothing pinned any one of them
+// individually. Each test below uses the exact input from the issue's table,
+// chosen so it trips only that one hint (checked by hand against every other
+// pattern in the array); deleting the hint it targets must turn it red.
+test('LIMIT_HINTS: \\blimit reached\\b', () => {
+  assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
 });
