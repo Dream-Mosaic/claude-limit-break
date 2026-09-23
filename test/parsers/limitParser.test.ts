@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   detectLimit,
   looksLikeCode,
+  looksLikeLimitMessage,
+  normalize,
   formatDuration,
   MAX_NOTICE_LENGTH,
 } from '../../src/parsers/limitParser';
@@ -159,4 +161,121 @@ test('the real session-limit notices this project captured resolve to the right 
     assert.ok(hit, `not detected: ${text}`);
     assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for: ${text}`);
   }
+});
+
+test('a zoneless reset time crossing a DST change still resolves to the right wall clock (#10)', () => {
+  // "You have hit your session limit, resets 5am" carries no zone of its own,
+  // so this exercises the "no zone named in the notice" branch of
+  // resolveClockTime - the one that used to roll an already-past reading
+  // forward by a flat 24h (DAY_MS) instead of advancing the calendar date and
+  // re-deriving the wall clock. A `zone` override pins the case to
+  // America/Chicago without depending on the machine's own zone: `TZ` is not
+  // reliably honoured by Node on Windows, so a bare `process.env.TZ` swap
+  // would not actually move this test.
+  //
+  // Each `now` is 22:00 local the night before the reset, exactly as in issue
+  // #10's repro. The three nights are the issue's own table:
+  //   2024-03-09 -> reset morning 2024-03-10 is the US spring-forward day.
+  //   2024-11-02 -> reset morning 2024-11-03 is the US fall-back day.
+  //   2024-06-10 -> control, no DST crossing, isolates the cause.
+  // In every case the expected wall clock is 05:00 America/Chicago. Before
+  // the fix this resolved to 06:00 (spring forward) and, worse, 04:00 (fall
+  // back) - an hour *before* the limit actually lifts, resuming into a
+  // session that is still limited.
+  const text = 'You have hit your session limit, resets 5am';
+  const cases: [string, string, string][] = [
+    ['2024-03-09 spring forward', '2024-03-10T04:00:00.000Z', '2024-03-10T10:00:00.000Z'],
+    ['2024-11-02 fall back', '2024-11-03T03:00:00.000Z', '2024-11-03T11:00:00.000Z'],
+    ['2024-06-10 control', '2024-06-11T03:00:00.000Z', '2024-06-11T10:00:00.000Z'],
+  ];
+  for (const [label, nowIso, expected] of cases) {
+    const now = new Date(nowIso);
+    const hit = detectLimit(text, now, MAXW, { zone: 'America/Chicago' });
+    assert.ok(hit, `not detected (${label}): ${text}`);
+    assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for ${label}`);
+  }
+});
+
+// Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
+// deleted without any test failing - nothing pinned any one of them
+// individually. Each test below uses the exact input from the issue's table,
+// chosen so it trips only that one hint (checked by hand against every other
+// pattern in the array); deleting the hint it targets must turn it red.
+test('LIMIT_HINTS: \\blimit reached\\b', () => {
+  assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
+  assert.ok(looksLikeLimitMessage('Weekly limit exceeded, resets in 2 hours'));
+});
+
+test('LIMIT_HINTS: rate[- ]limit(ed|s)?', () => {
+  assert.ok(looksLikeLimitMessage('You are being rate limited. Try again in 10 minutes'));
+});
+
+test("LIMIT_HINTS: you've/have hit...limit", () => {
+  assert.ok(looksLikeLimitMessage('You have used up your monthly limit. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: out of (tokens|credits|usage|quota)', () => {
+  assert.ok(looksLikeLimitMessage('You are out of tokens for this session. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: \\d+-hour limit', () => {
+  assert.ok(looksLikeLimitMessage('5-hour limit exceeded. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: quota (exceeded|reached|exhausted)', () => {
+  assert.ok(looksLikeLimitMessage('Your monthly quota exhausted. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: upgrade to (claude )?max', () => {
+  assert.ok(looksLikeLimitMessage('Please upgrade to Max for higher limits. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: error...429', () => {
+  assert.ok(looksLikeLimitMessage('Error: 429 received from API. Try again in 3 hours'));
+});
+
+test('LIMIT_HINTS: 429...too many requests', () => {
+  assert.ok(looksLikeLimitMessage('429 Too Many Requests. Try again in 3 hours'));
+});
+
+// Issue #12: normalize()'s curly-quote, dash and escaped-newline transforms
+// were each unpinned - deleting any one line left the whole suite green.
+test('normalize(): curly quotes fold to straight quotes', () => {
+  assert.equal(normalize("You’ve hit your limit"), "You've hit your limit");
+  assert.equal(normalize('Claude said “wait”'), 'Claude said "wait"');
+});
+
+test('normalize(): unicode dashes fold to ASCII hyphen', () => {
+  // U+2010 HYPHEN, as seen in a captured "rate‐limited" notice.
+  assert.equal(normalize('rate‐limited'), 'rate-limited');
+});
+
+test('normalize(): JSON-escaped newlines become spaces', () => {
+  // A literal backslash-n (two characters), as seen when a notice is captured
+  // raw out of a JSON payload rather than parsed first.
+  assert.equal(normalize('Usage limit reached.\\nTry again in 5 hours'), 'Usage limit reached. Try again in 5 hours');
+});
+
+// Issue #12 boundaries. 400/401 are hardcoded rather than derived from
+// MAX_NOTICE_LENGTH, so a mutation to the constant itself (400 -> 399) shows
+// up as a wrong-length string relative to the fixed boundary this test
+// checks, instead of the test silently re-deriving a new boundary and
+// staying green.
+test('detectLimit: MAX_NOTICE_LENGTH boundary (400 accepted, 401 rejected)', () => {
+  const base = 'Usage limit reached. Try again in 5 hours.';
+  const at400 = base + 'x'.repeat(400 - base.length);
+  const at401 = base + 'x'.repeat(401 - base.length);
+  assert.ok(detectLimit(at400, NOW, MAXW), 'exactly 400 chars must still be accepted');
+  assert.equal(detectLimit(at401, NOW, MAXW), undefined, '401 chars must be rejected');
+});
+
+test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
+  // MAXW is 24, so "24 hours" resolves to exactly now + maxWaitHours*HOUR_MS -
+  // precisely the wait horizon, not past it. `>` accepts a tie; `>=` would not.
+  const hit = detectLimit('Usage limit reached. Try again in 24 hours', NOW, MAXW);
+  assert.ok(hit, 'a resume landing exactly on the wait horizon must still be accepted');
+  assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
 });

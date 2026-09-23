@@ -40,6 +40,15 @@ test('refuses a resume over the cap and says why', () => {
   assert.match(v.reason!, /150,000/);
 });
 
+test('checkBudget: an estimate exactly at the cap is allowed, not rejected', () => {
+  // Issue #12 boundary: `estimate > maxResumeTokens` in checkBudget. 5600
+  // bytes estimates to exactly 1000 tokens (Math.round(5600 / 5.6) === 1000,
+  // the same figures the divisor test above uses), an exact tie with the cap.
+  const v = checkBudget(5600, 1000);
+  assert.equal(v.estimate, 1000);
+  assert.equal(v.allowed, true, 'an estimate exactly at the cap must still be allowed');
+});
+
 test('a cap of zero disables the check', () => {
   assert.equal(checkBudget(10_000_000, 0).allowed, true);
 });
