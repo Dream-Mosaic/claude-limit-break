@@ -42,8 +42,20 @@ export function isFolderTrusted(cwd: string, config: ClaudeUserConfig | undefine
   return false;
 }
 
+/**
+ * Where the CLI reads `.claude.json` from.
+ *
+ * CLAUDE_CONFIG_DIR does relocate this file, not only `~/.claude/` - checked,
+ * not assumed, by reading the installed CLI's own bundle (issue #8 finding
+ * 1). Its resolver is `path.join(process.env.CLAUDE_CONFIG_DIR || homedir(),
+ * ".claude.json")`, found twice independently in the bundle: CLAUDE_CONFIG_DIR
+ * stands in for homedir() wholesale for this file, the same as it does for
+ * ~/.claude itself. The check is `||`, not `??`, so an empty string (as well
+ * as unset) falls back to the home directory rather than resolving relative
+ * to this process's own cwd.
+ */
 export function defaultClaudeConfigPath(): string {
-  return path.join(os.homedir(), '.claude.json');
+  return path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
 }
 
 /**
