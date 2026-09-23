@@ -232,3 +232,7 @@ test('LIMIT_HINTS: quota (exceeded|reached|exhausted)', () => {
 test('LIMIT_HINTS: upgrade to (claude )?max', () => {
   assert.ok(looksLikeLimitMessage('Please upgrade to Max for higher limits. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: error...429', () => {
+  assert.ok(looksLikeLimitMessage('Error: 429 received from API. Try again in 3 hours'));
+});
