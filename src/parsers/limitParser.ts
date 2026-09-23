@@ -17,7 +17,7 @@ export interface LimitDetection {
 interface Rule {
   id: string;
   re: RegExp;
-  resolve(m: RegExpExecArray, now: Date): Date | undefined;
+  resolve(m: RegExpExecArray, now: Date, zone?: string): Date | undefined;
 }
 
 /** Strip ANSI SGR/CSI/OSC sequences that terminal output is full of. */
@@ -184,16 +184,16 @@ const RULES: Rule[] = [
         // "resets 3pm", "reset at 10:30 (UTC)", "resets 1:40am (Asia/Jerusalem)"
         id: 'clock-reset',
         re: /reset(?:s|ting)?(?:\s+(?:at|around))?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*(?:(utc|gmt|z)\s*([+-]\d{1,2})?(?::?(\d{2}))?|([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+))?\s*\)?/i,
-        resolve(m, now) {
-            return resolveClockTime(m, now);
+        resolve(m, now, zone) {
+            return resolveClockTime(m, now, zone);
         },
     },
     {
         // "try again at 3:15pm", "available again at 18:00 UTC"
         id: 'clock-retry',
         re: /(?:try again|available(?: again)?|come back|check back|back)\s+(?:at|after)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*(?:(utc|gmt|z)\s*([+-]\d{1,2})?(?::?(\d{2}))?|([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+))?\s*\)?/i,
-        resolve(m, now) {
-            return resolveClockTime(m, now);
+        resolve(m, now, zone) {
+            return resolveClockTime(m, now, zone);
         },
     },
 ];
@@ -204,7 +204,7 @@ const RULES: Rule[] = [
  * 3pm), so both readings are considered and the soonest future one wins - a
  * limit notice always refers to the *next* occurrence.
  */
-function resolveClockTime(m: RegExpExecArray, now: Date): Date | undefined {
+function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | undefined {
     const hour = Number(m[1] ?? '');
     const minute = m[2] ? Number(m[2]) : 0;
     const meridiem = m[3]?.toLowerCase();
@@ -260,8 +260,17 @@ function resolveClockTime(m: RegExpExecArray, now: Date): Date | undefined {
                 signedOffsetMs);
         }
         else {
-            candidate = new Date(now);
-            candidate.setHours(h, minute, 0, 0);
+            // No zone named in the notice: read the given zone - an explicit
+            // override so a test can pin a fixed zone, since `TZ` is not
+            // reliably honoured by Node on Windows (issue #10) - or the
+            // process's own resolved zone otherwise, so production behaviour
+            // is unchanged when no override is given.
+            const localZone = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const today = zoneToday(localZone, now);
+            candidate = today ? zonedWallClockToInstant(localZone, today.y, today.m, today.d, h, minute) : undefined;
+            if (!candidate) {
+                continue;
+            }
         }
         // Roll forward a day at a time until it lands in the future. (The named-zone
         // branch above already guarantees this, so the loop is a no-op there.)
@@ -284,7 +293,7 @@ export function detectLimit(
     rawText: string,
     now: Date = new Date(),
     maxWaitHours: number = 24,
-    opts: { trusted?: boolean } = {}
+    opts: { trusted?: boolean; zone?: string } = {}
 ): LimitDetection | undefined {
     const text = normalize(rawText);
     if (!text || text.length > MAX_NOTICE_LENGTH) {
@@ -306,7 +315,7 @@ export function detectLimit(
         if (!m) {
             continue;
         }
-        const at = rule.resolve(m, now);
+        const at = rule.resolve(m, now, opts.zone);
         if (!at || Number.isNaN(at.getTime())) {
             continue;
         }
