@@ -105,12 +105,19 @@ export function buildTerminalOptions(
   session: ResolvedSession,
   prompt: string,
   launcher: Launcher,
+  /**
+   * The claude arguments to run. Defaults to an interactive resume; the caller
+   * passes buildHeadlessArgs instead when resumeMode is headless. Injected
+   * rather than branched on a mode flag here so this stays one shape with one
+   * reason to change, and so the argument builders keep their own tests.
+   */
+  claudeArgs: string[] = buildResumeArgs(session.sessionId, prompt),
 ): TerminalOptionsLike {
   return {
     name: `Limit Buster: ${session.sessionId.slice(0, 8)}`,
     cwd: session.cwd,
     shellPath: launcher.file,
-    shellArgs: [...launcher.args, ...buildResumeArgs(session.sessionId, prompt)],
+    shellArgs: [...launcher.args, ...claudeArgs],
     isTransient: true,
     env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
   };

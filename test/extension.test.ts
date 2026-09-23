@@ -1186,3 +1186,52 @@ test('the trust warning clears once the folder is trusted mid-countdown', async 
     teardown(ctx);
   }
 });
+
+test('resumeMode headless actually launches headless', async () => {
+  // The setting has been declared since 0.1.0 while extension.ts logged
+  // "not yet implemented" and resumed interactively anyway. A setting that
+  // quietly does something other than what it says is worse than one that
+  // does not exist.
+  resetVscodeFake();
+  vscodeFake.config = {
+    claudeCommand: LAUNCHER,
+    resumeMode: 'headless',
+    headlessPermissionMode: 'acceptEdits',
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const args = argsOf(0);
+    assert.ok(args, 'a terminal must have launched');
+    assert.ok(args.includes('-p'), `headless must pass -p: ${JSON.stringify(args)}`);
+    assert.deepEqual(
+      [args[args.indexOf('--output-format') + 1], args[args.indexOf('--permission-mode') + 1]],
+      ['json', 'acceptEdits'],
+    );
+    assert.ok(
+      !vscodeFake.outputLines.some((l) => l.includes('not yet implemented')),
+      'and it must stop claiming it is unimplemented',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the default resume stays interactive', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const args = argsOf(0);
+    assert.ok(args);
+    assert.ok(!args.includes('-p'), `interactive must not pass -p: ${JSON.stringify(args)}`);
+    assert.ok(args.includes('--resume'));
+  } finally {
+    teardown(ctx);
+  }
+});

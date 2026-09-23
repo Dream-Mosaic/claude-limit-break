@@ -9,7 +9,13 @@ import { CountdownStatusBar } from './statusBar';
 import { planResume } from './policy';
 import { randomJitterMs } from './randomDelay';
 import { playAlertSound } from './sound';
-import { buildTerminalOptions, resolveClaudeLauncher, cwdExists } from './resumer';
+import {
+  buildTerminalOptions,
+  buildResumeArgs,
+  buildHeadlessArgs,
+  resolveClaudeLauncher,
+  cwdExists,
+} from './resumer';
 import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { GRACE_MS, stallVerdict } from './stallWatch';
 import { resolveSession } from './sessionResolver';
@@ -282,12 +288,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const resume = (job: PendingJob): boolean => {
     const s = settings();
-    if (s.resumeMode === 'headless') {
-      // Headless mode is declared in settings but not yet routed here; it is a
-      // follow-up. Note that rather than pretending otherwise: this resume
-      // still runs interactively.
-      log.warn('resumeMode is "headless" but headless resume is not yet implemented; resuming interactively.');
-    }
     const which = (cmd: string) => {
       try {
         const finder = process.platform === 'win32' ? 'where' : 'which';
@@ -327,10 +327,20 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       return false;
     }
+    // Headless is opt-in and machine-scoped, and does NOT inherit the
+    // session's permission mode - a verified acceptEdits session resumed with
+    // -p was denied a Write - so headlessPermissionMode is what decides
+    // whether it can do tool work at all. Empty means it cannot, which is the
+    // safe default for something that runs while nobody is watching.
+    const claudeArgs =
+      s.resumeMode === 'headless'
+        ? buildHeadlessArgs(job.sessionId, job.prompt, s.headlessPermissionMode)
+        : buildResumeArgs(job.sessionId, job.prompt);
     const opts = buildTerminalOptions(
       { sessionId: job.sessionId, transcript: job.transcript, cwd: job.cwd, bytes: 0 },
       job.prompt,
       launcher,
+      claudeArgs,
     );
     // A NEW terminal, every time. Never activeTerminal, never sendText: if
     // Claude has died, the prompt would land in whatever shell is sitting there.
