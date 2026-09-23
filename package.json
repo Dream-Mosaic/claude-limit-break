@@ -181,6 +181,25 @@
           ],
           "default": "always",
           "markdownDescription": "When to show the status bar item. `always` keeps a small marker visible while watching, so a window with the extension running does not look identical to one where it failed to load."
+        },
+        "claudeLimitBuster.watchScope": {
+          "type": "string",
+          "enum": [
+            "machine",
+            "workspace"
+          ],
+          "enumDescriptions": [
+            "React to every Claude session on this machine.",
+            "React only to sessions whose folder is inside this window's workspace."
+          ],
+          "default": "machine",
+          "markdownDescription": "Which sessions to watch. `machine` also catches a session started in a plain terminal in a project no window has open, which is the case the global watcher exists for; `workspace` is cheaper and stops two open windows both reacting to the same limit."
+        },
+        "claudeLimitBuster.checkForUpdates": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Check GitHub once a day for a newer release and say so. Off by default because it is an outbound request to `api.github.com`; a VSIX never updates itself, so nothing else will tell you. Failures are silent."
         }
       }
     }

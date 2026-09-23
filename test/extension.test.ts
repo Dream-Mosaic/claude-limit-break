@@ -42,6 +42,8 @@ class FakeWatcher {
     readonly getMaxWaitHours: () => number,
     readonly getPollSeconds: () => number,
     readonly log: unknown,
+    /** What the real watcher filters on (#2). Recorded so a test can read it back. */
+    readonly getScope?: () => { mode: string; folders: readonly string[] },
   ) {
     FakeWatcher.latest = this;
   }
@@ -113,6 +115,18 @@ stubModule('./stallWatch', { GRACE_MS: 300, stallVerdict: realStallVerdict });
  */
 let livePanelSessions = new Set<string>();
 const detectorCalls: { sessionId: string; ourPid: number | undefined }[] = [];
+
+/** What the fake GitHub call returns, and what it was asked for. */
+let latestReleaseTag: string | undefined;
+const fetchCalls: string[] = [];
+
+stubModule('./updateCheck', {
+  ...(require('../src/updateCheck') as Record<string, unknown>),
+  fetchLatestReleaseTag: (url?: string) => {
+    fetchCalls.push(url ?? 'default');
+    return Promise.resolve(latestReleaseTag);
+  },
+});
 
 stubModule('./liveSessions', {
   livePanelDetector: () => (sessionId: string, ourPid: number | undefined) => {
@@ -1438,5 +1452,119 @@ test('a small live context beats a huge byte count', async () => {
   } finally {
     teardown(ctx);
     fs.rmSync(transcript, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wiring for #1 (update check) and #2 (watch scope).
+// ---------------------------------------------------------------------------
+
+test('the watcher is given this window folders and the configured scope', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { watchScope: 'workspace' };
+  vscodeFake.workspaceFolders = [{ uri: { fsPath: REAL_CWD } }];
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const scope = FakeWatcher.latest?.getScope?.();
+    assert.ok(scope, 'the watcher must be constructed with a scope');
+    assert.equal(scope.mode, 'workspace');
+    assert.deepEqual(scope.folders, [REAL_CWD]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the scope defaults to machine-wide, which is what it has always been', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {};
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    assert.equal(FakeWatcher.latest?.getScope?.().mode, 'machine');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the first run offers the update check once, and enabling it writes the setting', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {};
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await flush();
+    const prompt = vscodeFake.info.find((m) => m.message.includes('newer release'));
+    assert.ok(prompt, `expected the one-time offer; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
+    assert.deepEqual(prompt.items, ['Enable', 'Not now', 'Never ask']);
+    prompt.answer('Enable');
+    await flush();
+    assert.equal(vscodeFake.configUpdates.get('checkForUpdates'), true, 'Enable must turn it on');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the offer is never made twice, whatever the answer was', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {};
+  const store = new Map<string, unknown>();
+  const first = contextOver(store);
+  start(first);
+  await flush();
+  vscodeFake.info.find((m) => m.message.includes('newer release'))?.answer('Not now');
+  await flush();
+  teardown(first);
+
+  const before = vscodeFake.info.length;
+  const second = contextOver(store);
+  start(second);
+  try {
+    await flush();
+    assert.equal(
+      vscodeFake.info.slice(before).filter((m) => m.message.includes('newer release')).length,
+      0,
+      'a second activation must not ask again',
+    );
+  } finally {
+    teardown(second);
+  }
+});
+
+test('with checking enabled, a newer release is reported once', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { checkForUpdates: true };
+  latestReleaseTag = 'v9.9.9';
+  const store = new Map<string, unknown>([['claudeLimitBuster.updateCheck.firstRunPromptAnswer', 'enable']]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await flush();
+    await flush();
+    const news = vscodeFake.info.find((m) => m.message.includes('9.9.9'));
+    assert.ok(news, `expected a release notice; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
+    news.answer('Dismiss');
+    await flush();
+    assert.equal(store.get('claudeLimitBuster.updateCheck.dismissedVersion'), 'v9.9.9');
+  } finally {
+    latestReleaseTag = undefined;
+    teardown(ctx);
+  }
+});
+
+test('nothing is fetched while the setting is off', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {};
+  fetchCalls.length = 0;
+  const store = new Map<string, unknown>([['claudeLimitBuster.updateCheck.firstRunPromptAnswer', 'never']]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await flush();
+    await flush();
+    assert.deepEqual(fetchCalls, [], 'an outbound request nobody asked for');
+  } finally {
+    teardown(ctx);
   }
 });

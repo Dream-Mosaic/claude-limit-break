@@ -115,6 +115,10 @@ export const vscodeFake = {
   /** What `vscode.window.tabGroups.all` reports, flattened to one group. */
   tabs: [] as FakeTab[],
   /** Quick picks shown, in call order, and the label the next one answers with. */
+  /** Settings the extension wrote back, by key. */
+  configUpdates: new Map<string, unknown>(),
+  /** URLs handed to env.openExternal. */
+  openedExternal: [] as string[],
   quickPicks: [] as { items: { label: string }[] }[],
   quickPickAnswer: undefined as string | undefined,
   /** How many times the output channel was shown. */
@@ -135,6 +139,8 @@ export function resetVscodeFake(): void {
   vscodeFake.terminalPid = 4242;
   vscodeFake.statusBarItems = [];
   vscodeFake.commands = new Map();
+  vscodeFake.configUpdates = new Map();
+  vscodeFake.openedExternal = [];
   vscodeFake.quickPicks = [];
   vscodeFake.quickPickAnswer = undefined;
   vscodeFake.shownChannels = 0;
@@ -145,9 +151,17 @@ export function resetVscodeFake(): void {
 const fakeVscode = {
   EventEmitter: FakeEventEmitter,
   StatusBarAlignment: { Left: 1, Right: 2 },
+  ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   ThemeColor: FakeThemeColor,
   MarkdownString: FakeMarkdownString,
   TabInputWebview: FakeTabInputWebview,
+  env: {
+    openExternal: (uri: unknown) => {
+      vscodeFake.openedExternal.push(String((uri as { value?: string }).value ?? uri));
+      return Promise.resolve(true);
+    },
+  },
+  Uri: { parse: (value: string) => ({ value }) },
   window: {
     tabGroups: {
       get all() {
@@ -251,6 +265,12 @@ const fakeVscode = {
     getConfiguration: (_section: string) => ({
       get: <T>(key: string, fallback: T): T =>
         key in vscodeFake.config ? (vscodeFake.config[key] as T) : fallback,
+      // Recorded rather than applied: a test asserts what the extension tried
+      // to write, and the value it reads back stays whatever the test set.
+      update: (key: string, value: unknown) => {
+        vscodeFake.configUpdates.set(key, value);
+        return Promise.resolve();
+      },
     }),
     get workspaceFolders() {
       return vscodeFake.workspaceFolders;

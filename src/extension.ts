@@ -19,6 +19,19 @@ import {
 import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { GRACE_MS, stallVerdict } from './stallWatch';
 import { parseLastUsage, type UsageRecord } from './budget';
+import {
+  decideUpdateCheck,
+  fetchLatestReleaseTag,
+  shouldOfferFirstRunPrompt,
+  shouldEnableUpdateChecks,
+  DEFAULT_CHECK_INTERVAL_MS,
+  LAST_CHECKED_KEY,
+  LATEST_TAG_KEY,
+  DISMISSED_VERSION_KEY,
+  FIRST_RUN_PROMPT_KEY,
+  RELEASE_TAG_URL,
+  type FirstRunPromptChoice,
+} from './updateCheck';
 import { resolveSession } from './sessionResolver';
 import { livePanelDetector } from './liveSessions';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
@@ -78,6 +91,13 @@ export function activate(context: vscode.ExtensionContext): void {
     () => settings().maxWaitHours,
     () => settings().transcriptPollSeconds,
     log,
+    // The watcher discards out-of-scope entries before parsing them, rather
+    // than every consumer filtering afterwards (#2). Read per call, so
+    // changing the setting or opening a folder takes effect without a reload.
+    () => ({
+      mode: settings().watchScope,
+      folders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+    }),
   );
 
   const statBytes = (p: string) => fs.statSync(p).size;
@@ -564,6 +584,88 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     await reopen(fresh, resolved.sessionId);
   };
+
+  /**
+   * A VSIX installed outside the Marketplace never updates itself and VS Code
+   * will never mention it (#1), so this is the only way someone finds out. It
+   * is off until asked for: the offer is made once, and all three answers are
+   * final - "Not now" means the same as "Never ask" here, because an offer
+   * that keeps coming back is the nag this is trying not to be.
+   */
+  const offerUpdateChecks = async (): Promise<void> => {
+    if (!shouldOfferFirstRunPrompt(context.globalState.get<FirstRunPromptChoice>(FIRST_RUN_PROMPT_KEY))) {
+      return;
+    }
+    const choice = await Promise.resolve(
+      vscode.window.showInformationMessage(
+        'Claude Limit Buster can check GitHub for a newer release once a day. ' +
+          'Nothing else will tell you: an extension installed from a .vsix never updates itself.',
+        'Enable',
+        'Not now',
+        'Never ask',
+      ),
+    );
+    const picked: FirstRunPromptChoice =
+      choice === 'Enable' ? 'enable' : choice === 'Never ask' ? 'never' : 'not-now';
+    await context.globalState.update(FIRST_RUN_PROMPT_KEY, picked);
+    if (shouldEnableUpdateChecks(picked)) {
+      await vscode.workspace.getConfiguration(NS).update('checkForUpdates', true, vscode.ConfigurationTarget.Global);
+    }
+  };
+
+  /**
+   * At most one request per activation, and silent about everything except a
+   * version that is actually newer. Both the timestamp and the tag are cached,
+   * so a day's worth of activations cost nothing.
+   */
+  const runUpdateCheck = async (): Promise<void> => {
+    if (!settings().checkForUpdates) {
+      return;
+    }
+    const current = (context.extension?.packageJSON as { version?: string } | undefined)?.version ?? '0.0.0';
+    const evaluate = () =>
+      decideUpdateCheck({
+        currentVersion: current,
+        latestTag: context.globalState.get<string>(LATEST_TAG_KEY),
+        lastCheckedMs: context.globalState.get<number>(LAST_CHECKED_KEY),
+        now: Date.now(),
+        intervalMs: DEFAULT_CHECK_INTERVAL_MS,
+        dismissedVersion: context.globalState.get<string>(DISMISSED_VERSION_KEY),
+      });
+    let action = evaluate();
+    if (action.kind === 'check') {
+      const tag = await fetchLatestReleaseTag();
+      await context.globalState.update(LAST_CHECKED_KEY, Date.now());
+      if (tag !== undefined) {
+        await context.globalState.update(LATEST_TAG_KEY, tag);
+      }
+      action = evaluate();
+    }
+    if (action.kind !== 'notify') {
+      return;
+    }
+    const choice = await Promise.resolve(
+      vscode.window.showInformationMessage(
+        `Claude Limit Buster ${action.latestTag} is available; this is ${current}.`,
+        'View release',
+        'Dismiss',
+      ),
+    );
+    if (choice === 'View release') {
+      void vscode.env.openExternal(vscode.Uri.parse(RELEASE_TAG_URL(action.latestTag)));
+    }
+    if (choice !== undefined) {
+      // Either answer counts as seen. Left unanswered it asks again tomorrow,
+      // which is the one case where repeating is the right behaviour.
+      await context.globalState.update(DISMISSED_VERSION_KEY, action.latestTag);
+    }
+  };
+
+  // Fire and forget: a failure here must never take activation with it, and
+  // the issue asks for silence on every failure, not just no notification.
+  void offerUpdateChecks()
+    .then(() => runUpdateCheck())
+    .catch(() => {});
 
   context.subscriptions.push(
     {

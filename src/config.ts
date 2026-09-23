@@ -14,6 +14,8 @@ export interface Settings {
   alertSound: boolean;
   alertSoundFile: string;
   statusBar: 'always' | 'pending' | 'never';
+  watchScope: 'machine' | 'workspace';
+  checkForUpdates: boolean;
   onStale: 'notify' | 'reopen';
 }
 
@@ -25,6 +27,7 @@ const RESUME_MODES = ['interactive', 'headless'] as const;
 const PERMISSION_MODES = ['', 'default', 'acceptEdits', 'plan'] as const;
 const STALE_ACTIONS = ['notify', 'reopen'] as const;
 const STATUS_BAR_MODES = ['always', 'pending', 'never'] as const;
+const WATCH_SCOPES = ['machine', 'workspace'] as const;
 
 const oneOf = <T extends readonly string[]>(list: T, value: unknown, fallback: T[number]): T[number] =>
   (list as readonly string[]).includes(value as string) ? (value as T[number]) : fallback;
@@ -53,5 +56,7 @@ export function readSettings(c: ConfigSource): Settings {
     alertSoundFile: str(c.get('alertSoundFile', ''), ''),
     onStale: oneOf(STALE_ACTIONS, c.get('onStale', 'notify'), 'notify'),
     statusBar: oneOf(STATUS_BAR_MODES, c.get('statusBar', 'always'), 'always'),
+    watchScope: oneOf(WATCH_SCOPES, c.get('watchScope', 'machine'), 'machine'),
+    checkForUpdates: c.get('checkForUpdates', false),
   };
 }

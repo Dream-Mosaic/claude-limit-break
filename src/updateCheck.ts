@@ -154,6 +154,10 @@ export function decideUpdateCheck(input: UpdateCheckInput): UpdateCheckAction {
 
 export const RELEASES_URL = 'https://api.github.com/repos/Dream-Mosaic/claude-limit-buster/releases';
 
+/** Where a human reads about a release, as opposed to where the API lists it. */
+export const RELEASE_TAG_URL = (tag: string): string =>
+  `https://github.com/Dream-Mosaic/claude-limit-buster/releases/tag/${encodeURIComponent(tag)}`;
+
 /** GitHub returns 403 for an unauthenticated request with no User-Agent at all - verified live. */
 const USER_AGENT = 'claude-limit-buster-update-check';
 

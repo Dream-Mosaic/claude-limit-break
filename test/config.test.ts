@@ -144,3 +144,24 @@ test('statusBar accepts pending and never, and rejects anything else', () => {
   assert.equal(readSettings(source({ statusBar: 'never' })).statusBar, 'never');
   assert.equal(readSettings(source({ statusBar: 'sometimes' })).statusBar, 'always');
 });
+
+test('the watcher stays machine-wide by default', () => {
+  // A session started in a plain terminal, in a folder no window has open, is
+  // still worth resuming - that is what the global root buys (#2).
+  assert.equal(readSettings(source()).watchScope, 'machine');
+});
+
+test('watchScope accepts workspace and rejects anything else', () => {
+  assert.equal(readSettings(source({ watchScope: 'workspace' })).watchScope, 'workspace');
+  assert.equal(readSettings(source({ watchScope: 'everything' })).watchScope, 'machine');
+});
+
+test('update checks are off until asked for', () => {
+  // An outbound request nobody asked for is a surprise; the first-run prompt
+  // is how this gets turned on (#1).
+  assert.equal(readSettings(source()).checkForUpdates, false);
+});
+
+test('checkForUpdates can be turned on', () => {
+  assert.equal(readSettings(source({ checkForUpdates: true })).checkForUpdates, true);
+});
