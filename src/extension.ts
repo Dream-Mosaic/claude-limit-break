@@ -142,6 +142,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ? isFolderTrusted(
           plan.job.cwd,
           readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
+          process.platform,
         )
       : undefined;
     const job = { ...plan.job, folderTrusted };
@@ -279,7 +280,22 @@ export function activate(context: vscode.ExtensionContext): void {
     // stale. Checking first turns that into a synchronous refusal that names
     // the path and the transcript it came from, instead of a generic VS Code
     // error days later that names neither.
-    if (!cwdExists(job.cwd, fs.existsSync)) {
+    //
+    // fs.existsSync is true for a regular file, not only a directory - a
+    // transcript's cwd pointing at a file (renamed-over project folder, a
+    // stray path) would sail through it and hit the exact async
+    // createTerminal failure this check exists to avoid (#8). statSync's
+    // isDirectory() is the only one of the two that actually distinguishes
+    // them; wrapped in try/catch because statSync throws on a missing path,
+    // which must still read as "does not exist", not as an uncaught error.
+    const cwdIsDirectory = (p: string): boolean => {
+      try {
+        return fs.statSync(p).isDirectory();
+      } catch {
+        return false;
+      }
+    };
+    if (!cwdExists(job.cwd, cwdIsDirectory)) {
       log.error(`Cannot resume ${job.sessionId}: cwd "${job.cwd}" no longer exists (recorded in ${job.transcript}).`);
       void vscode.window.showErrorMessage(
         `Claude Limit Buster: the folder for session ${job.sessionId.slice(0, 8)} no longer exists: ${job.cwd}. ` +
