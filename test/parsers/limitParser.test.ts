@@ -208,3 +208,7 @@ test('LIMIT_HINTS: \\blimit reached\\b', () => {
 test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
   assert.ok(looksLikeLimitMessage('Weekly limit exceeded, resets in 2 hours'));
 });
+
+test('LIMIT_HINTS: rate[- ]limit(ed|s)?', () => {
+  assert.ok(looksLikeLimitMessage('You are being rate limited. Try again in 10 minutes'));
+});
