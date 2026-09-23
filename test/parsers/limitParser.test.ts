@@ -228,3 +228,7 @@ test('LIMIT_HINTS: \\d+-hour limit', () => {
 test('LIMIT_HINTS: quota (exceeded|reached|exhausted)', () => {
   assert.ok(looksLikeLimitMessage('Your monthly quota exhausted. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: upgrade to (claude )?max', () => {
+  assert.ok(looksLikeLimitMessage('Please upgrade to Max for higher limits. Try again in 3 hours'));
+});
