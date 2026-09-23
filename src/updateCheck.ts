@@ -259,3 +259,35 @@ export function fetchLatestReleaseTag(
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// First-run prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * `claudeLimitBuster.checkForUpdates` defaults to false - a network call the
+ * user did not ask for is a surprise. To make the feature discoverable
+ * without nagging, the user is offered a one-time choice on first activation
+ * after install: Enable / Not now / Never ask.
+ */
+export type FirstRunPromptChoice = 'enable' | 'not-now' | 'never';
+
+/**
+ * Whether to show the first-run prompt, given whatever answer (if any) is
+ * already in globalState.
+ *
+ * All three choices are equally terminal here: the issue promises the choice
+ * "once", not a "remind me later" cadence, so "Not now" suppresses the
+ * prompt exactly like "Never ask" does. They differ only in what
+ * {@link shouldEnableUpdateChecks} does with them - "Not now" just declines
+ * to turn the setting on, same as "Never ask" - the distinction is for the
+ * user's own clarity when picking, not for this module's behaviour.
+ */
+export function shouldOfferFirstRunPrompt(storedAnswer: FirstRunPromptChoice | undefined): boolean {
+  return storedAnswer === undefined;
+}
+
+/** What the wiring code should write to `claudeLimitBuster.checkForUpdates` after the prompt is answered. */
+export function shouldEnableUpdateChecks(choice: FirstRunPromptChoice): boolean {
+  return choice === 'enable';
+}

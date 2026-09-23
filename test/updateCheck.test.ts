@@ -2,7 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { compareVersions, decideUpdateCheck, newestTag, fetchLatestReleaseTag } from '../src/updateCheck';
+import {
+  compareVersions,
+  decideUpdateCheck,
+  newestTag,
+  fetchLatestReleaseTag,
+  shouldOfferFirstRunPrompt,
+  shouldEnableUpdateChecks,
+} from '../src/updateCheck';
 
 test('compareVersions: equal versions, one tagged with a leading v', () => {
   assert.equal(compareVersions('1.0.0', 'v1.0.0'), 'equal');
@@ -230,4 +237,41 @@ test('fetchLatestReleaseTag: malformed JSON resolves undefined, not a throw', as
       assert.equal(await fetchLatestReleaseTag(baseUrl, 2000), undefined);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// First-run prompt: checkForUpdates defaults to false, so the user is offered
+// the choice once - Enable / Not now / Never ask - on first activation after
+// install. This is the pure state machine only; the UI call (showInformation-
+// Message) belongs to extension.ts.
+// ---------------------------------------------------------------------------
+
+test('shouldOfferFirstRunPrompt: never asked before -> offer it', () => {
+  assert.equal(shouldOfferFirstRunPrompt(undefined), true);
+});
+
+test('shouldOfferFirstRunPrompt: already answered "enable" -> do not offer again', () => {
+  assert.equal(shouldOfferFirstRunPrompt('enable'), false);
+});
+
+test('shouldOfferFirstRunPrompt: already answered "not-now" -> do not offer again', () => {
+  // The issue promises the choice once, not "remind me later" on a cadence -
+  // so "Not now" is just as terminal as "Never ask" for whether to ask again.
+  assert.equal(shouldOfferFirstRunPrompt('not-now'), false);
+});
+
+test('shouldOfferFirstRunPrompt: already answered "never" -> do not offer again', () => {
+  assert.equal(shouldOfferFirstRunPrompt('never'), false);
+});
+
+test('shouldEnableUpdateChecks: "enable" turns checkForUpdates on', () => {
+  assert.equal(shouldEnableUpdateChecks('enable'), true);
+});
+
+test('shouldEnableUpdateChecks: "not-now" leaves checkForUpdates off', () => {
+  assert.equal(shouldEnableUpdateChecks('not-now'), false);
+});
+
+test('shouldEnableUpdateChecks: "never" leaves checkForUpdates off', () => {
+  assert.equal(shouldEnableUpdateChecks('never'), false);
 });
