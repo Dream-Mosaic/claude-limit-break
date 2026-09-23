@@ -85,3 +85,69 @@ test('the pill does not mention a count for a single session', () => {
     bar.dispose();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Idle presence. A background extension that shows nothing is indistinguishable
+// from one that failed to load, which is exactly the doubt a freshly installed
+// VSIX creates - so when nothing is pending the item stays as a bare marker
+// rather than disappearing.
+// ---------------------------------------------------------------------------
+
+test('with nothing pending the item still shows a marker', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(undefined, 0, 'always');
+  const item = vscodeFake.statusBarItems[0];
+  assert.ok(item?.visible, 'the item must be visible when idle');
+  assert.match(item.text, /\$\(.+\)/, 'an icon, so it reads as a marker rather than a label');
+  assert.ok(!/resumes in/.test(item.text), 'and no countdown, because nothing is counting down');
+});
+
+test('the idle tooltip says it is watching and nothing is pending', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(undefined, 0, 'always');
+  assert.match(tooltipText(), /watching/i);
+  assert.match(tooltipText(), /nothing pending/i);
+});
+
+test('statusBar "pending" keeps the item hidden until there is a countdown', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(undefined, 0, 'pending');
+  assert.equal(vscodeFake.statusBarItems[0]?.visible, false);
+  bar.update(job(), 1, 'pending');
+  assert.equal(vscodeFake.statusBarItems[0]?.visible, true);
+});
+
+test('statusBar "never" hides the item even while a resume is counting down', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(job(), 1, 'never');
+  assert.equal(vscodeFake.statusBarItems[0]?.visible, false);
+});
+
+test('a pending job still shows the countdown, not the idle marker', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(job(), 1, 'always');
+  const item = vscodeFake.statusBarItems[0];
+  assert.match(item!.text, /resumes in/);
+});
+
+test('clicking opens the menu rather than cancelling outright', () => {
+  // Issue #3: a single click used to destroy the pending resume, with the only
+  // warning at the bottom of the tooltip. Every other status-bar item in VS
+  // Code that shows state opens something on click.
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(job(), 1, 'always');
+  assert.equal(vscodeFake.statusBarItems[0]?.command, 'claudeLimitBuster.statusBarMenu');
+});
+
+test('the tooltip no longer promises that clicking cancels', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update(job(), 1, 'always');
+  assert.ok(!/click to cancel/i.test(tooltipText()), tooltipText());
+});

@@ -2,16 +2,29 @@ import * as vscode from 'vscode';
 import { formatDuration } from './parsers/limitParser';
 import type { PendingJob } from './scheduler';
 
+/** What the item shows when no resume is counting down. */
+export type StatusBarMode = 'always' | 'pending' | 'never';
+
 /**
- * Countdown pill in the status bar. Hidden entirely when nothing is pending,
- * so the extension is invisible until it has something to say.
+ * Countdown pill in the status bar, and — when nothing is counting down — a
+ * bare marker saying the extension is running.
+ *
+ * It used to hide entirely when idle, on the reasoning that an extension
+ * should be invisible until it has something to say. That reads differently
+ * from the user's side: this extension is installed from a VSIX to wait for an
+ * event that may be hours away, and a window showing nothing at all is
+ * indistinguishable from one where the install silently failed. `pending`
+ * restores the old behaviour for anyone who prefers it.
  */
 export class CountdownStatusBar {
   private readonly item: vscode.StatusBarItem;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    this.item.command = 'claudeLimitBuster.cancel';
+    // A menu, not the cancel command. A single click used to destroy the
+    // pending resume with no confirmation and no undo, while the only warning
+    // sat at the bottom of a six-line tooltip (#3).
+    this.item.command = 'claudeLimitBuster.statusBarMenu';
     this.item.name = 'Claude Limit Buster';
   }
 
@@ -20,9 +33,24 @@ export class CountdownStatusBar {
    * soonest; without the count, a second session's resume would be invisible,
    * which reads exactly like it had been dropped.
    */
-  update(job: PendingJob | undefined, waiting = 1): void {
-    if (!job) {
+  update(job: PendingJob | undefined, waiting = 1, mode: StatusBarMode = 'always'): void {
+    if (mode === 'never') {
       this.item.hide();
+      return;
+    }
+    if (!job) {
+      if (mode === 'pending') {
+        this.item.hide();
+        return;
+      }
+      this.item.text = '$(eye)';
+      const idle = new vscode.MarkdownString(undefined, true);
+      idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
+      idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
+      idle.appendMarkdown(`_Click for actions._`);
+      this.item.tooltip = idle;
+      this.item.backgroundColor = undefined;
+      this.item.show();
       return;
     }
     const remaining = job.resumeAtMs - Date.now();
@@ -55,7 +83,7 @@ export class CountdownStatusBar {
           `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
       );
     }
-    tooltip.appendMarkdown(waiting > 1 ? `_Click to cancel all of them._` : `_Click to cancel._`);
+    tooltip.appendMarkdown(`_Click for actions._`);
     this.item.tooltip = tooltip;
 
     // Nudge the colour as the deadline approaches so it reads at a glance.
