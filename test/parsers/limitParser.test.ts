@@ -236,3 +236,7 @@ test('LIMIT_HINTS: upgrade to (claude )?max', () => {
 test('LIMIT_HINTS: error...429', () => {
   assert.ok(looksLikeLimitMessage('Error: 429 received from API. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: 429...too many requests', () => {
+  assert.ok(looksLikeLimitMessage('429 Too Many Requests. Try again in 3 hours'));
+});
