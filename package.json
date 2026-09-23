@@ -2,7 +2,7 @@
   "name": "claude-limit-buster",
   "displayName": "Claude Limit Buster",
   "description": "Waits out Claude Code usage limits and resumes your session by ID.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "dream-mosaic",
   "license": "MIT",
   "repository": {
