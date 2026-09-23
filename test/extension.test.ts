@@ -142,6 +142,8 @@ stubModule('./liveSessions', {
  * the only way to see that skip is to count the reads.
  */
 let trustConfigPath = '/fake/.claude.json';
+/** Which spelling the fake trust module reports as the one on record, per cwd. */
+const trustedSpellingFor = new Map<string, string>();
 const trustReads = { count: 0 };
 
 stubModule('./trust', {
@@ -151,6 +153,7 @@ stubModule('./trust', {
     return undefined;
   },
   defaultClaudeConfigPath: () => trustConfigPath,
+  trustedSpelling: (cwd: string) => trustedSpellingFor.get(cwd),
 });
 
 // Required, not imported: the stubs above must be registered first, and a
@@ -1564,6 +1567,42 @@ test('nothing is fetched while the setting is off', async () => {
     await flush();
     await flush();
     assert.deepEqual(fetchCalls, [], 'an outbound request nobody asked for');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the resume launches from the spelling of the folder the CLI has trusted', async () => {
+  // The CLI looks its trust record up by exact key. A panel session records
+  // its cwd with the drive letter VS Code reports; trusting the folder from a
+  // terminal records another spelling. Launching with the trusted spelling is
+  // what makes the CLI find the record the user created - both are the same
+  // directory, so this chooses a name, never a different folder.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const recorded = REAL_CWD + path.sep; // a distinct string naming the same directory
+  trustedSpellingFor.set(recorded, REAL_CWD);
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(recorded)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const opts = vscodeFake.terminals[0]?.options as { cwd?: string } | undefined;
+    assert.equal(opts?.cwd, REAL_CWD);
+  } finally {
+    trustedSpellingFor.clear();
+    teardown(ctx);
+  }
+});
+
+test('with no trusted spelling on record, the recorded cwd is used as it was', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const opts = vscodeFake.terminals[0]?.options as { cwd?: string } | undefined;
+    assert.equal(opts?.cwd, REAL_CWD);
   } finally {
     teardown(ctx);
   }

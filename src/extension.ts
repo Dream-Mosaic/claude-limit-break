@@ -16,7 +16,7 @@ import {
   resolveClaudeLauncher,
   cwdExists,
 } from './resumer';
-import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
+import { isFolderTrusted, trustedSpelling, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { GRACE_MS, stallVerdict } from './stallWatch';
 import { parseLastUsage, type UsageRecord } from './budget';
 import {
@@ -447,8 +447,24 @@ export function activate(context: vscode.ExtensionContext): void {
       s.resumeMode === 'headless'
         ? buildHeadlessArgs(job.sessionId, job.prompt, s.headlessPermissionMode)
         : buildResumeArgs(job.sessionId, job.prompt);
+    // The CLI finds its trust record by exact key, and one folder can hold
+    // several: the panel writes the drive letter the way VS Code reports it,
+    // trusting from a terminal writes another. Launching from the spelling on
+    // record as trusted is what lets the CLI see the answer the user already
+    // gave. Same directory either way - only the name changes.
+    const onRecord = job.cwd
+      ? trustedSpelling(
+          job.cwd,
+          readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
+          process.platform,
+        )
+      : undefined;
+    const launchCwd = onRecord ?? job.cwd;
+    if (onRecord && onRecord !== job.cwd) {
+      log.info(`Resuming ${job.sessionId} from "${onRecord}", the spelling the Claude CLI has trusted, rather than "${job.cwd}".`);
+    }
     const opts = buildTerminalOptions(
-      { sessionId: job.sessionId, transcript: job.transcript, cwd: job.cwd, bytes: 0 },
+      { sessionId: job.sessionId, transcript: job.transcript, cwd: launchCwd, bytes: 0 },
       job.prompt,
       launcher,
       claudeArgs,

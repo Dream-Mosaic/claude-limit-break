@@ -46,13 +46,42 @@ export function isFolderTrusted(
   config: ClaudeUserConfig | undefined,
   platform: NodeJS.Platform,
 ): boolean {
+  return trustedSpelling(cwd, config, platform) !== undefined;
+}
+
+/**
+ * The spelling of `cwd` that the CLI has on record as trusted, if any.
+ *
+ * One folder can hold several records. The CLI builds its key with
+ * `f(e).replaceAll("\\", "/")` and looks it up exactly, with no case folding -
+ * read out of its own bundle - so `c:/x` and `C:/x` are two records to it. On
+ * the development machine the panel had written `c:/...` untrusted (VS Code
+ * reports the drive in lower case) while trusting the folder from a terminal
+ * wrote `C:/...` trusted. The first-match lookup this replaced answered
+ * "untrusted" for a folder the user had trusted, and kept saying so after.
+ *
+ * Returned in the platform's own form, because the caller launches the resume
+ * with it as the terminal's cwd: the CLI then derives exactly the key the
+ * user trusted, instead of the one the panel happened to write. On a
+ * case-insensitive filesystem both spellings are the same directory, so this
+ * chooses between names for one folder and never widens trust to another.
+ * The spelling already given wins when it is itself trusted.
+ */
+export function trustedSpelling(
+  cwd: string,
+  config: ClaudeUserConfig | undefined,
+  platform: NodeJS.Platform,
+): string | undefined {
   const target = normalizeProjectPath(cwd, platform);
-  for (const [key, value] of Object.entries(config?.projects ?? {})) {
-    if (normalizeProjectPath(key, platform) === target) {
-      return value?.hasTrustDialogAccepted === true;
-    }
+  const exact = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+  const trusted = Object.entries(config?.projects ?? {})
+    .filter(([key, value]) => value?.hasTrustDialogAccepted === true && normalizeProjectPath(key, platform) === target)
+    .map(([key]) => key.replace(/\/+$/, ''));
+  if (trusted.length === 0) {
+    return undefined;
   }
-  return false;
+  const chosen = trusted.includes(exact) ? exact : trusted[0]!;
+  return platform === 'win32' ? chosen.replace(/\//g, '\\') : chosen;
 }
 
 /**
