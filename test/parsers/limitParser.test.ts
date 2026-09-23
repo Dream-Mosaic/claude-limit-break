@@ -258,3 +258,16 @@ test('normalize(): JSON-escaped newlines become spaces', () => {
   // raw out of a JSON payload rather than parsed first.
   assert.equal(normalize('Usage limit reached.\\nTry again in 5 hours'), 'Usage limit reached. Try again in 5 hours');
 });
+
+// Issue #12 boundaries. 400/401 are hardcoded rather than derived from
+// MAX_NOTICE_LENGTH, so a mutation to the constant itself (400 -> 399) shows
+// up as a wrong-length string relative to the fixed boundary this test
+// checks, instead of the test silently re-deriving a new boundary and
+// staying green.
+test('detectLimit: MAX_NOTICE_LENGTH boundary (400 accepted, 401 rejected)', () => {
+  const base = 'Usage limit reached. Try again in 5 hours.';
+  const at400 = base + 'x'.repeat(400 - base.length);
+  const at401 = base + 'x'.repeat(401 - base.length);
+  assert.ok(detectLimit(at400, NOW, MAXW), 'exactly 400 chars must still be accepted');
+  assert.equal(detectLimit(at401, NOW, MAXW), undefined, '401 chars must be rejected');
+});
