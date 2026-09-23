@@ -362,9 +362,6 @@ more place. Neither looked like a guess when it was written.
 
 ## What is still unverified
 
-- **Whether `claude agents --json` can be trusted to say a panel tab is live** —
-  whether a row survives a closed tab and how long a dead one lingers. Only
-  matters for a tab in another VS Code window, where the tab API cannot reach it.
 - **What triggers the systemic panel forks.** Seven cases, clustered in time; the
   one hypothesis tested was ruled out.
 - **Issue #7's integration findings for the real Claude Code panel.** Both were

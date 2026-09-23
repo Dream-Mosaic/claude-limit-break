@@ -199,9 +199,11 @@ Open, roughly in priority order:
   `claude agents --json`.
 - [#11] a job waiting for Resume Now is lost on reload. Bundled with [#7]:
   reopening is the remedy [#7] recommends, so it must not cost a pending job.
-- [#6] stays open as the record of the behaviour until [#7] ships. What is left
-  in it is whether `claude agents --json` reliably says a panel tab is live,
-  which only matters for a tab in another window.
+- [#6] stays open as the record of the behaviour until [#7] ships. Its last
+  open question - whether `claude agents --json` can be believed when it says a
+  panel tab is live - was measured on 2026-09-22 and it can: no dead row
+  lingered after a closed tab or a closed window, and a reopened session comes
+  back as a new pid.
 - [#8] four small findings from reviewing the #4 and #5 fixes.
 - [#10] a reset time with no zone resolves an hour off across a DST change.
 - [#12] test gaps found by mutation testing, mostly in the limit parser.

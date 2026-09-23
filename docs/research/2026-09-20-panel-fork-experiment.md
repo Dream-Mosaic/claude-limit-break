@@ -94,8 +94,8 @@ written by the panel, removes those two and re-adds them.
 perfect — 37 panel lines with `c:\Users\…`, 30 CLI lines with `C:\Users\…`. But
 the session that ran this analysis has one client — all 2,191 of its lines that
 carry a `cwd` are `claude-vscode` — and still 35 casing flips, 33 of them
-immediately after a Bash tool call: Git Bash lowercases the drive letter and the next environment block
-reports it. Casing tracks whatever last set the cwd, not who sent the turn. It
+immediately after a Bash tool call: Git Bash lowercases the drive letter and
+the next environment block reports it. Casing tracks whatever last set the cwd, not who sent the turn. It
 was clean here only because this run used no tools.
 
 The transcript carries the direct signal, `entrypoint`, on every line. The model
@@ -114,13 +114,45 @@ cannot see it.
 4. **[#11] is now on the critical path.** A reload is what we are about to
    recommend, and a reload currently destroys a job waiting for Resume Now.
 
+## Follow-up: is the liveness oracle trustworthy? (2026-09-22)
+
+The warning needs to know a panel is live, and for a tab in another VS Code
+window the tab API cannot be asked. Measured on a disposable panel session
+(`0755b1ba`) in its own window, with every snapshot taken from a shell outside
+that window (`scripts/clb6-snap.ps1`):
+
+| Moment | Row in `claude agents --json` |
+|---|---|
+| tab open, idle | pid 62060 |
+| tab closed, checked after 10 and 37 minutes | none |
+| session reopened from Session history | pid 7476 - same session, new pid |
+| window closed, checked after 32 s and 75 s | none |
+
+**No dead row lingered.** Closing the tab ends the process and the listing
+drops it; closing the window does the same, within 32 seconds. That is the
+bound that matters, because a closed window is where a stale row would produce
+a warning about a tab that no longer exists.
+
+The reopen is the mechanism in one line: a reopened session comes back as a
+**new pid**. Reopening does not refresh a tab, it starts a process that reads
+the transcript from disk - which is why the fork stops being possible once the
+tab has been reopened.
+
+Bound honestly: the first post-close snapshot landed ten minutes after the tab
+was closed, so the tab-close case is <=10 minutes, not 30 seconds.
+
+An earlier, void run of the same probe (all six snapshots fired within one
+second, and the session filter was empty) still produced one datum worth
+keeping: all three pids it listed were genuinely in the process table,
+including the session behind this write-up, alive three days later with a
+record file untouched since. Recency of `~/.claude/sessions/<pid>.json` means
+nothing; the listing was right.
+
 ## Still open
 
-- **Whether `claude agents --json` is a trustworthy liveness oracle for a panel
-  tab**: whether the row survives a closed tab, how long a dead one lingers, and
-  whether a reopen gets a new pid. This only matters for a panel tab in a
-  *different* VS Code window, where `vscode.window.tabGroups` cannot see or close
-  it and a warning is all that is available.
+- **What a panel process does when its last turn ended in a real usage-limit
+  error.** The probe in #6 found one stays alive and keeps working after a 429,
+  so the state should match what was measured here, but that remains inferred.
 - **What triggers the systemic panel forks** seen in real sessions with no second
   process involved. Unchanged by this run.
 
