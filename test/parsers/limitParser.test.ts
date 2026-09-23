@@ -204,3 +204,7 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
 test('LIMIT_HINTS: \\blimit reached\\b', () => {
   assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
+  assert.ok(looksLikeLimitMessage('Weekly limit exceeded, resets in 2 hours'));
+});
