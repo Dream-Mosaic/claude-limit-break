@@ -997,3 +997,25 @@ test('the chime being off does not silence the warning', async () => {
     teardown(ctx);
   }
 });
+
+test('logs the webview tabs it saw when none of them is a Claude panel', async () => {
+  // The viewType match is `includes('claudeVSCodePanel')` and was verified
+  // against a synthetic webview, not the real panel (#7). If Claude Code ever
+  // changes that string, the feature quietly degrades to a text-only warning -
+  // so the tabs it looked at have to be visible somewhere, or diagnosing that
+  // means guessing.
+  staleSetup({ tabs: [{ input: new FakeTabInputWebview('mainThreadWebview-someOtherPanel'), label: 'Other' }] });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('someOtherPanel')),
+      `no log line named the tabs seen: ${JSON.stringify(vscodeFake.outputLines.slice(-3))}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
