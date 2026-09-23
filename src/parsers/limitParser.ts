@@ -198,6 +198,31 @@ const RULES: Rule[] = [
     },
 ];
 /**
+ * The soonest instant, starting from `today` and walking forward up to two
+ * calendar days, at which the named zone's wall clock reads `h:minute` and
+ * the result is still in the future relative to `now`.
+ *
+ * Re-derives the wall clock for each date instead of adding a flat 24h, so a
+ * DST change during the walk does not shift the result by an hour (issue
+ * #10: a flat-milliseconds roll-forward resumed the fall-back case an hour
+ * early, into a session that was still limited).
+ */
+function nextZonedOccurrence(
+    zone: string,
+    today: { y: number; m: number; d: number },
+    h: number,
+    minute: number,
+    now: Date
+): Date | undefined {
+    for (let dayOffset = 0; dayOffset <= 2; dayOffset++) {
+        const attempt = zonedWallClockToInstant(zone, today.y, today.m, today.d + dayOffset, h, minute);
+        if (attempt && attempt.getTime() > now.getTime()) {
+            return attempt;
+        }
+    }
+    return undefined;
+}
+/**
  * Turn a bare clock reading into the next future instant.
  *
  * Without a meridiem a 1-12 reading is ambiguous ("resets 3" could be 3am or
@@ -243,13 +268,7 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
     for (const h of candidateHours) {
         let candidate;
         if (zoneDay && ianaZone) {
-            // Walk forward day by day until the reading lands in the future.
-            for (let dayOffset = 0; dayOffset <= 2 && !candidate; dayOffset++) {
-                const attempt = zonedWallClockToInstant(ianaZone, zoneDay.y, zoneDay.m, zoneDay.d + dayOffset, h, minute);
-                if (attempt && attempt.getTime() > now.getTime()) {
-                    candidate = attempt;
-                }
-            }
+            candidate = nextZonedOccurrence(ianaZone, zoneDay, h, minute, now);
             if (!candidate) {
                 continue;
             }
@@ -258,24 +277,26 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
             // Interpret h:mm as a reading in UTC+offset, then convert to a real instant.
             candidate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, minute, 0, 0) -
                 signedOffsetMs);
+            // A numeric UTC offset carries no DST rules of its own, so a flat day is exact.
+            while (candidate.getTime() <= now.getTime()) {
+                candidate = new Date(candidate.getTime() + DAY_MS);
+            }
         }
         else {
             // No zone named in the notice: read the given zone - an explicit
             // override so a test can pin a fixed zone, since `TZ` is not
             // reliably honoured by Node on Windows (issue #10) - or the
             // process's own resolved zone otherwise, so production behaviour
-            // is unchanged when no override is given.
+            // is unchanged when no override is given. Walk forward and
+            // re-derive the wall clock exactly as the named-zone branch
+            // above does, rather than adding a flat DAY_MS once the "today"
+            // reading turns out to be in the past.
             const localZone = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
             const today = zoneToday(localZone, now);
-            candidate = today ? zonedWallClockToInstant(localZone, today.y, today.m, today.d, h, minute) : undefined;
+            candidate = today ? nextZonedOccurrence(localZone, today, h, minute, now) : undefined;
             if (!candidate) {
                 continue;
             }
-        }
-        // Roll forward a day at a time until it lands in the future. (The named-zone
-        // branch above already guarantees this, so the loop is a no-op there.)
-        while (candidate.getTime() <= now.getTime()) {
-            candidate = new Date(candidate.getTime() + DAY_MS);
         }
         if (!best || candidate.getTime() < best.getTime()) {
             best = candidate;
