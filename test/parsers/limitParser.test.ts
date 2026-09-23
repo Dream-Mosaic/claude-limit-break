@@ -212,3 +212,7 @@ test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
 test('LIMIT_HINTS: rate[- ]limit(ed|s)?', () => {
   assert.ok(looksLikeLimitMessage('You are being rate limited. Try again in 10 minutes'));
 });
+
+test("LIMIT_HINTS: you've/have hit...limit", () => {
+  assert.ok(looksLikeLimitMessage('You have used up your monthly limit. Try again in 3 hours'));
+});
