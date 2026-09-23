@@ -22,6 +22,16 @@ project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   notification with a "Reopen session tab" button) and `reopen` (close and
   reopen the tab without asking).
 
+### Fixed
+
+- A job waiting for "Resume Now" survives a window reload. It was held in
+  memory only, and the scheduler clears its own state before firing, so a
+  reload destroyed it without a word and the command then reported "nothing
+  pending" (#11). It now persists alongside the scheduler's state and is
+  restored at activation. Only reachable with `autoResume` off - but that is
+  the same reload now recommended for a stale panel tab, so the advice would
+  have taken the job with it.
+
 ### Notes
 
 - Whether a panel still holds a session is read from `claude agents --json`,
