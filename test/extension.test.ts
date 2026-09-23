@@ -1388,13 +1388,17 @@ test('each session gets its own trust re-check, not one cache for the window', a
   try {
     FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 3_600_000));
     await oneTick();
-    const afterFirst = trustReads.count;
-    // A second session, same unchanged config. Its trust has never been read.
+    // A second session, sooner than the first, so it becomes the one the
+    // status bar shows. Scheduling it costs exactly two reads: the check
+    // scheduling does itself, and this session's first re-check. A cache
+    // shared across sessions makes the second one disappear, because the
+    // mtime has not moved since the first session's check.
+    const before = trustReads.count;
     FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_800_000));
-    await oneTick();
+    await flush();
     assert.ok(
-      trustReads.count > afterFirst,
-      'the newly-soonest session must have its own first check, not inherit another session\'s',
+      trustReads.count - before >= 2,
+      `the newly-soonest session must get its own first check: ${trustReads.count - before} read(s)`,
     );
   } finally {
     trustConfigPath = '/fake/.claude.json';
