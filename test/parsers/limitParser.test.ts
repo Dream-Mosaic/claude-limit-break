@@ -247,3 +247,8 @@ test('normalize(): curly quotes fold to straight quotes', () => {
   assert.equal(normalize("You’ve hit your limit"), "You've hit your limit");
   assert.equal(normalize('Claude said “wait”'), 'Claude said "wait"');
 });
+
+test('normalize(): unicode dashes fold to ASCII hyphen', () => {
+  // U+2010 HYPHEN, as seen in a captured "rate‐limited" notice.
+  assert.equal(normalize('rate‐limited'), 'rate-limited');
+});
