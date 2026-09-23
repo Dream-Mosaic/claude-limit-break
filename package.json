@@ -149,6 +149,19 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "Sound file to play. Empty uses the system default. Machine-scoped: the path reaches a media player."
+        },
+        "claudeLimitBuster.onStale": {
+          "type": "string",
+          "enum": [
+            "notify",
+            "reopen"
+          ],
+          "enumDescriptions": [
+            "Show a notification with a button to reopen the tab.",
+            "Close and reopen the tab automatically."
+          ],
+          "default": "notify",
+          "markdownDescription": "What to do when a resumed session is still open in a Claude Code panel tab. That tab holds its own idea of where the conversation ends, so typing into it starts a branch that drops the resumed turn ([#6](https://github.com/Dream-Mosaic/claude-limit-buster/issues/6)). Reopening the tab clears it."
         }
       }
     }

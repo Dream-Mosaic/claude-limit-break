@@ -28,6 +28,8 @@ export class FakeEventEmitter<T> {
 export interface FakeTerminal {
   options: unknown;
   shown: number;
+  /** VS Code resolves the shell's pid asynchronously; so does this. */
+  processId: Promise<number | undefined>;
   show(): void;
   dispose(): void;
 }
@@ -74,6 +76,22 @@ class FakeThemeColor {
 }
 
 /**
+ * Stands in for `vscode.TabInputWebview`. Real code tells a webview tab
+ * apart from any other kind of tab with `instanceof`, so the fake has to be
+ * a real class the extension's `instanceof` check can see - a plain
+ * `{viewType}` object would silently fail that check and every reopen-offer
+ * test would see zero webview tabs no matter what was set up.
+ */
+export class FakeTabInputWebview {
+  constructor(public viewType: string) {}
+}
+
+export interface FakeTab {
+  input: unknown;
+  label: string;
+}
+
+/**
  * The mutable state behind the fake `vscode` module: what the extension reads,
  * and what it did. Set the inputs before calling `activate`, assert on the
  * recordings afterwards, and call {@link resetVscodeFake} between tests.
@@ -88,8 +106,14 @@ export const vscodeFake = {
   warnings: [] as string[],
   errors: [] as string[],
   terminals: [] as FakeTerminal[],
+  /** What a created terminal reports as its process id. */
+  terminalPid: 4242 as number | undefined,
   statusBarItems: [] as FakeStatusBarItem[],
   commands: new Map<string, (...args: unknown[]) => unknown>(),
+  /** What `vscode.window.tabGroups.all` reports, flattened to one group. */
+  tabs: [] as FakeTab[],
+  /** Tabs `tabGroups.close` has removed, in call order, for assertions. */
+  closedTabs: [] as FakeTab[],
 };
 
 export function resetVscodeFake(): void {
@@ -100,8 +124,11 @@ export function resetVscodeFake(): void {
   vscodeFake.warnings = [];
   vscodeFake.errors = [];
   vscodeFake.terminals = [];
+  vscodeFake.terminalPid = 4242;
   vscodeFake.statusBarItems = [];
   vscodeFake.commands = new Map();
+  vscodeFake.tabs = [];
+  vscodeFake.closedTabs = [];
 }
 
 const fakeVscode = {
@@ -109,7 +136,20 @@ const fakeVscode = {
   StatusBarAlignment: { Left: 1, Right: 2 },
   ThemeColor: FakeThemeColor,
   MarkdownString: FakeMarkdownString,
+  TabInputWebview: FakeTabInputWebview,
   window: {
+    tabGroups: {
+      get all() {
+        // One flattened group: nothing here cares which editor group a tab
+        // lives in, only whether it exists at all.
+        return [{ tabs: vscodeFake.tabs }];
+      },
+      close: (tab: FakeTab) => {
+        vscodeFake.tabs = vscodeFake.tabs.filter((t) => t !== tab);
+        vscodeFake.closedTabs.push(tab);
+        return Promise.resolve(true);
+      },
+    },
     createOutputChannel: (_name: string) => ({
       appendLine: (line: string) => vscodeFake.outputLines.push(line),
       show: () => {},
@@ -136,6 +176,7 @@ const fakeVscode = {
       const terminal: FakeTerminal = {
         options,
         shown: 0,
+        processId: Promise.resolve(vscodeFake.terminalPid),
         show() {
           this.shown += 1;
         },
@@ -172,6 +213,10 @@ const fakeVscode = {
         ? Promise.resolve(handler(...args))
         : Promise.reject(new Error(`no such command: ${id}`));
     },
+    // Real getCommands() lists thousands of built-ins; the fake only ever
+    // needs to answer "is this specific id known", so it reports whatever a
+    // test registered or set directly on vscodeFake.commands.
+    getCommands: (_filterInternal?: boolean) => Promise.resolve([...vscodeFake.commands.keys()]),
   },
   workspace: {
     getConfiguration: (_section: string) => ({

@@ -6,10 +6,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   FakeEventEmitter,
+  FakeTabInputWebview,
   installVscodeStub,
   resetVscodeFake,
   stubModule,
   vscodeFake,
+  type FakeTab,
 } from './helpers/vscode';
 
 installVscodeStub();
@@ -102,6 +104,23 @@ stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.pu
 // logic itself is the real one - only the wait is shortened.
 stubModule('./stallWatch', { GRACE_MS: 300, stallVerdict: realStallVerdict });
 
+/**
+ * Which sessions a panel is holding open, for the duration of one test, and a
+ * record of what the extension asked about. The real detector shells out to
+ * `claude agents --json` and reads ~/.claude/sessions, so letting it run for
+ * real here would make the suite depend on whichever Claude Code processes
+ * happen to be running on the machine at the time - including this one.
+ */
+let livePanelSessions = new Set<string>();
+const detectorCalls: { sessionId: string; ourPid: number | undefined }[] = [];
+
+stubModule('./liveSessions', {
+  livePanelDetector: () => (sessionId: string, ourPid: number | undefined) => {
+    detectorCalls.push({ sessionId, ourPid });
+    return livePanelSessions.has(sessionId);
+  },
+});
+
 stubModule('./trust', {
   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
   readClaudeUserConfig: () => undefined,
@@ -117,6 +136,8 @@ const { activate, isInsideWorkspace } =
 // every platform, so the resume path never touches PATH or the filesystem.
 const LAUNCHER = '/opt/claude/bin/claude';
 const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
+/** The pid the fake terminal reports, i.e. the resume this extension launched. */
+const TERMINAL_PID = 4242;
 const PROMPT = 'Continue where you left off.';
 
 // resume() now checks the cwd on the real filesystem before launching, so
@@ -768,6 +789,210 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
       0,
       'a failed launch from the palette must not have discarded the ready job',
     );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #7: a resumed session whose panel tab is still open on its pre-resume
+// state. Typing into that tab forks the transcript and abandons the resumed
+// turn (docs/research/2026-09-20-panel-fork-experiment.md), so the tab has to
+// be reopened - or the user warned - before that keystroke.
+// ---------------------------------------------------------------------------
+
+const REOPEN_COMMAND = 'claude-vscode.reopenClosedSession';
+
+const claudeTab = (label = 'Claude Code'): FakeTab => ({
+  input: new FakeTabInputWebview('mainThreadWebview-claudeVSCodePanel-1'),
+  label,
+});
+
+const staleNotices = () => vscodeFake.info.filter((m) => m.message.includes('panel tab'));
+
+/** Resume SESSION for real, so the extension records it as one of its own. */
+async function resumeSession(): Promise<void> {
+  const watcher = FakeWatcher.latest;
+  assert.ok(watcher, 'activate must have constructed a watcher');
+  watcher.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD);
+  await oneTick();
+  assert.equal(vscodeFake.terminals.length, 1, 'setup: the session must have been resumed');
+}
+
+const staleSetup = (opts: { onStale?: string; tabs?: FakeTab[]; livePanel?: boolean } = {}) => {
+  resetVscodeFake();
+  vscodeFake.config = {
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+    ...(opts.onStale ? { onStale: opts.onStale } : {}),
+  };
+  vscodeFake.workspaceFolders = [{ uri: { fsPath: REAL_CWD } }];
+  vscodeFake.tabs = opts.tabs ?? [claudeTab()];
+  vscodeFake.commands.set(REOPEN_COMMAND, () => undefined);
+  livePanelSessions = new Set(opts.livePanel === false ? [] : [SESSION]);
+  detectorCalls.length = 0;
+};
+
+test('warns before the user can type into a resumed session stale panel tab', async () => {
+  staleSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    const notices = staleNotices();
+    assert.equal(notices.length, 1, 'exactly one notice for the one stale tab');
+    assert.match(notices[0]!.message, /before you type/i);
+    assert.equal(notices[0]!.items[0], 'Reopen session tab');
+    assert.equal(vscodeFake.closedTabs.length, 0, 'notify must not close anything unasked');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('says nothing when no panel holds the session', async () => {
+  staleSetup({ livePanel: false });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.deepEqual(staleNotices(), []);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('says nothing for a session this extension did not resume', async () => {
+  // onInputNeeded fires for every turn in every session on the machine. A
+  // panel session nobody resumed has no stale tab to warn about.
+  staleSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.deepEqual(staleNotices(), []);
+    assert.deepEqual(detectorCalls, [], 'and it must not even go looking');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('excludes its own resume terminal when asking who else holds the session', async () => {
+  // The resumed `claude` is itself a live interactive process on that
+  // session. Counting it would make every resume warn about itself.
+  staleSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(detectorCalls.length, 1);
+    assert.equal(detectorCalls[0]!.sessionId, SESSION);
+    assert.equal(detectorCalls[0]!.ourPid, TERMINAL_PID);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('clicking the button closes the tab and reopens the session', async () => {
+  staleSetup();
+  const reopened: string[] = [];
+  const ctx = contextOver(new Map());
+  start(ctx);
+  vscodeFake.commands.set(REOPEN_COMMAND, () => {
+    reopened.push(REOPEN_COMMAND);
+  });
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    const notice = staleNotices()[0];
+    assert.ok(notice);
+    notice.answer('Reopen session tab');
+    await flush();
+    assert.equal(vscodeFake.closedTabs.length, 1, 'the stale tab must be closed');
+    assert.deepEqual(reopened, [REOPEN_COMMAND]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('onStale reopen closes and reopens the tab without asking', async () => {
+  staleSetup({ onStale: 'reopen' });
+  const reopened: string[] = [];
+  vscodeFake.commands.set(REOPEN_COMMAND, () => {
+    reopened.push(REOPEN_COMMAND);
+  });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(vscodeFake.closedTabs.length, 1);
+    assert.deepEqual(reopened, [REOPEN_COMMAND]);
+    const notice = staleNotices()[0];
+    assert.ok(notice, 'and it still says what it did');
+    assert.equal(notice.items.length, 0, 'with nothing left to press');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('warns without a button when the tab is not in this window', async () => {
+  // vscode.window.tabGroups only sees this window. A panel tab in another one
+  // cannot be closed from here, and that is the case most likely to be typed
+  // into, so the warning still has to arrive.
+  staleSetup({ tabs: [] });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    const notices = staleNotices();
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.message, /before you type/i);
+    assert.equal(notices[0]!.items.length, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('does not act on a guess when several Claude tabs are open', async () => {
+  // Nothing ties a tab to a session id - #7 - so with two candidates the
+  // right one cannot be identified, and closing the wrong one would lose a
+  // different conversation's tab.
+  staleSetup({ onStale: 'reopen', tabs: [claudeTab('Claude Code'), claudeTab('Claude Code 2')] });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(vscodeFake.closedTabs.length, 0, 'no tab may be closed on a guess');
+    assert.match(staleNotices()[0]!.message, /before you type/i);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the chime being off does not silence the warning', async () => {
+  staleSetup();
+  vscodeFake.config = { ...vscodeFake.config, alertSound: false };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(staleNotices().length, 1);
   } finally {
     teardown(ctx);
   }

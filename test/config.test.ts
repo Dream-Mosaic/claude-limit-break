@@ -118,3 +118,18 @@ test('execution-adjacent settings are machine-scoped', () => {
     );
   }
 });
+
+test('a stale panel tab is reported, not acted on, by default', () => {
+  // The experiment in docs/research/2026-09-20-panel-fork-experiment.md is why
+  // this setting exists at all. Closing someone's editor tab is the one thing
+  // here that cannot be undone by ignoring a notification, so it is opt-in.
+  assert.equal(readSettings(source()).onStale, 'notify');
+});
+
+test('onStale accepts reopen', () => {
+  assert.equal(readSettings(source({ onStale: 'reopen' })).onStale, 'reopen');
+});
+
+test('an unknown onStale value falls back to notify', () => {
+  assert.equal(readSettings(source({ onStale: 'close' })).onStale, 'notify');
+});
