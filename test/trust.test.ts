@@ -14,46 +14,46 @@ import {
 
 test('normalizeProjectPath folds backslashes, drive-letter casing, and a trailing slash to the same key', () => {
   assert.equal(
-    normalizeProjectPath('C:\\Users\\x\\proj\\'),
-    normalizeProjectPath('c:/Users/x/proj'),
+    normalizeProjectPath('C:\\Users\\x\\proj\\', 'win32'),
+    normalizeProjectPath('c:/Users/x/proj', 'win32'),
   );
 });
 
 test('isFolderTrusted is true only when the matching project explicitly accepted the dialog', () => {
   const config = { projects: { '/projects/example': { hasTrustDialogAccepted: true } } };
-  assert.equal(isFolderTrusted('/projects/example', config), true);
+  assert.equal(isFolderTrusted('/projects/example', config, 'linux'), true);
 });
 
 test('isFolderTrusted is false when the flag is explicitly false', () => {
   const config = { projects: { '/projects/example': { hasTrustDialogAccepted: false } } };
-  assert.equal(isFolderTrusted('/projects/example', config), false);
+  assert.equal(isFolderTrusted('/projects/example', config, 'linux'), false);
 });
 
 test('isFolderTrusted is false when the project is not tracked at all', () => {
   const config = { projects: {} };
-  assert.equal(isFolderTrusted('/projects/example', config), false);
+  assert.equal(isFolderTrusted('/projects/example', config, 'linux'), false);
 });
 
 test('isFolderTrusted is false when there is no config to check against', () => {
   // Panel-created sessions and a machine where .claude.json could not be
   // read land here alike - both mean "trust was never confirmed", which is
   // exactly the state that stalls a resume at the CLI's trust prompt.
-  assert.equal(isFolderTrusted('/projects/example', undefined), false);
+  assert.equal(isFolderTrusted('/projects/example', undefined, 'linux'), false);
 });
 
-test('isFolderTrusted matches despite drive-letter casing and slash-direction differences', () => {
+test('isFolderTrusted matches despite drive-letter casing and slash-direction differences (win32)', () => {
   const config = { projects: { 'c:/Users/x/proj': { hasTrustDialogAccepted: true } } };
-  assert.equal(isFolderTrusted('C:\\Users\\x\\proj', config), true);
+  assert.equal(isFolderTrusted('C:\\Users\\x\\proj', config, 'win32'), true);
 });
 
 test('isFolderTrusted matches despite a trailing slash on the recorded key', () => {
   const config = { projects: { 'C:/Users/x/proj/': { hasTrustDialogAccepted: true } } };
-  assert.equal(isFolderTrusted('C:/Users/x/proj', config), true);
+  assert.equal(isFolderTrusted('C:/Users/x/proj', config, 'win32'), true);
 });
 
 test('isFolderTrusted does not match a sibling project sharing a prefix', () => {
   const config = { projects: { '/projects/example-old': { hasTrustDialogAccepted: true } } };
-  assert.equal(isFolderTrusted('/projects/example', config), false);
+  assert.equal(isFolderTrusted('/projects/example', config, 'linux'), false);
 });
 
 // --- Case folding is platform-specific (#8 finding 3) -----------------------
@@ -174,7 +174,7 @@ test('only an explicit true counts as trusted, never a merely truthy value', () 
   for (const value of ['yes', 'true', 1]) {
     const config = { projects: { '/p': { hasTrustDialogAccepted: value } } };
     assert.equal(
-      trusted('/p', config as unknown as Parameters<typeof trusted>[1]),
+      trusted('/p', config as unknown as Parameters<typeof trusted>[1], 'linux'),
       false,
       `hasTrustDialogAccepted: ${JSON.stringify(value)} must not count as trusted`,
     );

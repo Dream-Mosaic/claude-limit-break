@@ -142,6 +142,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ? isFolderTrusted(
           plan.job.cwd,
           readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
+          process.platform,
         )
       : undefined;
     const job = { ...plan.job, folderTrusted };
