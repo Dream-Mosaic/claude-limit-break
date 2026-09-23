@@ -66,3 +66,65 @@ export function compareVersions(a: string, b: string): VersionOrder {
   }
   return 'equal';
 }
+
+// ---------------------------------------------------------------------------
+// The decision: check the network, stay quiet, or tell the user
+// ---------------------------------------------------------------------------
+
+export interface UpdateCheckInput {
+  /** This build's own version, from package.json - no leading `v`. */
+  currentVersion: string;
+  /** The newest tag known from the last successful check, if any. */
+  latestTag: string | undefined;
+  /** When that check ran, per Date.now(), if it ever has. */
+  lastCheckedMs: number | undefined;
+  /** Injected rather than read live, so this stays a pure function. */
+  now: number;
+  /** Minimum gap between two network checks. */
+  intervalMs: number;
+  /** The tag the user last dismissed a notification for, if any. */
+  dismissedVersion: string | undefined;
+}
+
+export type UpdateCheckAction =
+  | { kind: 'check' }
+  | { kind: 'skip' }
+  | { kind: 'notify'; latestTag: string }
+  | { kind: 'quiet' };
+
+/**
+ * What to do this activation, given the cached state and the clock.
+ *
+ * `check` fires whenever the interval has elapsed (or nothing has ever been
+ * checked) - the caller performs the one network call this allows and then
+ * calls this function again with `lastCheckedMs` and `latestTag` refreshed,
+ * to get the notify/quiet verdict for the value it just fetched. That second
+ * call cannot itself return `check` again, because by then `lastCheckedMs` is
+ * `now`: the network call this decides is capped at once per activation, but
+ * this pure function is cheap to call twice to get both the "should I fetch"
+ * and "should I say something" answers out of the one fetch.
+ *
+ * Below the interval, the verdict comes from whatever is already cached:
+ * `skip` when there is nothing cached to say anything about, `notify` when
+ * the cached tag is newer than `currentVersion` and was not the one the user
+ * already dismissed, and `quiet` for every other case - up to date, cached
+ * tag is older (a pre-release ahead of the newest tag), the cached tag is
+ * malformed (`compareVersions` returns `unknown`, never treated as newer),
+ * or the user has already dismissed exactly this tag.
+ */
+export function decideUpdateCheck(input: UpdateCheckInput): UpdateCheckAction {
+  const due = input.lastCheckedMs === undefined || input.now - input.lastCheckedMs >= input.intervalMs;
+  if (due) {
+    return { kind: 'check' };
+  }
+  if (input.latestTag === undefined) {
+    return { kind: 'skip' };
+  }
+  if (input.latestTag === input.dismissedVersion) {
+    return { kind: 'quiet' };
+  }
+  if (compareVersions(input.currentVersion, input.latestTag) === 'less') {
+    return { kind: 'notify', latestTag: input.latestTag };
+  }
+  return { kind: 'quiet' };
+}
