@@ -41,6 +41,10 @@
       {
         "command": "claudeLimitBuster.showLog",
         "title": "Claude Limit Buster: Show Log"
+      },
+      {
+        "command": "claudeLimitBuster.statusBarMenu",
+        "title": "Claude Limit Buster: Status Bar Menu"
       }
     ],
     "configuration": {
@@ -162,6 +166,21 @@
           ],
           "default": "notify",
           "markdownDescription": "What to do when a resumed session is still open in a Claude Code panel tab. That tab holds its own idea of where the conversation ends, so typing into it starts a branch that drops the resumed turn ([#6](https://github.com/Dream-Mosaic/claude-limit-buster/issues/6)). Reopening the tab clears it."
+        },
+        "claudeLimitBuster.statusBar": {
+          "type": "string",
+          "enum": [
+            "always",
+            "pending",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Show a marker while watching, and the countdown when a resume is pending.",
+            "Show the countdown only; nothing while idle.",
+            "Never show a status bar item."
+          ],
+          "default": "always",
+          "markdownDescription": "When to show the status bar item. `always` keeps a small marker visible while watching, so a window with the extension running does not look identical to one where it failed to load."
         }
       }
     }

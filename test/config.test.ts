@@ -133,3 +133,14 @@ test('onStale accepts reopen', () => {
 test('an unknown onStale value falls back to notify', () => {
   assert.equal(readSettings(source({ onStale: 'close' })).onStale, 'notify');
 });
+
+test('the status bar shows a marker when idle by default', () => {
+  // A VSIX-installed extension that shows nothing while waiting looks broken.
+  assert.equal(readSettings(source()).statusBar, 'always');
+});
+
+test('statusBar accepts pending and never, and rejects anything else', () => {
+  assert.equal(readSettings(source({ statusBar: 'pending' })).statusBar, 'pending');
+  assert.equal(readSettings(source({ statusBar: 'never' })).statusBar, 'never');
+  assert.equal(readSettings(source({ statusBar: 'sometimes' })).statusBar, 'always');
+});

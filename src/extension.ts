@@ -460,7 +460,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
-    scheduler.onChange((job) => status.update(job, scheduler.jobs.length)),
+    scheduler.onChange((job) => status.update(job, scheduler.jobs.length, settings().statusBar)),
     scheduler.onFire((job) => {
       const s = settings();
       if (!s.autoResume) {
@@ -552,6 +552,40 @@ export function activate(context: vscode.ExtensionContext): void {
       scheduler.cancel();
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
+    /**
+     * What a click on the status bar opens (#3).
+     *
+     * It used to run Cancel directly: a countdown invites a click to look at
+     * it, and the only warning that the click destroyed the pending resume
+     * was the last line of a six-line tooltip. Every other status-bar item in
+     * VS Code that shows state opens something. Cancel is still here, one
+     * deliberate keystroke further away, and dismissing the menu does nothing
+     * at all.
+     */
+    vscode.commands.registerCommand(`${NS}.statusBarMenu`, async () => {
+      const waiting = scheduler.jobs.length + readyJobs.length;
+      const items = [
+        {
+          label: 'Resume Now',
+          description: waiting > 0 ? 'Start the soonest waiting session immediately' : 'Nothing is waiting',
+          command: `${NS}.resumeNow`,
+        },
+        {
+          label: 'Cancel Pending Resume',
+          description: waiting > 0 ? `Discard ${waiting} waiting resume(s)` : 'Nothing to cancel',
+          command: `${NS}.cancel`,
+        },
+        { label: 'Show Log', description: 'Open the Claude Limit Buster output channel', command: `${NS}.showLog` },
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        title: 'Claude Limit Buster',
+        placeHolder: waiting > 0 ? `${waiting} resume(s) waiting` : 'Watching for usage limits',
+      });
+      if (!picked) {
+        return;
+      }
+      await vscode.commands.executeCommand(picked.command);
+    }),
   );
 
   scheduler.start();

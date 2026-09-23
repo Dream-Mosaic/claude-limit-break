@@ -193,6 +193,9 @@ const manualConfig = () => ({
   randomDelayMaxMinutes: 0,
 });
 
+/** A job whose deadline has not arrived, so it stays pending. */
+const futureJob = () => ({ ...pastJob(), resumeAtMs: Date.now() + 3_600_000, baseResumeAtMs: Date.now() + 3_600_000 });
+
 const pastJob = (cwd: string = REAL_CWD) => {
   const resumeAtMs = Date.now() - 1000;
   return {
@@ -1112,6 +1115,48 @@ test('cancelling clears the waiting jobs from storage too', async () => {
     vscodeFake.commands.get('claudeLimitBuster.cancel')!();
     await flush();
     assert.equal(store.get(READY_KEY), undefined, 'cancel must not leave it to come back on reload');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the status bar menu offers the three commands and runs the one picked', async () => {
+  // Issue #3: the click used to be a bare destructive action.
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu');
+    assert.ok(menu, 'the menu command must be registered');
+    vscodeFake.quickPickAnswer = 'Show Log';
+    await menu();
+    const offered = vscodeFake.quickPicks[0];
+    assert.ok(offered, 'a quick pick must have been shown');
+    assert.deepEqual(
+      offered.items.map((i) => i.label).sort(),
+      ['Cancel Pending Resume', 'Resume Now', 'Show Log'],
+    );
+    assert.equal(vscodeFake.shownChannels, 1, 'picking Show Log must open the log');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the menu can cancel, and only when that is what was picked', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBuster.pending', futureJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!;
+    vscodeFake.quickPickAnswer = undefined; // dismissed with Escape
+    await menu();
+    assert.ok(store.get('claudeLimitBuster.pending'), 'dismissing must not cancel anything');
+    vscodeFake.quickPickAnswer = 'Cancel Pending Resume';
+    await menu();
+    assert.equal(store.get('claudeLimitBuster.pending'), undefined, 'picking cancel must cancel');
   } finally {
     teardown(ctx);
   }

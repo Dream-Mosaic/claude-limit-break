@@ -13,6 +13,7 @@ export interface Settings {
   notify: boolean;
   alertSound: boolean;
   alertSoundFile: string;
+  statusBar: 'always' | 'pending' | 'never';
   onStale: 'notify' | 'reopen';
 }
 
@@ -23,6 +24,7 @@ export interface ConfigSource {
 const RESUME_MODES = ['interactive', 'headless'] as const;
 const PERMISSION_MODES = ['', 'default', 'acceptEdits', 'plan'] as const;
 const STALE_ACTIONS = ['notify', 'reopen'] as const;
+const STATUS_BAR_MODES = ['always', 'pending', 'never'] as const;
 
 const oneOf = <T extends readonly string[]>(list: T, value: unknown, fallback: T[number]): T[number] =>
   (list as readonly string[]).includes(value as string) ? (value as T[number]) : fallback;
@@ -50,5 +52,6 @@ export function readSettings(c: ConfigSource): Settings {
     alertSound: c.get('alertSound', true),
     alertSoundFile: str(c.get('alertSoundFile', ''), ''),
     onStale: oneOf(STALE_ACTIONS, c.get('onStale', 'notify'), 'notify'),
+    statusBar: oneOf(STATUS_BAR_MODES, c.get('statusBar', 'always'), 'always'),
   };
 }

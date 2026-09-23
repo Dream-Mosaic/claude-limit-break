@@ -112,6 +112,11 @@ export const vscodeFake = {
   commands: new Map<string, (...args: unknown[]) => unknown>(),
   /** What `vscode.window.tabGroups.all` reports, flattened to one group. */
   tabs: [] as FakeTab[],
+  /** Quick picks shown, in call order, and the label the next one answers with. */
+  quickPicks: [] as { items: { label: string }[] }[],
+  quickPickAnswer: undefined as string | undefined,
+  /** How many times the output channel was shown. */
+  shownChannels: 0,
   /** Tabs `tabGroups.close` has removed, in call order, for assertions. */
   closedTabs: [] as FakeTab[],
 };
@@ -127,6 +132,9 @@ export function resetVscodeFake(): void {
   vscodeFake.terminalPid = 4242;
   vscodeFake.statusBarItems = [];
   vscodeFake.commands = new Map();
+  vscodeFake.quickPicks = [];
+  vscodeFake.quickPickAnswer = undefined;
+  vscodeFake.shownChannels = 0;
   vscodeFake.tabs = [];
   vscodeFake.closedTabs = [];
 }
@@ -152,9 +160,19 @@ const fakeVscode = {
     },
     createOutputChannel: (_name: string) => ({
       appendLine: (line: string) => vscodeFake.outputLines.push(line),
-      show: () => {},
+      show: () => {
+        vscodeFake.shownChannels += 1;
+      },
       dispose: () => {},
     }),
+    // Answers with whatever a test parked in quickPickAnswer, matched back to
+    // the item the extension offered - so a test names a label rather than an
+    // index, and reordering the menu cannot silently change what it picks.
+    showQuickPick: (items: { label: string }[]) => {
+      vscodeFake.quickPicks.push({ items });
+      const picked = items.find((i) => i.label === vscodeFake.quickPickAnswer);
+      return Promise.resolve(picked);
+    },
     createStatusBarItem: (alignment: number, priority: number): FakeStatusBarItem => {
       const item: FakeStatusBarItem = {
         alignment,
