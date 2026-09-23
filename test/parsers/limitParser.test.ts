@@ -160,3 +160,36 @@ test('the real session-limit notices this project captured resolve to the right 
     assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for: ${text}`);
   }
 });
+
+test('a zoneless reset time crossing a DST change still resolves to the right wall clock (#10)', () => {
+  // "You have hit your session limit, resets 5am" carries no zone of its own,
+  // so this exercises the "no zone named in the notice" branch of
+  // resolveClockTime - the one that used to roll an already-past reading
+  // forward by a flat 24h (DAY_MS) instead of advancing the calendar date and
+  // re-deriving the wall clock. A `zone` override pins the case to
+  // America/Chicago without depending on the machine's own zone: `TZ` is not
+  // reliably honoured by Node on Windows, so a bare `process.env.TZ` swap
+  // would not actually move this test.
+  //
+  // Each `now` is 22:00 local the night before the reset, exactly as in issue
+  // #10's repro. The three nights are the issue's own table:
+  //   2024-03-09 -> reset morning 2024-03-10 is the US spring-forward day.
+  //   2024-11-02 -> reset morning 2024-11-03 is the US fall-back day.
+  //   2024-06-10 -> control, no DST crossing, isolates the cause.
+  // In every case the expected wall clock is 05:00 America/Chicago. Before
+  // the fix this resolved to 06:00 (spring forward) and, worse, 04:00 (fall
+  // back) - an hour *before* the limit actually lifts, resuming into a
+  // session that is still limited.
+  const text = 'You have hit your session limit, resets 5am';
+  const cases: [string, string, string][] = [
+    ['2024-03-09 spring forward', '2024-03-10T04:00:00.000Z', '2024-03-10T10:00:00.000Z'],
+    ['2024-11-02 fall back', '2024-11-03T03:00:00.000Z', '2024-11-03T11:00:00.000Z'],
+    ['2024-06-10 control', '2024-06-11T03:00:00.000Z', '2024-06-11T10:00:00.000Z'],
+  ];
+  for (const [label, nowIso, expected] of cases) {
+    const now = new Date(nowIso);
+    const hit = detectLimit(text, now, MAXW, { zone: 'America/Chicago' });
+    assert.ok(hit, `not detected (${label}): ${text}`);
+    assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for ${label}`);
+  }
+});
