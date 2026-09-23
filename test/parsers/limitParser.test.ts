@@ -240,3 +240,10 @@ test('LIMIT_HINTS: error...429', () => {
 test('LIMIT_HINTS: 429...too many requests', () => {
   assert.ok(looksLikeLimitMessage('429 Too Many Requests. Try again in 3 hours'));
 });
+
+// Issue #12: normalize()'s curly-quote, dash and escaped-newline transforms
+// were each unpinned - deleting any one line left the whole suite green.
+test('normalize(): curly quotes fold to straight quotes', () => {
+  assert.equal(normalize("You’ve hit your limit"), "You've hit your limit");
+  assert.equal(normalize('Claude said “wait”'), 'Claude said "wait"');
+});
