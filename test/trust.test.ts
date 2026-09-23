@@ -79,8 +79,52 @@ test('readClaudeUserConfig returns undefined on invalid JSON rather than throwin
   assert.equal(config, undefined);
 });
 
-test('defaultClaudeConfigPath points at .claude.json under the home directory', () => {
-  assert.equal(defaultClaudeConfigPath(), path.join(os.homedir(), '.claude.json'));
+test('defaultClaudeConfigPath points at .claude.json under the home directory when CLAUDE_CONFIG_DIR is unset', () => {
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    assert.equal(defaultClaudeConfigPath(), path.join(os.homedir(), '.claude.json'));
+  } finally {
+    if (saved !== undefined) {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+  }
+});
+
+test('defaultClaudeConfigPath honours CLAUDE_CONFIG_DIR (#8) - the CLI relocates .claude.json there too, verified by reading its own bundle', () => {
+  // The CLI resolves the file as `path.join(process.env.CLAUDE_CONFIG_DIR ||
+  // <homedir-fallback>, '.claude.json')` - CLAUDE_CONFIG_DIR replaces
+  // homedir() wholesale for this file, the same as it does for ~/.claude
+  // itself. Left unhonoured, a scheduled resume reads no config, treats
+  // every folder as untrusted, and warns wrongly on every single fire.
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'clb-custom-claude-home');
+  try {
+    assert.equal(
+      defaultClaudeConfigPath(),
+      path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json'),
+    );
+  } finally {
+    if (saved === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+  }
+});
+
+test('an empty CLAUDE_CONFIG_DIR falls back to the home directory, matching the CLI (it checks truthiness, not just defined-ness)', () => {
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = '';
+  try {
+    assert.equal(defaultClaudeConfigPath(), path.join(os.homedir(), '.claude.json'));
+  } finally {
+    if (saved === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+  }
 });
 
 test('only an explicit true counts as trusted, never a merely truthy value', () => {
