@@ -224,3 +224,7 @@ test('LIMIT_HINTS: out of (tokens|credits|usage|quota)', () => {
 test('LIMIT_HINTS: \\d+-hour limit', () => {
   assert.ok(looksLikeLimitMessage('5-hour limit exceeded. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: quota (exceeded|reached|exhausted)', () => {
+  assert.ok(looksLikeLimitMessage('Your monthly quota exhausted. Try again in 3 hours'));
+});
