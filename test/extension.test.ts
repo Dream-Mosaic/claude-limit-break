@@ -1019,3 +1019,100 @@ test('logs the webview tabs it saw when none of them is a Claude panel', async (
     teardown(ctx);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Issue #11: a job waiting for Resume Now must survive a window reload. This
+// matters more since #7: reopening the window is the remedy recommended for a
+// stale panel tab, so the advice would otherwise destroy the very job it is
+// given alongside.
+// ---------------------------------------------------------------------------
+
+const READY_KEY = 'claudeLimitBuster.ready';
+
+test('a job waiting for Resume Now survives a reload', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const first = contextOver(store);
+  start(first);
+  await oneTick();
+  assert.ok(offers()[0], 'setup: the job must have been offered for manual resume');
+  assert.equal(vscodeFake.terminals.length, 0, 'setup: autoResume is off');
+  // A reload is exactly this: every subscription disposed, then activate again
+  // over the same globalState.
+  teardown(first);
+
+  const second = contextOver(store);
+  start(second);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    assert.ok(resumeNow);
+    resumeNow();
+    await flush();
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+      0,
+      'the job was waiting before the reload and must still be there after it',
+    );
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Now must launch the restored job');
+  } finally {
+    teardown(second);
+  }
+});
+
+test('a restored job carries the session it was scheduled for', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const first = contextOver(store);
+  start(first);
+  await oneTick();
+  teardown(first);
+
+  const second = contextOver(store);
+  start(second);
+  try {
+    vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await flush();
+    assert.ok(
+      argsOf(0)?.includes(SESSION),
+      `the restored resume must name the same session: ${JSON.stringify(argsOf(0))}`,
+    );
+  } finally {
+    teardown(second);
+  }
+});
+
+test('a job resumed by hand is not left behind for the next window', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: it must have resumed');
+    assert.equal(store.get(READY_KEY), undefined, 'a claimed job must not be persisted');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('cancelling clears the waiting jobs from storage too', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(store.get(READY_KEY), 'setup: the waiting job must have been persisted');
+    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    await flush();
+    assert.equal(store.get(READY_KEY), undefined, 'cancel must not leave it to come back on reload');
+  } finally {
+    teardown(ctx);
+  }
+});

@@ -22,6 +22,14 @@ import { execFileSync } from 'node:child_process';
 const NS = 'claudeLimitBuster';
 
 /**
+ * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
+ * the scheduler's own `claudeLimitBuster.pending`: these have already fired,
+ * and putting them back there would leave the scheduler counting down to a
+ * deadline that has passed.
+ */
+const READY_KEY = 'claudeLimitBuster.ready';
+
+/**
  * Whether a transcript entry's working directory belongs to this window.
  *
  * The transcript watcher is global — it sees every Claude session in every
@@ -71,6 +79,20 @@ export function activate(context: vscode.ExtensionContext): void {
   // the first, and its notification would then resume the wrong session.
   const readyJobs: PendingJob[] = [];
 
+  /**
+   * Written through to globalState on every change, and read back at
+   * activation.
+   *
+   * Without this a reload silently destroyed a job waiting to be started by
+   * hand: the scheduler clears its own state before firing, so this list was
+   * the only thing holding it, and it lived in memory alone (#11). That
+   * matters more since #7, where reopening the window is the remedy offered
+   * for a stale panel tab — the advice would otherwise take the job with it.
+   */
+  const persistReady = () => {
+    void context.globalState.update(READY_KEY, readyJobs.length > 0 ? [...readyJobs] : undefined);
+  };
+
   /** Drop a remembered job. Reports whether it was still there to drop. */
   const forgetReady = (sessionId: string) => {
     const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
@@ -78,6 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return false;
     }
     readyJobs.splice(at, 1);
+    persistReady();
     return true;
   };
 
@@ -85,7 +108,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const rememberReady = (job: PendingJob) => {
     forgetReady(job.sessionId);
     readyJobs.push(job);
+    persistReady();
   };
+
+  // Restored before anything can add to the list. A job read back here is one
+  // the previous window offered and nobody answered; it stays claimable from
+  // "Resume Now", which is what the setting's description promises.
+  const restoredReady = context.globalState.get<PendingJob[]>(READY_KEY) ?? [];
+  if (restoredReady.length > 0) {
+    readyJobs.push(...restoredReady);
+    log.info(`Restored ${restoredReady.length} resume(s) still waiting to be started by hand.`);
+  }
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
@@ -514,6 +547,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (readyJobs.length > 0) {
         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
         readyJobs.length = 0;
+        persistReady();
       }
       scheduler.cancel();
     }),
