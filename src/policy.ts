@@ -1,5 +1,5 @@
 import { resolveSession } from './sessionResolver';
-import { checkBudget } from './budget';
+import { checkBudget, type UsageRecord } from './budget';
 import type { Settings } from './config';
 import type { PendingJob } from './scheduler';
 
@@ -15,6 +15,12 @@ export function planResume(
   statBytes: (p: string) => number,
   now: Date,
   jitter: (min: number, max: number) => number,
+  /**
+   * The newest usage record in the transcript, when one can be read. It says
+   * what the live context actually is; the byte count only says how much has
+   * ever been written to the file. See estimateResumeTokens.
+   */
+  readUsage?: (transcript: string) => UsageRecord | undefined,
 ): Plan {
   if (!settings.enabled) {
     return { kind: 'ignore', reason: 'Extension disabled.' };
@@ -25,7 +31,7 @@ export function planResume(
     // cannot name is how one project's prompt lands in another project.
     return { kind: 'ignore', reason: `Not a session transcript: ${hit.file}` };
   }
-  const verdict = checkBudget(session.bytes, settings.maxResumeTokens);
+  const verdict = checkBudget(session.bytes, settings.maxResumeTokens, readUsage?.(session.transcript));
   if (!verdict.allowed) {
     return { kind: 'refuse', reason: verdict.reason ?? 'Over the token budget.' };
   }

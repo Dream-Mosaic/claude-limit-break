@@ -108,9 +108,9 @@
         },
         "claudeLimitBuster.maxResumeTokens": {
           "type": "number",
-          "default": 150000,
+          "default": 500000,
           "scope": "window",
-          "markdownDescription": "Refuse to resume when the estimated cost exceeds this. A limit wait guarantees a cold cache, so a resume reprocesses the whole session. Measured against the **pre-flight estimate**, not actual usage. `0` disables the check."
+          "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - and falls back to a byte count only when there is none. Set to `0` to never refuse."
         },
         "claudeLimitBuster.maxWaitHours": {
           "type": "number",

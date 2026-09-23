@@ -104,6 +104,8 @@ export const vscodeFake = {
   outputLines: [] as string[],
   info: [] as FakeInfoMessage[],
   warnings: [] as string[],
+  /** Warnings that carried action buttons, answerable like info messages. */
+  warningOffers: [] as FakeInfoMessage[],
   errors: [] as string[],
   terminals: [] as FakeTerminal[],
   /** What a created terminal reports as its process id. */
@@ -127,6 +129,7 @@ export function resetVscodeFake(): void {
   vscodeFake.outputLines = [];
   vscodeFake.info = [];
   vscodeFake.warnings = [];
+  vscodeFake.warningOffers = [];
   vscodeFake.errors = [];
   vscodeFake.terminals = [];
   vscodeFake.terminalPid = 4242;
@@ -211,9 +214,17 @@ const fakeVscode = {
       vscodeFake.info.push({ message, items, answer: (item?: string) => settle(item) });
       return answered;
     },
-    showWarningMessage: (message: string) => {
+    // Mirrors showInformationMessage: a warning can carry action buttons
+    // too, and the budget refusal offers one. `warnings` stays a string
+    // array so the tests that only read messages keep working.
+    showWarningMessage: (message: string, ...items: string[]) => {
       vscodeFake.warnings.push(message);
-      return Promise.resolve(undefined);
+      let settle: (item: string | undefined) => void = () => {};
+      const answered = new Promise<string | undefined>((r) => {
+        settle = r;
+      });
+      vscodeFake.warningOffers.push({ message, items, answer: (item?: string) => settle(item) });
+      return answered;
     },
     showErrorMessage: (message: string) => {
       vscodeFake.errors.push(message);

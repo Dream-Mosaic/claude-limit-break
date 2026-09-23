@@ -43,7 +43,7 @@ export function readSettings(c: ConfigSource): Settings {
     headlessPermissionMode: oneOf(PERMISSION_MODES, c.get('headlessPermissionMode', ''), ''),
     claudeCommand: str(c.get('claudeCommand', ''), ''),
     resumePrompt: str(c.get('resumePrompt', 'Continue where you left off.'), 'Continue where you left off.'),
-    maxResumeTokens: atLeast(c.get('maxResumeTokens', 150_000), 0, 150_000),
+    maxResumeTokens: atLeast(c.get('maxResumeTokens', 500_000), 0, 500_000),
     maxWaitHours: atLeast(c.get('maxWaitHours', 24), 1, 24),
     transcriptPollSeconds: atLeast(c.get('transcriptPollSeconds', 5), 1, 5),
     randomDelayMinMinutes: atLeast(c.get('randomDelayMinMinutes', 5), 0, 5),

@@ -121,10 +121,22 @@ stubModule('./liveSessions', {
   },
 });
 
+/**
+ * Where the fake trust module says the CLI's config lives, and how many times
+ * it has actually been read. A test that cares about the mtime cache points
+ * this at a real temp file: the re-check is skipped on an unchanged mtime, and
+ * the only way to see that skip is to count the reads.
+ */
+let trustConfigPath = '/fake/.claude.json';
+const trustReads = { count: 0 };
+
 stubModule('./trust', {
   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
-  readClaudeUserConfig: () => undefined,
-  defaultClaudeConfigPath: () => '/fake/.claude.json',
+  readClaudeUserConfig: () => {
+    trustReads.count += 1;
+    return undefined;
+  },
+  defaultClaudeConfigPath: () => trustConfigPath,
 });
 
 // Required, not imported: the stubs above must be registered first, and a
@@ -1269,5 +1281,158 @@ test('the default resume stays interactive', async () => {
     assert.ok(args.includes('--resume'));
   } finally {
     teardown(ctx);
+  }
+});
+
+test('a refused resume offers to go ahead anyway, and honours the answer', async () => {
+  // The budget guard refused a real 11.2 MB session at ~2,007,179 estimated
+  // tokens - a number the session's own usage records put nearer 432,163. A
+  // guard that can only say no, on an estimate that can be this wrong, takes
+  // the decision away from the person whose session it is.
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  vscodeFake.config = {
+    claudeCommand: LAUNCHER,
+    maxResumeTokens: 1,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
+    assert.ok(offer, `expected a refusal offering a way through; saw ${JSON.stringify(vscodeFake.warnings)}`);
+    assert.ok(offer.items.includes('Resume anyway'));
+    assert.equal(vscodeFake.terminals.length, 0, 'nothing may launch before the answer');
+
+    offer.answer('Resume anyway');
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'answering yes must resume it');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('a refusal that is dismissed resumes nothing', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  vscodeFake.config = { claudeCommand: LAUNCHER, maxResumeTokens: 1, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
+    assert.ok(offer, 'setup: the refusal must have been offered');
+    // Dismissed, the same as closing the notification. Only an explicit yes
+    // may lift the cap - anything else leaves the refusal standing.
+    offer.answer(undefined);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('an unchanged config is not re-parsed on every tick', async () => {
+  // The skip exists because ~/.claude.json grows with every project opened and
+  // this runs once a second. With the config path pointed at a file that never
+  // exists - as it was - fs.statSync throws every time, the skip never runs,
+  // and no test could tell whether it worked.
+  resetVscodeFake();
+  const configFile = path.join(os.tmpdir(), `clb-trust-${Date.now()}.json`);
+  fs.writeFileSync(configFile, '{}');
+  trustConfigPath = configFile;
+  trustedCwds = new Set<string>();
+  trustReads.count = 0;
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const afterSchedule = trustReads.count;
+    await oneTick();
+    assert.equal(trustReads.count, afterSchedule, 'an unchanged mtime must not cost a re-parse');
+
+    // Touching the file is what a trust decision does; the answer is read again.
+    fs.writeFileSync(configFile, '{"projects":{}}');
+    await oneTick();
+    assert.ok(trustReads.count > afterSchedule, 'a changed mtime must be re-read');
+  } finally {
+    trustConfigPath = '/fake/.claude.json';
+    trustedCwds = 'all';
+    teardown(ctx);
+    fs.rmSync(configFile, { force: true });
+  }
+});
+
+test('each session gets its own trust re-check, not one cache for the window', async () => {
+  // onChange only ever reports the soonest job, so with a single shared mtime
+  // a second session's first check could land on an mtime another session had
+  // already recorded - and never be read at all.
+  resetVscodeFake();
+  const configFile = path.join(os.tmpdir(), `clb-trust2-${Date.now()}.json`);
+  fs.writeFileSync(configFile, '{}');
+  trustConfigPath = configFile;
+  trustedCwds = new Set<string>();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await oneTick();
+    const afterFirst = trustReads.count;
+    // A second session, same unchanged config. Its trust has never been read.
+    FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_800_000));
+    await oneTick();
+    assert.ok(
+      trustReads.count > afterFirst,
+      'the newly-soonest session must have its own first check, not inherit another session\'s',
+    );
+  } finally {
+    trustConfigPath = '/fake/.claude.json';
+    trustedCwds = 'all';
+    teardown(ctx);
+    fs.rmSync(configFile, { force: true });
+  }
+});
+
+test('a small live context beats a huge byte count', async () => {
+  // The whole point of reading the transcript's usage record: an 11.2 MB file
+  // whose live context is 432,163 tokens must not be refused on 2,007,179.
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  const usage = JSON.stringify({
+    type: 'assistant',
+    message: { usage: { input_tokens: 2, cache_read_input_tokens: 24_591, cache_creation_input_tokens: 40_000 } },
+  });
+  fs.writeFileSync(transcript, `${'x'.repeat(2_000_000)}\n${usage}\n`);
+  vscodeFake.config = {
+    claudeCommand: LAUNCHER,
+    maxResumeTokens: 100_000,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await oneTick();
+    assert.deepEqual(
+      vscodeFake.warningOffers.filter((w) => w.message.includes('estimated')),
+      [],
+      'the byte count would have refused this',
+    );
+    assert.equal(vscodeFake.terminals.length, 1, 'the usage record says it fits, so it resumes');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
   }
 });

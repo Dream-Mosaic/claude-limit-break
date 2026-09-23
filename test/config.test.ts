@@ -14,7 +14,7 @@ test('defaults match the declared manifest defaults', () => {
   assert.equal(s.autoResume, true);
   assert.equal(s.resumeMode, 'interactive');
   assert.equal(s.headlessPermissionMode, '');
-  assert.equal(s.maxResumeTokens, 150_000);
+  assert.equal(s.maxResumeTokens, 500_000);
   assert.equal(s.maxWaitHours, 24);
 });
 

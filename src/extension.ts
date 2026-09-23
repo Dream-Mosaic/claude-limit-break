@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from './log';
-import { readSettings } from './config';
+import { readSettings, type Settings } from './config';
 import { TranscriptWatcher } from './transcriptWatcher';
 import { ResumeScheduler, type PendingJob } from './scheduler';
 import { CountdownStatusBar } from './statusBar';
@@ -18,6 +18,7 @@ import {
 } from './resumer';
 import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { GRACE_MS, stallVerdict } from './stallWatch';
+import { parseLastUsage, type UsageRecord } from './budget';
 import { resolveSession } from './sessionResolver';
 import { livePanelDetector } from './liveSessions';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
@@ -34,6 +35,13 @@ const NS = 'claudeLimitBuster';
  * deadline that has passed.
  */
 const READY_KEY = 'claudeLimitBuster.ready';
+
+/**
+ * How much of a transcript's end to read when looking for its newest usage
+ * record. Generous next to one entry, trivial next to a file that reached
+ * 11.2 MB in a single session.
+ */
+const USAGE_TAIL_BYTES = 256 * 1024;
 
 /**
  * Whether a transcript entry's working directory belongs to this window.
@@ -126,32 +134,51 @@ export function activate(context: vscode.ExtensionContext): void {
     log.info(`Restored ${restoredReady.length} resume(s) still waiting to be started by hand.`);
   }
 
-  const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
-    const s = settings();
-    const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs);
-    if (plan.kind === 'ignore') {
-      log.info(plan.reason);
-      return;
+  /**
+   * The newest usage record in a transcript, read from the end of the file.
+   *
+   * A window off the end rather than the whole file: transcripts reach tens of
+   * megabytes, this runs on a detection, and only the last record matters.
+   * Any failure - missing file, unreadable, no record in the window - is
+   * undefined, which puts the estimate back on the byte count.
+   */
+  const readUsage = (transcript: string): UsageRecord | undefined => {
+    try {
+      const size = fs.statSync(transcript).size;
+      const start = Math.max(0, size - USAGE_TAIL_BYTES);
+      const length = size - start;
+      if (length <= 0) {
+        return undefined;
+      }
+      const fd = fs.openSync(transcript, 'r');
+      try {
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, start);
+        return parseLastUsage(buffer.toString('utf8'));
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return undefined;
     }
-    if (plan.kind === 'refuse') {
-      log.warn(plan.reason);
-      void vscode.window.showWarningMessage(`Claude Limit Buster: ${plan.reason}`);
-      return;
-    }
+  };
+
+  /** Arm a planned resume: trust check, scheduler, and the notice that names both. */
+  const schedule = (planned: PendingJob, s: Settings, estimate: number): void => {
     // Checked here, at schedule time, rather than when the cooldown fires:
     // the user is still at the keyboard for this notice, and can trust the
     // folder before walking away. By fire time they are already gone, which
     // is exactly why an untrusted folder stalls silently at Claude's own
     // trust prompt (#5). Never written back here, only read - answering that
     // prompt is the user's call, not this extension's.
-    const folderTrusted = plan.job.cwd
+    const folderTrusted = planned.cwd
       ? isFolderTrusted(
-          plan.job.cwd,
+          planned.cwd,
           readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
           process.platform,
         )
       : undefined;
-    const job = { ...plan.job, folderTrusted };
+    const job = { ...planned, folderTrusted };
     if (!scheduler.schedule(job)) {
       return;
     }
@@ -167,9 +194,50 @@ export function activate(context: vscode.ExtensionContext): void {
           ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
           : '';
       void vscode.window.showInformationMessage(
-        `Claude Limit Buster: resuming at ${at} (~${plan.estimate.toLocaleString()} tokens).${trustNote}`,
+        `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`,
       );
     }
+  };
+
+  const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
+    const s = settings();
+    const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage);
+    if (plan.kind === 'ignore') {
+      log.info(plan.reason);
+      return;
+    }
+    if (plan.kind === 'refuse') {
+      log.warn(plan.reason);
+      // Offered, not just announced. The estimate can be several times too
+      // high on a long session - the byte count counts history that
+      // compaction already summarised away - and refusing outright takes the
+      // decision away from the person whose session it is. Saying yes plans
+      // the same resume with the cap lifted for this one incident.
+      void Promise.resolve(
+        vscode.window.showWarningMessage(`Claude Limit Buster: ${plan.reason}`, 'Resume anyway'),
+      ).then((choice) => {
+        if (choice !== 'Resume anyway') {
+          return;
+        }
+        const forced = planResume(
+          hit,
+          reason,
+          { ...s, maxResumeTokens: 0 },
+          statBytes,
+          new Date(),
+          randomJitterMs,
+          readUsage,
+        );
+        if (forced.kind !== 'schedule') {
+          log.warn(`Could not resume ${hit.file} even with the budget lifted: ${forced.reason}`);
+          return;
+        }
+        log.info(`Budget overridden by hand for ${forced.job.sessionId}.`);
+        schedule(forced.job, s, forced.estimate);
+      });
+      return;
+    }
+    schedule(plan.job, s, plan.estimate);
   };
 
   /**
@@ -186,7 +254,11 @@ export function activate(context: vscode.ExtensionContext): void {
    * project the user opens. An unreadable mtime falls through to re-reading,
    * which is the safe direction: the read itself is the thing that answers.
    */
-  let trustStamp: number | undefined;
+  // Keyed by session, not one scalar for the window. onChange only ever
+  // reports the soonest job, so a second session's first check can land on an
+  // mtime a different session's check already recorded - and then its trust is
+  // never re-read at all, which is the bug this function exists to fix.
+  const trustStamps = new Map<string, number>();
   const refreshTrust = (job: PendingJob | undefined): void => {
     if (!job || job.folderTrusted !== false || !job.cwd) {
       return;
@@ -198,13 +270,16 @@ export function activate(context: vscode.ExtensionContext): void {
     } catch {
       stamp = undefined;
     }
-    if (stamp !== undefined && stamp === trustStamp) {
+    if (stamp !== undefined && stamp === trustStamps.get(job.sessionId)) {
       return;
     }
-    trustStamp = stamp;
+    if (stamp !== undefined) {
+      trustStamps.set(job.sessionId, stamp);
+    }
     const trusted = isFolderTrusted(
       job.cwd,
       readClaudeUserConfig(configPath, (p) => fs.readFileSync(p, 'utf8')),
+      process.platform,
     );
     if (trusted) {
       job.folderTrusted = true;
