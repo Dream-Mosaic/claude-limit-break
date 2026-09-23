@@ -11,14 +11,23 @@ export interface ClaudeUserConfig {
  * Keys in that file are recorded with forward slashes and inconsistent
  * drive-letter casing - both `c:/Users/...` and `C:/Users/...` were observed
  * in the same file on one machine - while a transcript's `cwd` on Windows
- * arrives with backslashes. Folding both to forward slashes, lower case, and
- * no trailing slash makes them comparable without declaring either form
- * canonical, and without touching the filesystem (path.resolve would resolve
- * relative to *this* process's cwd, which is meaningless for a path recorded
- * by a different process on a possibly different run).
+ * arrives with backslashes. Folding both to forward slashes and no trailing
+ * slash makes them comparable without declaring either form canonical, and
+ * without touching the filesystem (path.resolve would resolve relative to
+ * *this* process's cwd, which is meaningless for a path recorded by a
+ * different process on a possibly different run).
+ *
+ * Case is folded only on win32 and darwin, whose default filesystems
+ * (NTFS/ReFS, HFS+/APFS) do not distinguish it - not everywhere. The
+ * drive-letter casing problem is real and Windows-specific; folding case
+ * unconditionally was wrong on Linux (ext4 etc.), where `/home/a/proj` and
+ * `/home/A/proj` are two different directories that would wrongly share one
+ * trust answer (#8). `platform` is a parameter rather than read from
+ * `process.platform` internally so both branches stay directly testable.
  */
-export function normalizeProjectPath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+export function normalizeProjectPath(p: string, platform: NodeJS.Platform): string {
+  const slashed = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return platform === 'win32' || platform === 'darwin' ? slashed.toLowerCase() : slashed;
 }
 
 /**
@@ -32,18 +41,34 @@ export function normalizeProjectPath(p: string): string {
  * three land a resume on the same stalled prompt, so there is nothing useful
  * to tell them apart for.
  */
-export function isFolderTrusted(cwd: string, config: ClaudeUserConfig | undefined): boolean {
-  const target = normalizeProjectPath(cwd);
+export function isFolderTrusted(
+  cwd: string,
+  config: ClaudeUserConfig | undefined,
+  platform: NodeJS.Platform,
+): boolean {
+  const target = normalizeProjectPath(cwd, platform);
   for (const [key, value] of Object.entries(config?.projects ?? {})) {
-    if (normalizeProjectPath(key) === target) {
+    if (normalizeProjectPath(key, platform) === target) {
       return value?.hasTrustDialogAccepted === true;
     }
   }
   return false;
 }
 
+/**
+ * Where the CLI reads `.claude.json` from.
+ *
+ * CLAUDE_CONFIG_DIR does relocate this file, not only `~/.claude/` - checked,
+ * not assumed, by reading the installed CLI's own bundle (issue #8 finding
+ * 1). Its resolver is `path.join(process.env.CLAUDE_CONFIG_DIR || homedir(),
+ * ".claude.json")`, found twice independently in the bundle: CLAUDE_CONFIG_DIR
+ * stands in for homedir() wholesale for this file, the same as it does for
+ * ~/.claude itself. The check is `||`, not `??`, so an empty string (as well
+ * as unset) falls back to the home directory rather than resolving relative
+ * to this process's own cwd.
+ */
 export function defaultClaudeConfigPath(): string {
-  return path.join(os.homedir(), '.claude.json');
+  return path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
 }
 
 /**

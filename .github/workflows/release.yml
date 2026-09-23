@@ -80,7 +80,7 @@ jobs:
       - name: The version being released needs a changelog section
         run: |
           set -euo pipefail
-          if ! grep -qE "^## \[?${VERSION//./\\.}\]?" CHANGELOG.md; then
+          if ! grep -qE "^## \[?${VERSION//./\\.}\]?( |\$)" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [$VERSION]' section. Move the Unreleased notes under it before releasing."
             exit 1
           fi

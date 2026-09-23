@@ -478,6 +478,42 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
   }
 });
 
+test('an autoResume whose cwd is a file, not a directory, is refused rather than handed to createTerminal (#8)', async () => {
+  // fs.existsSync (the old predicate) is true for a regular file, so this
+  // used to reach vscode.window.createTerminal, which does not throw on a
+  // bad cwd - it fails asynchronously, inside the terminal process, in
+  // exactly the way this whole check exists to avoid (#4). statSync(...).
+  // isDirectory() is the only check that actually distinguishes the two.
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-file-cwd-'));
+  const fileCwd = path.join(dir, 'not-a-directory');
+  fs.writeFileSync(fileCwd, 'a regular file, not a project folder');
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), fileCwd);
+    await oneTick();
+
+    assert.equal(vscodeFake.terminals.length, 0, 'createTerminal must never be reached for a cwd that is a file');
+    assert.ok(
+      vscodeFake.errors.some((m) => m.includes(fileCwd) && m.includes(SESSION.slice(0, 8))),
+      `no error named the file path and the session; saw ${JSON.stringify(vscodeFake.errors)}`,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    teardown(ctx);
+  }
+});
+
 test('accepting a Resume Now offer into a deleted folder puts the job back rather than discarding it', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
