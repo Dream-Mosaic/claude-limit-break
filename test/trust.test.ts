@@ -56,6 +56,45 @@ test('isFolderTrusted does not match a sibling project sharing a prefix', () => 
   assert.equal(isFolderTrusted('/projects/example', config), false);
 });
 
+// --- Case folding is platform-specific (#8 finding 3) -----------------------
+//
+// The drive-letter casing problem is real and Windows-specific: NTFS is
+// case-insensitive, so `C:/x` and `c:/x` name the same directory. Folding
+// case everywhere was wrong: on Linux (ext4 etc, case-sensitive), `/home/a`
+// and `/home/A` are two different directories that would wrongly share one
+// trust answer. darwin's default filesystem (HFS+/APFS) is case-insensitive
+// like Windows, so it folds too; platform is a parameter rather than
+// `process.platform` read internally, so both branches are directly testable.
+
+test('normalizeProjectPath folds case on win32, where the filesystem does not distinguish it', () => {
+  assert.equal(
+    normalizeProjectPath('C:\\Users\\x\\Proj\\', 'win32'),
+    normalizeProjectPath('c:/users/x/proj', 'win32'),
+  );
+});
+
+test('normalizeProjectPath folds case on darwin, whose default filesystem is also case-insensitive', () => {
+  assert.equal(
+    normalizeProjectPath('/Users/X/Proj', 'darwin'),
+    normalizeProjectPath('/users/x/proj', 'darwin'),
+  );
+});
+
+test('normalizeProjectPath preserves case on linux, where two differently-cased paths are two different directories', () => {
+  assert.notEqual(
+    normalizeProjectPath('/home/a/proj', 'linux'),
+    normalizeProjectPath('/home/A/proj', 'linux'),
+  );
+});
+
+test('isFolderTrusted on linux does not conflate two directories that differ only by case', () => {
+  // Before the fix, normalizeProjectPath lowercased unconditionally, so this
+  // config would wrongly report /home/A/proj as trusted too.
+  const config = { projects: { '/home/a/proj': { hasTrustDialogAccepted: true } } };
+  assert.equal(isFolderTrusted('/home/A/proj', config, 'linux'), false);
+  assert.equal(isFolderTrusted('/home/a/proj', config, 'linux'), true);
+});
+
 test('readClaudeUserConfig parses what the injected reader returns', () => {
   const raw = JSON.stringify({ projects: { '/p': { hasTrustDialogAccepted: true } } });
   const seen: string[] = [];
