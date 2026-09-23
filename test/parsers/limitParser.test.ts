@@ -252,3 +252,9 @@ test('normalize(): unicode dashes fold to ASCII hyphen', () => {
   // U+2010 HYPHEN, as seen in a captured "rate‐limited" notice.
   assert.equal(normalize('rate‐limited'), 'rate-limited');
 });
+
+test('normalize(): JSON-escaped newlines become spaces', () => {
+  // A literal backslash-n (two characters), as seen when a notice is captured
+  // raw out of a JSON payload rather than parsed first.
+  assert.equal(normalize('Usage limit reached.\\nTry again in 5 hours'), 'Usage limit reached. Try again in 5 hours');
+});
