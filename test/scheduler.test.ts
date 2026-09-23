@@ -47,6 +47,17 @@ test('a later deadline never replaces an earlier one still counting down', (t) =
   assert.equal(s.current?.resumeAtMs, early);
 });
 
+test('an identical deadline for the same session is accepted, not ignored', (t) => {
+  // Issue #12 boundary: `job.resumeAtMs > existing.resumeAtMs` in schedule().
+  // An exact tie is not "later", so a repeat notice naming the same deadline
+  // must still be accepted - `>` allows it; `>=` would wrongly drop it.
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const at = Date.now() + 60_000;
+  s.schedule(job(at));
+  assert.equal(s.schedule(job(at)), true, 'an exact-tie deadline must not be treated as "later"');
+});
+
 test('an earlier deadline does replace a later one', (t) => {
   const s = new ResumeScheduler(memento(), silent);
   t.after(() => s.dispose());
