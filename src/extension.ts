@@ -12,6 +12,11 @@ import { playAlertSound } from './sound';
 import { buildTerminalOptions, resolveClaudeLauncher, cwdExists } from './resumer';
 import { isFolderTrusted, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
 import { GRACE_MS, stallVerdict } from './stallWatch';
+import { resolveSession } from './sessionResolver';
+import { livePanelDetector } from './liveSessions';
+import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
+import { selectClaudePanelTab, type WebviewTab } from './panelTab';
+import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
 
 const NS = 'claudeLimitBuster';
@@ -151,6 +156,57 @@ export function activate(context: vscode.ExtensionContext): void {
    * the job the moment it decided to resume it, before knowing whether the
    * launch would actually start.
    */
+  const which = (cmd: string) => {
+    try {
+      const finder = process.platform === 'win32' ? 'where' : 'which';
+      return execFileSync(finder, [cmd], { encoding: 'utf8' }).split(/\r?\n/)[0]?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const readShim = (p: string) => {
+    try {
+      return fs.readFileSync(p, 'utf8');
+    } catch {
+      return undefined;
+    }
+  };
+  const findLauncher = (configured: string) =>
+    resolveClaudeLauncher(configured, process.platform, which, readShim);
+
+  /**
+   * Sessions THIS extension has resumed, this window, this run, each against
+   * the pid of the terminal it was resumed in.
+   *
+   * onInputNeeded fires for every turn in every session on the machine, and a
+   * panel tab going stale is only this extension's doing for the sessions it
+   * actually put a `--resume` terminal against. The pid is what stops the
+   * detector counting that resume as somebody else holding the session (#7).
+   */
+  const resumedSessions = new Map<string, Promise<number | undefined>>();
+
+  /**
+   * Is a panel tab holding this session open, apart from our own resume?
+   *
+   * `claude agents --json` for liveness, the per-pid record for the
+   * entrypoint - see liveSessions.ts for why it is split that way. Run with a
+   * timeout: this is on the path of an end-of-turn event, and a CLI that hangs
+   * must not take the handler with it.
+   */
+  const detectLivePanel = livePanelDetector(
+    () => {
+      const launcher = findLauncher(settings().claudeCommand);
+      if (!launcher) {
+        throw new Error('no claude executable');
+      }
+      return execFileSync(launcher.file, [...launcher.args, 'agents', '--json'], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+    },
+    (pid) => readSessionRecord(sessionRegistryDir(), pid, (f) => fs.readFileSync(f, 'utf8')),
+  );
+
   const resume = (job: PendingJob): boolean => {
     const s = settings();
     if (s.resumeMode === 'headless') {
@@ -207,6 +263,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // Claude has died, the prompt would land in whatever shell is sitting there.
     const terminal = vscode.window.createTerminal(opts);
     terminal.show();
+    // Recorded only once the terminal actually launched: the returns above
+    // mean no resume happened, and a session this never resumed must not
+    // later be warned about on this extension's behalf.
+    resumedSessions.set(job.sessionId, Promise.resolve(terminal.processId).catch(() => undefined));
     log.info(`Resumed ${job.sessionId} in a new terminal.`);
 
     // A terminal existing is not a resume happening. Two observed failures
@@ -242,6 +302,85 @@ export function activate(context: vscode.ExtensionContext): void {
     return true;
   };
 
+  /**
+   * Every open webview tab in this window, reduced to what panelTab.ts can
+   * work on, paired with the real Tab so a choice can become a close() call.
+   */
+  const webviewTabs = (): { tab: vscode.Tab; entry: WebviewTab }[] =>
+    vscode.window.tabGroups.all
+      .flatMap((g) => g.tabs)
+      .filter((t): t is vscode.Tab & { input: vscode.TabInputWebview } => t.input instanceof vscode.TabInputWebview)
+      .map((t) => ({ tab: t, entry: { viewType: t.input.viewType, label: t.label } }));
+
+  /** The one Claude tab in this window, if it can be identified, and the command that can bring it back. */
+  const resolveReopenTarget = async (): Promise<{ tab: vscode.Tab; command: string } | undefined> => {
+    const tabs = webviewTabs();
+    const selected = selectClaudePanelTab(tabs.map((t) => t.entry));
+    const command = chooseReopenCommand(await vscode.commands.getCommands(true));
+    const target = selected && tabs.find((t) => t.entry === selected)?.tab;
+    return target && command ? { tab: target, command } : undefined;
+  };
+
+  const reopen = async (target: { tab: vscode.Tab; command: string }, sessionId: string): Promise<void> => {
+    await vscode.window.tabGroups.close(target.tab);
+    await vscode.commands.executeCommand(target.command);
+    log.info(`Reopened the stale panel tab for session ${sessionId}.`);
+  };
+
+  /**
+   * After a resumed session's turn ends, deal with the panel tab that is
+   * still open on the conversation as it stood before the resume.
+   *
+   * This is not cosmetic. The experiment in
+   * docs/research/2026-09-20-panel-fork-experiment.md showed that the next
+   * message typed into that tab is anchored to the node from before the
+   * resume, which forks the transcript and leaves the resumed turn on a branch
+   * nothing follows afterwards - with no error on either side. Reopening the
+   * tab resyncs it, because a restarted panel reads the transcript instead of
+   * its own memory.
+   */
+  const handleStalePanel = async (hit: { file: string; cwd?: string }): Promise<void> => {
+    const resolved = resolveSession(hit.file, hit.cwd, statBytes);
+    const pending = resolved && resumedSessions.get(resolved.sessionId);
+    if (!resolved || !pending) {
+      return;
+    }
+    if (!detectLivePanel(resolved.sessionId, await pending)) {
+      return;
+    }
+    const target = await resolveReopenTarget();
+    const offer = buildReopenOffer(resolved.sessionId, true, target !== undefined, settings().onStale);
+    if (!offer) {
+      return;
+    }
+    if (offer.reopen && target) {
+      await reopen(target, resolved.sessionId);
+      void vscode.window.showInformationMessage(offer.message);
+      return;
+    }
+    if (!offer.button) {
+      void vscode.window.showInformationMessage(offer.message);
+      return;
+    }
+    const choice = await Promise.resolve(
+      vscode.window.showInformationMessage(offer.message, offer.button),
+    );
+    if (choice !== offer.button) {
+      return;
+    }
+    // Re-resolved rather than reusing `target`: a message with a button does
+    // not auto-dismiss and can sit unanswered for a long time, by which point
+    // the tab may be gone or a second Claude tab may have been opened.
+    const fresh = await resolveReopenTarget();
+    if (!fresh) {
+      void vscode.window.showInformationMessage(
+        `Claude Limit Buster: could not reopen session ${resolved.sessionId.slice(0, 8)}'s tab now; close and reopen it by hand.`,
+      );
+      return;
+    }
+    await reopen(fresh, resolved.sessionId);
+  };
+
   context.subscriptions.push(
     {
       dispose: () => {
@@ -259,16 +398,24 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onOverload((h) => onDetection(h, 'overload')),
     watcher.onInputNeeded((hit) => {
       const s = settings();
-      if (!s.enabled || !s.alertSound) {
+      if (!s.enabled) {
         return;
       }
       // A turn ends roughly once per Claude response, in every session on the
-      // machine. Only this window's own folders are worth making a noise about.
+      // machine. Only this window's own folders are worth reacting to - for
+      // the chime, and for the stale tab below, since tabGroups is per-window
+      // anyway.
       const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
       if (!isInsideWorkspace(hit.cwd, folders)) {
         return;
       }
-      playAlertSound({ file: s.alertSoundFile });
+      // alertSound gates the chime alone. The stale-tab warning has its own
+      // gates - this extension resumed the session, and a panel still holds
+      // it - and must not go quiet because someone turned the sound off.
+      if (s.alertSound) {
+        playAlertSound({ file: s.alertSoundFile });
+      }
+      void handleStalePanel(hit);
     }),
     scheduler.onChange((job) => status.update(job, scheduler.jobs.length)),
     scheduler.onFire((job) => {

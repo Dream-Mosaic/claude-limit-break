@@ -7,6 +7,32 @@ this is the only in-editor account of what changed.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- After a resume, a session still open in a Claude Code panel tab is now
+  reported, and optionally reopened for you. That tab keeps its own idea of
+  where the conversation ends, so the next message typed into it is anchored
+  before the resumed turn: the transcript forks and the resumed turn is left on
+  a branch nothing follows, with no error on either side. Reopening the tab
+  clears it. Measured, not assumed - see
+  `docs/research/2026-09-20-panel-fork-experiment.md` and issue #6.
+- `claudeLimitBuster.onStale` chooses between `notify` (the default: a
+  notification with a "Reopen session tab" button) and `reopen` (close and
+  reopen the tab without asking).
+
+### Notes
+
+- Whether a panel still holds a session is read from `claude agents --json`,
+  not from `~/.claude/sessions/<pid>.json`: those files are keyed by pid,
+  outlive the process, and nothing in them proves it is alive. The per-pid file
+  is read only for a pid that listing has already vouched for, to tell a panel
+  from a terminal.
+- A panel tab in another VS Code window cannot be closed from here, so that
+  case gets the warning without the button - and it is the case most likely to
+  be typed into.
+
 ## [0.1.1] - 2026-09-15
 
 The first published version. `v0.1.0` was tagged to reserve the version, not to
