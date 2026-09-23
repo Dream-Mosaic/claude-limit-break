@@ -349,6 +349,16 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const target = await resolveReopenTarget();
+    if (!target) {
+      // The viewType match was verified against a synthetic webview, not the
+      // real Claude panel (#7). If that string ever changes, this degrades to
+      // a text-only warning - correct, but silent about why - so the tabs it
+      // actually looked at are named here.
+      const seen = webviewTabs().map((t) => t.entry.viewType);
+      log.info(
+        `No Claude panel tab to reopen for ${resolved.sessionId} in this window. Webview tabs seen: ${seen.length ? seen.join(', ') : 'none'}.`,
+      );
+    }
     const offer = buildReopenOffer(resolved.sessionId, true, target !== undefined, settings().onStale);
     if (!offer) {
       return;
