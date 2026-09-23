@@ -165,6 +165,46 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /**
+   * Re-read trust for a job whose folder was untrusted when it was scheduled.
+   *
+   * The warning exists to get the folder trusted *during* the countdown, so
+   * the one state change it is designed to cause was the one it could not see:
+   * the flag was computed once and rendered until the resume fired (#8).
+   *
+   * Only ever false -> true. Trust being withdrawn mid-countdown is not worth
+   * chasing, and a stale "trusted" costs nothing the resume itself will not
+   * discover. Keyed on the config file's mtime so the common case - nothing
+   * changed - is a stat rather than a parse of a file that grows with every
+   * project the user opens. An unreadable mtime falls through to re-reading,
+   * which is the safe direction: the read itself is the thing that answers.
+   */
+  let trustStamp: number | undefined;
+  const refreshTrust = (job: PendingJob | undefined): void => {
+    if (!job || job.folderTrusted !== false || !job.cwd) {
+      return;
+    }
+    const configPath = defaultClaudeConfigPath();
+    let stamp: number | undefined;
+    try {
+      stamp = fs.statSync(configPath).mtimeMs;
+    } catch {
+      stamp = undefined;
+    }
+    if (stamp !== undefined && stamp === trustStamp) {
+      return;
+    }
+    trustStamp = stamp;
+    const trusted = isFolderTrusted(
+      job.cwd,
+      readClaudeUserConfig(configPath, (p) => fs.readFileSync(p, 'utf8')),
+    );
+    if (trusted) {
+      job.folderTrusted = true;
+      log.info(`Folder ${job.cwd} is now trusted by the Claude CLI; the resume will not stall at its prompt.`);
+    }
+  };
+
   /** Transcript size, or undefined when it cannot be read at all. */
   const transcriptBytes = (p: string): number | undefined => {
     try {
@@ -460,7 +500,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
-    scheduler.onChange((job) => status.update(job, scheduler.jobs.length, settings().statusBar)),
+    scheduler.onChange((job) => {
+      refreshTrust(job);
+      status.update(job, scheduler.jobs.length, settings().statusBar);
+    }),
     scheduler.onFire((job) => {
       const s = settings();
       if (!s.autoResume) {

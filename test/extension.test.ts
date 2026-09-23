@@ -1161,3 +1161,28 @@ test('the menu can cancel, and only when that is what was picked', async () => {
     teardown(ctx);
   }
 });
+
+test('the trust warning clears once the folder is trusted mid-countdown', async () => {
+  // Issue #8, finding 2: folderTrusted is computed once at schedule time and
+  // rendered for the life of the countdown. The warning exists to make the
+  // user trust the folder DURING the countdown - so the one state change the
+  // feature is designed to cause was the one it could not see.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  trustedCwds = new Set<string>();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip(), /not trusted/i, 'setup: it must warn while the folder is untrusted');
+
+    trustedCwds = 'all';
+    await oneTick();
+    assert.ok(!/not trusted/i.test(tooltip()), `the warning must clear: ${tooltip()}`);
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
