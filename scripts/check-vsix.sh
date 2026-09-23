@@ -53,7 +53,7 @@ for f in LICENSE THIRDPARTY.md CHANGELOG.md; do
   # Case-insensitive: vsce keeps LICENSE but lowercases CHANGELOG.md and
   # README.md when it packages them. Still anchored, so a stray
   # LICENSE_THIRDPARTY.md cannot satisfy the LICENSE requirement.
-  if printf '%s\n' "$names" | grep -qiE "^extension/${f}(\.[A-Za-z]+)?$"; then
+  if printf '%s\n' "$names" | grep -qiE "^extension/${f//./\\.}(\.[A-Za-z]+)?$"; then
     echo "ok: $f ships inside the .vsix"
   else
     echo "::error::$f is missing from the .vsix"
