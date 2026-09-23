@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, decideUpdateCheck } from '../src/updateCheck';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { compareVersions, decideUpdateCheck, newestTag, fetchLatestReleaseTag } from '../src/updateCheck';
 
 test('compareVersions: equal versions, one tagged with a leading v', () => {
   assert.equal(compareVersions('1.0.0', 'v1.0.0'), 'equal');
@@ -112,5 +114,120 @@ test('decideUpdateCheck: a stale-but-newer dismissal for a DIFFERENT tag still n
       base({ lastCheckedMs: NOW - HOUR, latestTag: 'v0.3.0', dismissedVersion: 'v0.2.0' }),
     ),
     { kind: 'notify', latestTag: 'v0.3.0' },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// newestTag - picking the newest tag out of a parsed /releases response
+// ---------------------------------------------------------------------------
+
+/** The shape of one element of the GitHub /releases response, trimmed to what newestTag reads. */
+const release = (tag_name: string, opts: { draft?: boolean } = {}) => ({
+  tag_name,
+  draft: opts.draft ?? false,
+  prerelease: true,
+});
+
+test('newestTag: picks the highest version out of several releases', () => {
+  // Real GitHub order for this repo (verified via `gh api .../releases`) is
+  // newest-first already, but nothing documents that as a guarantee - so this
+  // deliberately puts the newest one in the middle.
+  assert.equal(newestTag([release('v0.1.1'), release('v0.1.2'), release('v0.1.0')]), 'v0.1.2');
+});
+
+test('newestTag: skips a draft release', () => {
+  // An unpublished draft is not something to point a user's download link at.
+  assert.equal(newestTag([release('v0.1.2'), release('v0.2.0', { draft: true })]), 'v0.1.2');
+});
+
+test('newestTag: skips an entry with a malformed tag_name', () => {
+  assert.equal(newestTag([release('v0.1.1'), { tag_name: 'not-a-version', draft: false }]), 'v0.1.1');
+});
+
+test('newestTag: undefined when there is nothing usable', () => {
+  assert.equal(newestTag([]), undefined);
+  assert.equal(newestTag([{ tag_name: 'garbage', draft: false }]), undefined);
+  assert.equal(newestTag([{ draft: true, tag_name: 'v9.9.9' }]), undefined);
+  assert.equal(newestTag('not an array'), undefined);
+  assert.equal(newestTag(null), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// fetchLatestReleaseTag - against a real node:http server on 127.0.0.1, never
+// against the real GitHub API in a test.
+// ---------------------------------------------------------------------------
+
+/**
+ * Starts a throwaway server on an OS-assigned port on 127.0.0.1, runs `run`
+ * with its base URL, and always tears the server down afterwards - even if
+ * `run` throws - so a failing test cannot leak a listening socket into the
+ * next one.
+ */
+async function withServer(
+  handler: http.RequestListener,
+  run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await run(`http://127.0.0.1:${port}/releases`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test('fetchLatestReleaseTag: a normal response resolves the newest tag', async () => {
+  await withServer(
+    (req, res) => {
+      // GitHub rejects an unauthenticated request with no User-Agent (verified
+      // live: `curl ... --header "User-Agent:"` against the real API returns
+      // 403), so the client sending one is load-bearing enough to assert on.
+      assert.ok(req.headers['user-agent'], 'request must carry a User-Agent header');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([release('v0.1.1'), release('v0.1.2')]));
+    },
+    async (baseUrl) => {
+      assert.equal(await fetchLatestReleaseTag(baseUrl, 2000), 'v0.1.2');
+    },
+  );
+});
+
+test('fetchLatestReleaseTag: a 403 (rate limit) resolves undefined, not a throw', async () => {
+  await withServer(
+    (_req, res) => {
+      // The body is a well-formed, parseable releases array on purpose: this
+      // must resolve undefined because of the status code, not merely
+      // because a rate-limit error body happens not to parse as one.
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([release('v9.9.9')]));
+    },
+    async (baseUrl) => {
+      assert.equal(await fetchLatestReleaseTag(baseUrl, 2000), undefined);
+    },
+  );
+});
+
+test('fetchLatestReleaseTag: a timeout resolves undefined, not a throw', async () => {
+  await withServer(
+    (_req, _res) => {
+      // Never respond. The client's own timeout must be what ends this, not
+      // the test relying on the server to misbehave in some other way.
+    },
+    async (baseUrl) => {
+      assert.equal(await fetchLatestReleaseTag(baseUrl, 200), undefined);
+    },
+  );
+});
+
+test('fetchLatestReleaseTag: malformed JSON resolves undefined, not a throw', async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{not valid json');
+    },
+    async (baseUrl) => {
+      assert.equal(await fetchLatestReleaseTag(baseUrl, 2000), undefined);
+    },
   );
 });

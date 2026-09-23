@@ -1,3 +1,7 @@
+import * as http from 'node:http';
+import * as https from 'node:https';
+import { URL } from 'node:url';
+
 /**
  * Notify the user when a newer release exists (issue #1).
  *
@@ -127,4 +131,131 @@ export function decideUpdateCheck(input: UpdateCheckInput): UpdateCheckAction {
     return { kind: 'notify', latestTag: input.latestTag };
   }
   return { kind: 'quiet' };
+}
+
+// ---------------------------------------------------------------------------
+// Fetching the releases list
+// ---------------------------------------------------------------------------
+
+export const RELEASES_URL = 'https://api.github.com/repos/Dream-Mosaic/claude-limit-buster/releases';
+
+/** GitHub returns 403 for an unauthenticated request with no User-Agent at all - verified live. */
+const USER_AGENT = 'claude-limit-buster-update-check';
+
+const DEFAULT_TIMEOUT_MS = 5000;
+
+interface RawRelease {
+  tag_name?: unknown;
+  draft?: unknown;
+}
+
+/**
+ * Picks the newest tag out of a parsed `/releases` response.
+ *
+ * Not `/releases/latest` - see the module doc comment for why that 404s for
+ * this repo. Every non-draft entry with a parseable `tag_name` is compared
+ * with {@link compareVersions}; the response's own order is not trusted as a
+ * version sort (nothing in GitHub's docs promises one, only that it is
+ * "sorted by most recent", which is a creation-time claim, not a semver one).
+ * A draft is skipped because it has nothing published to point a user's
+ * download link at. `undefined` covers an empty list, a response that is not
+ * an array at all, and a list where nothing parses - every one of those is
+ * "no information", not an error.
+ */
+export function newestTag(releases: unknown): string | undefined {
+  if (!Array.isArray(releases)) {
+    return undefined;
+  }
+  let best: string | undefined;
+  for (const entry of releases) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const { tag_name, draft } = entry as RawRelease;
+    if (draft === true || typeof tag_name !== 'string') {
+      continue;
+    }
+    // Comparing tag_name against itself is a cheap parseability check that
+    // reuses compareVersions' own notion of "malformed" instead of a second
+    // parser: a tag that cannot even equal itself cannot be trusted to
+    // become `best` by default when it is the first (or only) entry seen.
+    if (compareVersions(tag_name, tag_name) === 'unknown') {
+      continue;
+    }
+    if (best === undefined || compareVersions(tag_name, best) === 'greater') {
+      best = tag_name;
+    }
+  }
+  return best;
+}
+
+/**
+ * GET the repo's releases and return the newest tag, or `undefined` for
+ * anything that goes wrong: a non-200 status (403 rate limit chief among
+ * them), a request timeout, a network error, or a body that is not valid
+ * JSON. None of those may ever throw into the caller - this runs on
+ * extension activation, unprompted, and a network hiccup must be invisible.
+ *
+ * `url` and `timeoutMs` are parameters (rather than only reading
+ * {@link RELEASES_URL}) so a test can point this at a local `node:http`
+ * server instead of the real GitHub API; the client picks `node:http` or
+ * `node:https` from the URL's own protocol, so an `http://127.0.0.1:port`
+ * test URL and the real `https://api.github.com` URL both work unmodified.
+ */
+export function fetchLatestReleaseTag(
+  url: string = RELEASES_URL,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: string | undefined) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      finish(undefined);
+      return;
+    }
+    const client = parsed.protocol === 'http:' ? http : https;
+
+    const req = client.get(
+      url,
+      { headers: { 'User-Agent': USER_AGENT }, timeout: timeoutMs },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume(); // drain so the socket is released even though the body is unused
+          finish(undefined);
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          try {
+            finish(newestTag(JSON.parse(body)));
+          } catch {
+            finish(undefined); // malformed JSON is "unknown", not an error
+          }
+        });
+      },
+    );
+    // The `timeout` socket option fires an event; it does not abort the
+    // request by itself, so destroy() is what actually stops it and lets
+    // `finish` run instead of hanging until some far-off default timeout.
+    req.on('timeout', () => {
+      req.destroy();
+      finish(undefined);
+    });
+    req.on('error', () => {
+      finish(undefined); // offline, DNS failure, connection reset, ... all "unknown"
+    });
+  });
 }
