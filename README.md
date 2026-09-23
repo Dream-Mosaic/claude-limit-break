@@ -35,6 +35,33 @@ Three consequences worth knowing:
   already use. An unattended headless mode exists, but it is opt-in and
   machine-scoped so a workspace cannot enable it for you.
 
+## What you will see
+
+A marker in the status bar while it is watching, and a countdown when a resume
+is pending — `Claude resumes in 4h 12m`, with the session, folder, reset time
+and any random padding in the tooltip. Clicking it opens a menu: Resume Now,
+Cancel Pending Resume, Show Log. Nothing is destroyed by a stray click.
+
+Set `claudeLimitBuster.statusBar` to `pending` to hide the marker when idle, or
+`never` to hide it entirely.
+
+## The panel tab after a resume
+
+A resume advances the session on disk. A Claude Code panel tab that was already
+open does not re-read it: it keeps its own idea of where the conversation ends,
+in memory. Type into that tab and your message is anchored *before* the resumed
+turn — the transcript forks, and the branch holding the resumed turn is the one
+everything afterwards ignores. Neither side reports anything wrong.
+
+So when a resumed session is still open in a panel, you get a notification
+saying to reopen that tab before typing in it. Reopening fixes it, because a
+restarted panel reads the transcript instead of its memory. Set
+`claudeLimitBuster.onStale` to `reopen` to have the tab closed and reopened for
+you instead of being asked.
+
+This is measured, not assumed:
+[docs/research/2026-09-20-panel-fork-experiment.md](docs/research/2026-09-20-panel-fork-experiment.md).
+
 ## Token budget
 
 Recovery competes with the quota it is recovering. A usage-limit wait guarantees
@@ -51,6 +78,19 @@ release attaches a built `.vsix`, so the quickest route is to download one from
 the [Releases page](../../releases) and install it from the Extensions view —
 the `...` menu, **Install from VSIX...**.
 
+From a terminal, with the [GitHub CLI](https://cli.github.com/):
+
+```powershell
+$tag = gh release list --repo Dream-Mosaic/claude-limit-buster --limit 1 --json tagName -q '.[0].tagName'
+gh release download $tag --repo Dream-Mosaic/claude-limit-buster --pattern "*.vsix" --dir $env:TEMP --clobber
+code --install-extension "$env:TEMP\claude-limit-buster-$($tag.TrimStart('v')).vsix" --force
+```
+
+The tag is named explicitly on purpose: GitHub's idea of "latest" excludes
+pre-releases, and every `0.x` release here is one, so a tagless
+`gh release download` reports `release not found`. `gh release list` does
+include them.
+
 To build it yourself instead:
 
 ```bash
@@ -65,6 +105,31 @@ terminal:
 ```bash
 code --install-extension claude-limit-buster-<version>.vsix
 ```
+
+## Settings
+
+All under `claudeLimitBuster.`, all with defaults that work unattended.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Watch transcripts for limits and server errors. |
+| `autoResume` | `true` | Resume when the cooldown elapses. Off means a notification offers Resume Now instead, and that offer survives a window reload. |
+| `resumeMode` | `interactive` | `interactive` opens a terminal at your normal autonomy. `headless` is opt-in and machine-scoped. |
+| `headlessPermissionMode` | `""` | Permission mode for headless resumes. Empty denies tool calls; headless does not inherit the session's mode. |
+| `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
+| `resumePrompt` | `Continue where you left off.` | Passed as one argument, never through a shell. |
+| `maxResumeTokens` | `150000` | Refuse a resume whose estimated cost exceeds this. |
+| `maxWaitHours` | `24` | Ignore a reset time further out than this — usually a misparse. |
+| `transcriptPollSeconds` | `5` | Polling backstop, for when file watching is unreliable. |
+| `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |
+| `notify` | `true` | Notify on detection and on resume. |
+| `alertSound` / `alertSoundFile` | `true` / `""` | Chime when a turn finishes in this window's folders. |
+| `statusBar` | `always` | `always`, `pending` (only while counting down) or `never`. |
+| `onStale` | `notify` | What to do when the resumed session is still open in a panel tab: `notify` or `reopen`. |
+
+Settings that name a program or a file — `claudeCommand`, `resumePrompt`,
+`alertSoundFile`, the headless pair — are machine-scoped on purpose, so a
+workspace you open cannot set them for you.
 
 ## Versioning and releases
 
