@@ -96,6 +96,21 @@ export type UpdateCheckAction =
   | { kind: 'notify'; latestTag: string }
   | { kind: 'quiet' };
 
+/** "Cheap and infrequent" per the issue - one check a day at most. */
+export const DEFAULT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * `context.globalState` keys this module's cached state is expected to live
+ * under. Exported so the wiring code and this module agree on names without
+ * either side hard-coding the other's strings; namespaced under
+ * `claudeLimitBuster.updateCheck.` to stay clear of scheduler.ts's
+ * `claudeLimitBuster.pending` and extension.ts's `claudeLimitBuster.ready`.
+ */
+export const LAST_CHECKED_KEY = 'claudeLimitBuster.updateCheck.lastCheckedMs';
+export const LATEST_TAG_KEY = 'claudeLimitBuster.updateCheck.latestTag';
+export const DISMISSED_VERSION_KEY = 'claudeLimitBuster.updateCheck.dismissedVersion';
+export const FIRST_RUN_PROMPT_KEY = 'claudeLimitBuster.updateCheck.firstRunPromptAnswer';
+
 /**
  * What to do this activation, given the cached state and the clock.
  *
