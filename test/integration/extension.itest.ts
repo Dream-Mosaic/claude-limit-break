@@ -68,8 +68,16 @@ suite('claude-limit-buster activation', () => {
     assert.equal(config.get('headlessPermissionMode'), '');
     assert.equal(config.get('claudeCommand'), '');
     assert.equal(config.get('resumePrompt'), 'Continue where you left off.');
-    assert.equal(config.get('maxResumeTokens'), 150000);
+    assert.equal(config.get('maxResumeTokens'), 500000);
     assert.equal(config.get('maxWaitHours'), 24);
+    // Added for 1.0. Each is a default someone would notice if it drifted:
+    // the marker is the only sign the extension loaded, the scope decides
+    // which sessions are seen at all, and the update check is an outbound
+    // request that must stay off until asked for.
+    assert.equal(config.get('statusBar'), 'always');
+    assert.equal(config.get('onStale'), 'notify');
+    assert.equal(config.get('watchScope'), 'machine');
+    assert.equal(config.get('checkForUpdates'), false);
   });
 
   test('the execution-adjacent settings are machine-scoped in the running instance', () => {
