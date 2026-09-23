@@ -271,3 +271,11 @@ test('detectLimit: MAX_NOTICE_LENGTH boundary (400 accepted, 401 rejected)', () 
   assert.ok(detectLimit(at400, NOW, MAXW), 'exactly 400 chars must still be accepted');
   assert.equal(detectLimit(at401, NOW, MAXW), undefined, '401 chars must be rejected');
 });
+
+test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
+  // MAXW is 24, so "24 hours" resolves to exactly now + maxWaitHours*HOUR_MS -
+  // precisely the wait horizon, not past it. `>` accepts a tie; `>=` would not.
+  const hit = detectLimit('Usage limit reached. Try again in 24 hours', NOW, MAXW);
+  assert.ok(hit, 'a resume landing exactly on the wait horizon must still be accepted');
+  assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
+});
