@@ -216,3 +216,7 @@ test('LIMIT_HINTS: rate[- ]limit(ed|s)?', () => {
 test("LIMIT_HINTS: you've/have hit...limit", () => {
   assert.ok(looksLikeLimitMessage('You have used up your monthly limit. Try again in 3 hours'));
 });
+
+test('LIMIT_HINTS: out of (tokens|credits|usage|quota)', () => {
+  assert.ok(looksLikeLimitMessage('You are out of tokens for this session. Try again in 3 hours'));
+});
