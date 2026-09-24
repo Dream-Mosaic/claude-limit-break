@@ -1,13 +1,13 @@
-import type { SessionHolder } from './liveSessions';
+import { classifyHolder, busyFolderHolder, parseAgentRows, type AgentRow, type HolderRecord, type SessionHolder } from './liveSessions';
 
 /**
  * What `scheduler.onFire` classifies before ever calling `resume()`: the
  * outcome of `classifyHolder`, extended with the one case it cannot see by
  * itself - a DIFFERENT session already busy in the same folder - and with
  * 'unknown' for a listing that could not be run at all. See liveSessions.ts
- * for classifyHolder and busyFolderHolder, the two pure reads this is built
- * from; composing them is wiring, done in extension.ts, once per fire, off a
- * single `claude agents --json` snapshot.
+ * for classifyHolder and busyFolderHolder, the two pure reads
+ * {@link classifyFireHolder} composes this from, off one `claude agents
+ * --json` snapshot.
  */
 export type FireHolder = SessionHolder | { kind: 'busy-elsewhere' } | 'unknown';
 
@@ -141,5 +141,55 @@ export function manualResumeWarning(
       `Claude Limit Buster: session ${shortId} is already open in ${where}. ` +
       `Resuming here will fork the conversation.`,
     button: 'Resume Anyway',
+  };
+}
+
+/**
+ * Compose `classifyHolder` and `busyFolderHolder` (liveSessions.ts) into the
+ * single `FireHolder` (minus 'unknown') `decideOnFire` consumes, off one
+ * `claude agents --json` snapshot - `rows` is parsed once, by the caller, and
+ * reused for both reads rather than listing twice.
+ *
+ * The folder-wide check only ever runs when `classifyHolder` already came
+ * back 'none': a live process directly on THIS session is always the more
+ * specific answer, and skipping the folder scan in that case is also what
+ * keeps a job with no `cwd` (see PendingJob) from needing one - it only
+ * matters for the check this never reaches.
+ */
+export function classifyFireHolder(
+  rows: readonly AgentRow[],
+  sessionId: string,
+  cwd: string | undefined,
+  platform: NodeJS.Platform,
+  readRecord: (pid: number) => HolderRecord | undefined,
+): SessionHolder | { kind: 'busy-elsewhere' } {
+  const holder = classifyHolder(rows, sessionId, undefined, readRecord);
+  if (holder.kind !== 'none' || !cwd) {
+    return holder;
+  }
+  return busyFolderHolder(rows, sessionId, cwd, platform) ? { kind: 'busy-elsewhere' } : holder;
+}
+
+/**
+ * The impure wrapper `scheduler.onFire` actually calls: runs the listing and
+ * reports `classifyFireHolder`'s result, or `'unknown'` when the listing
+ * itself could not be run. Mirrors liveSessions.ts's `holderDetector` in
+ * shape and in that same reasoning - not knowing must still resume, per the
+ * caller, rather than fail closed and silently stop every future resume on a
+ * machine where `claude agents` misbehaves - extended with `cwd` and
+ * `platform` for the folder-wide check `holderDetector` has no reason to do.
+ */
+export function fireHolderDetector(
+  runAgents: () => string,
+  readRecord: (pid: number) => HolderRecord | undefined,
+): (sessionId: string, cwd: string | undefined, platform: NodeJS.Platform) => FireHolder {
+  return (sessionId, cwd, platform) => {
+    let stdout: string;
+    try {
+      stdout = runAgents();
+    } catch {
+      return 'unknown';
+    }
+    return classifyFireHolder(parseAgentRows(stdout), sessionId, cwd, platform, readRecord);
   };
 }

@@ -44,6 +44,8 @@ export interface FakeInfoMessage {
   message: string;
   items: string[];
   answer(item?: string): void;
+  /** True when shown with `{ modal: true }`, as the live-holder fork warning is. */
+  modal?: boolean;
 }
 
 export interface FakeStatusBarItem {
@@ -231,13 +233,24 @@ const fakeVscode = {
     // Mirrors showInformationMessage: a warning can carry action buttons
     // too, and the budget refusal offers one. `warnings` stays a string
     // array so the tests that only read messages keep working.
-    showWarningMessage: (message: string, ...items: string[]) => {
+    //
+    // Real VS Code overloads this with an optional MessageOptions object
+    // ({modal?: boolean}) ahead of the button labels - the live-holder fork
+    // warning uses it. Accepted here as `...args` rather than a fixed
+    // `options?` parameter so a plain string-only call (every other existing
+    // caller) is not forced to pass one.
+    showWarningMessage: (message: string, ...args: unknown[]) => {
+      const modal =
+        args.length > 0 && typeof args[0] === 'object' && args[0] !== null
+          ? Boolean((args[0] as { modal?: boolean }).modal)
+          : undefined;
+      const items = (modal === undefined ? args : args.slice(1)) as string[];
       vscodeFake.warnings.push(message);
       let settle: (item: string | undefined) => void = () => {};
       const answered = new Promise<string | undefined>((r) => {
         settle = r;
       });
-      vscodeFake.warningOffers.push({ message, items, answer: (item?: string) => settle(item) });
+      vscodeFake.warningOffers.push({ message, items, modal, answer: (item?: string) => settle(item) });
       return answered;
     },
     showErrorMessage: (message: string) => {

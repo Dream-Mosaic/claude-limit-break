@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOnFire, manualResumeWarning } from '../src/holderPolicy';
+import { decideOnFire, manualResumeWarning, classifyFireHolder, fireHolderDetector } from '../src/holderPolicy';
+import type { AgentRow } from '../src/liveSessions';
 
 const SHORT = '0b3d1f66';
+const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+const OTHER = '9a1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e';
 
 // ---------------------------------------------------------------------------
 // decideOnFire: scheduler.onFire's decision, before it ever calls resume().
@@ -107,4 +110,72 @@ test('manualResumeWarning names a terminal, not a panel, when that is the holder
   assert.ok(warning);
   assert.match(warning?.message ?? '', /terminal/i);
   assert.doesNotMatch(warning?.message ?? '', /panel/i);
+});
+
+// ---------------------------------------------------------------------------
+// classifyFireHolder: composes classifyHolder and busyFolderHolder (from
+// liveSessions.ts) into the single FireHolder scheduler.onFire needs, off one
+// `claude agents --json` snapshot.
+// ---------------------------------------------------------------------------
+
+const row = (over: Partial<AgentRow> & { pid: number; sessionId: string }): AgentRow => ({ kind: 'interactive', ...over });
+
+test('classifyFireHolder reports a panel directly, without checking the folder', () => {
+  const rows = [row({ pid: 111, sessionId: SESSION })];
+  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => ({
+    sessionId: SESSION,
+    entrypoint: 'claude-vscode',
+  }));
+  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false });
+});
+
+test('classifyFireHolder reports a terminal directly, without checking the folder', () => {
+  const rows = [row({ pid: 111, sessionId: SESSION })];
+  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => ({
+    sessionId: SESSION,
+    entrypoint: 'cli',
+  }));
+  assert.deepEqual(holder, { kind: 'terminal', pid: 111 });
+});
+
+test('classifyFireHolder reports none when nobody is on this session and there is no cwd to check', () => {
+  const holder = classifyFireHolder([], SESSION, undefined, 'linux', () => undefined);
+  assert.deepEqual(holder, { kind: 'none' });
+});
+
+test('classifyFireHolder falls back to busy-elsewhere when nobody is on this session but another is busy in the same folder', () => {
+  const rows = [row({ pid: 555, sessionId: OTHER, cwd: '/work/app', status: 'busy' })];
+  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => undefined);
+  assert.deepEqual(holder, { kind: 'busy-elsewhere' });
+});
+
+test('classifyFireHolder reports none when nobody is on this session and the folder is quiet', () => {
+  const rows = [row({ pid: 555, sessionId: OTHER, cwd: '/work/app', status: 'idle' })];
+  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => undefined);
+  assert.deepEqual(holder, { kind: 'none' });
+});
+
+// ---------------------------------------------------------------------------
+// fireHolderDetector: the impure wrapper scheduler.onFire actually calls -
+// mirrors liveSessions.ts's holderDetector, but 'unknown' on a listing
+// failure and a folder-aware classification on 'none'.
+// ---------------------------------------------------------------------------
+
+test('fireHolderDetector delegates to classifyFireHolder over the real listing', () => {
+  const rowsJson = JSON.stringify([{ pid: 111, kind: 'interactive', sessionId: SESSION }]);
+  const detect = fireHolderDetector(
+    () => rowsJson,
+    () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }),
+  );
+  assert.deepEqual(detect(SESSION, '/work/app', 'linux'), { kind: 'panel', pid: 111, bridged: false });
+});
+
+test('fireHolderDetector reports unknown when the listing cannot be run', () => {
+  const detect = fireHolderDetector(
+    () => {
+      throw new Error('ENOENT');
+    },
+    () => undefined,
+  );
+  assert.equal(detect(SESSION, '/work/app', 'linux'), 'unknown');
 });
