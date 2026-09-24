@@ -835,16 +835,24 @@ export function activate(context: vscode.ExtensionContext): void {
           // forgetReady above is how this click takes ownership of the job;
           // if the launch never actually started, that ownership must be
           // undone (rememberReady) or the job is gone with no way back.
+          //
+          // Task 10, fix round 3: this notification can sit unanswered for a
+          // long time - autoResume is off, so nothing else resumes it in the
+          // meantime - long enough for the claim onFire wrote at fire time to
+          // go stale (>1h) and another window to take it over before this
+          // click happens. Round 1 released that claim unconditionally,
+          // reasoning it was always this window's own; round 2 fixed the same
+          // assumption on the other three manual paths but missed this one.
+          // Same fix: bypass the answer to decide whether to launch (the
+          // user's explicit intent), but only release if this call actually
+          // won the claim itself ('claimed', including a stale takeover it
+          // just performed) - never a claim 'taken' by someone else.
+          const notifyClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
           if (!resume(job)) {
             rememberReady(job);
-            // Task 10, fix round 1: symmetric with every other failed-launch
-            // path - a resume that never started must not hold the
-            // cross-window claim either. This path never bypasses a claim
-            // (it does not call claimResume itself - see the comment above
-            // the counting/ready branches of resumeNow for why a manual
-            // path would need to), so the claim being released here is
-            // always this window's own, from onFire's top-of-function check.
-            releaseClaim(claimsDir(), claimKey, fs, log);
+            if (notifyClaim === 'claimed') {
+              releaseClaim(claimsDir(), claimKey, fs, log);
+            }
           }
         });
         return;

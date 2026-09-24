@@ -2247,28 +2247,33 @@ test('a failed manual launch on a ready (already-fired) job releases the claim i
 
 // --- Fix round 1 -------------------------------------------------------------
 
-test('the off-autoResume "Resume Now" notification button releases its claim when the launch fails', async () => {
+test('the off-autoResume "Resume Now" notification button writes/refreshes its own claim and releases it when the launch fails', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
   fakeClaimResult = 'claimed';
+  claimCalls.length = 0;
   const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
     const offer = offers()[0];
     assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
-    // Isolate to the button's own release: autoResume is off, so onFire's
-    // top-of-function claim was never released by a holder-decline branch
-    // (decideOnFire is not even called on this path) - it is still sitting
-    // there when the button is clicked, exactly as a real failed manual
-    // resume would find it.
+    // Fix round 3: the button now writes/refreshes its own claim at click
+    // time (autoResume off means this notification can sit unanswered long
+    // enough for the original one, from onFire's top-of-function check, to
+    // go stale) - isolate to the click's own claimResume/releaseClaim calls.
+    const callsBeforeClick = claimCalls.length;
     releasedKeys.length = 0;
     offer.answer('Resume Now');
     await flush();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
     assert.ok(
+      claimCalls.length > callsBeforeClick,
+      'the click must write/refresh its own claim before launching, exactly as every other manual path does',
+    );
+    assert.ok(
       releasedKeys.length > 0,
-      `a failed launch from the off-autoResume button must release its claim, symmetric with every other failed-launch path; saw ${JSON.stringify(releasedKeys)}`,
+      `a failed launch from the off-autoResume button must release the claim it won ('claimed'), symmetric with every other failed-launch path; saw ${JSON.stringify(releasedKeys)}`,
     );
   } finally {
     teardown(ctx);
@@ -2493,6 +2498,49 @@ test('resumeNow (ready-list branch) does not release a claim it does not own (it
       releasedKeys.length,
       0,
       `a claim this window does not own ('taken') must not be released; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    claimResultQueue.length = 0;
+    teardown(ctx);
+  }
+});
+
+// --- Fix round 3 -------------------------------------------------------------
+//
+// The off-autoResume "Resume Now" notification button was the one manual
+// bypass path round 2 deliberately left as release-only (it never called
+// claimResume itself, so its release was always of this window's own claim
+// from onFire's top-of-function check - see the round-1/round-2 comments
+// above it). But that reasoning assumed the click happens soon after the
+// notification appears. autoResume being off means this notification can sit
+// unanswered indefinitely; if the original claim goes stale (>1h) and
+// another window takes it over before the click, the unconditional release
+// at click time deleted THAT window's claim - the same bug class round 2
+// fixed on the other three manual paths, on the one site round 2 missed.
+
+test('the off-autoResume "Resume Now" notification button does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  // First call is onFire's own top-of-function claim (must succeed, or the
+  // job never reaches the off-autoResume notification at all). The SECOND
+  // call is the button's own bypass write - 'taken' stands in for another
+  // window having taken this reset in the meantime.
+  claimResultQueue.length = 0;
+  claimResultQueue.push('claimed', 'taken');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
+    releasedKeys.length = 0;
+    offer.answer('Resume Now');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
+    assert.equal(
+      releasedKeys.length,
+      0,
+      `a claim this window does not own ('taken') must not be released, even after its own bypassed launch failed; saw ${JSON.stringify(releasedKeys)}`,
     );
   } finally {
     claimResultQueue.length = 0;
