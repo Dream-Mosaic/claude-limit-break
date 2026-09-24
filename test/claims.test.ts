@@ -180,20 +180,35 @@ test('claimKeyFor for a limit job is sessionId-baseResumeAtMs, the un-jittered r
   assert.equal(key, 'abc-123-1000000');
 });
 
-test('claimKeyFor for an overload job buckets the fire time into 10-minute windows', () => {
+test('claimKeyFor for an overload job buckets the DETECTION instant (baseResumeAtMs), not the padded fire time', () => {
+  // Fix round 1: this used to bucket resumeAtMs. resumeAtMs is padded with
+  // each window's own independently-rolled jitter, so two windows detecting
+  // the identical overload landed in different buckets and both fired.
+  // baseResumeAtMs - the moment planResume read `now` at detection - is
+  // near-identical across windows, which is what this key must use.
   const key = claimKeyFor({
     sessionId: 'abc-123',
-    baseResumeAtMs: 1_000_000,
-    resumeAtMs: 6_000_000,
+    baseResumeAtMs: 6_000_000,
+    resumeAtMs: 1_000_000, // a different bucket under the old (buggy) logic - must be ignored
     reason: 'overload',
   });
   assert.equal(key, `abc-123-overload-${Math.floor(6_000_000 / 600_000)}`);
 });
 
-test('claimKeyFor gives two overload jobs in the same 10-minute bucket the same key', () => {
-  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 600_100, reason: 'overload' });
-  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 609_999, reason: 'overload' });
-  assert.equal(a, b);
+test('claimKeyFor gives two overload jobs with the same detection instant the same key, however far apart their jitter rolled', () => {
+  // The core regression this fix closes: two windows detect the SAME
+  // overload (same baseResumeAtMs) but roll very different backoffs
+  // (randomDelayMinMinutes..randomDelayMaxMinutes, e.g. 5m vs 30m) - their
+  // OWN resumeAtMs values land far apart, but the key must still collide.
+  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 1_300_000, reason: 'overload' });
+  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 2_800_000, reason: 'overload' });
+  assert.equal(a, b, 'the same detection instant must collide no matter how far apart the jitter rolls landed');
+});
+
+test('claimKeyFor gives two overload jobs a different key when their detection instants land in different buckets, even with identical resumeAtMs', () => {
+  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 5_000_000, reason: 'overload' });
+  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 600_000, resumeAtMs: 5_000_000, reason: 'overload' });
+  assert.notEqual(a, b, 'a genuinely different detection instant must not collide just because resumeAtMs matches');
 });
 
 // --- claimsDir ---------------------------------------------------------------

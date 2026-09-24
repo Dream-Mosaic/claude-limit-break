@@ -61,12 +61,19 @@ export function claimsDir(): string {
  * stable no matter how differently each window's jitter rolled.
  *
  * An overload job has no stated reset time at all - "the jitter *is* the
- * backoff" (policy.ts) - so there is no shared instant to key on. Instead the
- * moment the job actually fires (`resumeAtMs`) is floored to a 10-minute
- * bucket: two windows that detected the same overload and independently
- * rolled close-enough backoffs land in the same bucket and collide; windows
- * whose backoffs happen to diverge by more than that do not, which is the
- * best this can do without a shared deadline to agree on.
+ * backoff" (policy.ts) - so `baseResumeAtMs` is not a deadline here the way
+ * it is for a limit job; it is simply the instant planResume read `now` at
+ * DETECTION time, before that job's own random backoff was added. That
+ * instant is near-identical across every window watching the same account
+ * (millisecond-scale apart, per the 2026-09-24 field incident), so it is
+ * floored to a 10-minute bucket and used as the key.
+ *
+ * Fix round 1: this used to floor `resumeAtMs` - the padded fire time -
+ * instead. `resumeAtMs` includes each window's OWN independently-rolled
+ * jitter (`randomDelayMinMinutes`..`randomDelayMaxMinutes`, often 5-30
+ * minutes apart), so two windows that detected the identical overload landed
+ * in different 10-minute buckets far more often than not, and both fired.
+ * Keying on `baseResumeAtMs` instead is what makes them actually collide.
  */
 export function claimKeyFor(job: {
   sessionId: string;
@@ -75,7 +82,7 @@ export function claimKeyFor(job: {
   reason: 'limit' | 'overload';
 }): string {
   if (job.reason === 'overload') {
-    return `${job.sessionId}-overload-${Math.floor(job.resumeAtMs / 600_000)}`;
+    return `${job.sessionId}-overload-${Math.floor(job.baseResumeAtMs / 600_000)}`;
   }
   return `${job.sessionId}-${job.baseResumeAtMs}`;
 }
