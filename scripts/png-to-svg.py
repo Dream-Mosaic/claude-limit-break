@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Trace a hard-edged, blocky PNG (pixel art, mono icons) into a clean SVG.
 
-General tracers like vtracer/potrace fit curves to the pixel staircase, which
-rounds corners and adds nodes. For blocky art every edge is horizontal or
-vertical, so this traces the exact rectilinear outline instead:
+vtracer's polygon mode traces blocky art faithfully, but it reads luminance
+(so an alpha-only PNG needs flattening first), reproduces 1px upscale jitter,
+hardcodes the fill and wraps paths in transforms. For art where every edge is
+horizontal or vertical, this traces the rectilinear outline directly:
 
   1. Threshold alpha (or luminance with --luma) into a filled/empty mask.
   2. Find every x/y where the mask changes, and merge edges closer than
