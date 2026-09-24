@@ -6,8 +6,9 @@ import { installVscodeStub } from './helpers/vscode';
 
 installVscodeStub();
 
-const { TranscriptWatcher, isInScope, pruneOffsets, MAX_OFFSET_IDLE_MS, MAX_OFFSET_ENTRIES } =
+const { TranscriptWatcher, isInScope, pruneOffsets, MAX_OFFSET_IDLE_MS, MAX_OFFSET_ENTRIES, MAX_OVERLOAD_AGE_MS } =
   require('../src/transcriptWatcher') as typeof import('../src/transcriptWatcher');
+const { RESET_GRACE_MS } = require('../src/parsers/limitParser') as typeof import('../src/parsers/limitParser');
 
 const FILE = '/home/u/.claude/projects/c--projects-example/0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl';
 const silent = { info() {}, warn() {}, error() {} };
@@ -342,4 +343,82 @@ test('a structured reset time is only trusted on an entry Claude Code flagged', 
     message: { content: [{ type: 'text', text: 'Here is the refactor you asked for.' }] },
   });
   assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('a flagged entry whose quotaLimits has no numeric resetsAt falls back to the text', () => {
+  // The authoritative field only decides anything when it is actually there
+  // as a number; otherwise a flagged entry is still a limit event and the
+  // text is exactly what today's (pre-quotaLimits) detection already reads.
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    quotaLimits: { status: 'rejected' }, // no resetsAt at all
+    message: { content: [{ type: 'text', text: "You've hit your session limit. Try again in 2 hours" }] },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit, 'the text must still be read when the number is absent');
+  const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
+  assert.ok(hoursOut > 1.9 && hoursOut < 2.1, `expected ~2h out, got ${hoursOut.toFixed(2)}h`);
+});
+
+test('a structured reset far beyond maxWait is rejected, the same as a parsed one', () => {
+  // "Keep maxWait semantics": a structured reset is not exempt from the same
+  // absurd-result cap a parsed one has always had. make() reports 24h.
+  const resetsAt = Date.now() + 30 * 3_600_000;
+  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 30 hours"), FILE);
+  assert.equal(out.limit, undefined, 'a 30-hour-out structured reset must not arm a 24h-capped timer');
+});
+
+// ---------------------------------------------------------------------------
+// RESET_GRACE_MS boundary, both sides. Exercised through quotaLimits.resetsAt
+// because it is a bare epoch comparison against the real clock, with no
+// zone/DST/rollover machinery in the way. The exact millisecond edge is
+// pinned separately, deterministically, against a fixed `now` in
+// resolveStructuredReset's own unit tests (test/parsers/limitParser.test.ts) -
+// resetsAt here is epoch *seconds* and the real clock is genuinely running
+// between this line and the moment inspectLine reads Date.now(), so this
+// integration-level pair uses a few seconds of headroom on each side rather
+// than the exact edge, to demonstrate the wiring without being racy.
+// ---------------------------------------------------------------------------
+
+const GRACE_TEST_MARGIN_MS = 5_000;
+
+test('RESET_GRACE_MS boundary: still comfortably inside the grace window resumes', () => {
+  const resetsAt = Date.now() - RESET_GRACE_MS + GRACE_TEST_MARGIN_MS;
+  const out = make().inspectLine(quotaEntry(resetsAt, 'irrelevant text'), FILE);
+  assert.ok(out.limit, 'a reset just inside the grace window is due now, not history');
+});
+
+test('RESET_GRACE_MS boundary: just past the grace window is history', () => {
+  const resetsAt = Date.now() - RESET_GRACE_MS - GRACE_TEST_MARGIN_MS;
+  const out = make().inspectLine(quotaEntry(resetsAt, 'irrelevant text'), FILE);
+  assert.equal(out.limit, undefined, 'a reset just past the grace window must not resume');
+});
+
+// ---------------------------------------------------------------------------
+// MAX_OVERLOAD_AGE_MS boundary, both sides. Same headroom rationale as above:
+// the entry's timestamp is fixed at construction, but the age comparison
+// itself happens against Date.now() inside inspectLine a moment later.
+// ---------------------------------------------------------------------------
+
+const overloadLine = (age: number) =>
+  entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    timestamp: new Date(Date.now() - age).toISOString(),
+    cwd: '/projects/example',
+    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+  });
+
+test('MAX_OVERLOAD_AGE_MS boundary: still comfortably inside the age limit retries', () => {
+  const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
+  assert.ok(out.overload, 'an overload just inside MAX_OVERLOAD_AGE_MS is not yet too old');
+});
+
+test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () => {
+  const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
+  assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
 });

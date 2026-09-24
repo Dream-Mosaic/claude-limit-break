@@ -7,6 +7,8 @@ import {
   normalize,
   formatDuration,
   MAX_NOTICE_LENGTH,
+  RESET_GRACE_MS,
+  resolveStructuredReset,
 } from '../../src/parsers/limitParser';
 
 const NOW = new Date('2026-08-03T12:00:00Z');
@@ -278,4 +280,89 @@ test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
   const hit = detectLimit('Usage limit reached. Try again in 24 hours', NOW, MAXW);
   assert.ok(hit, 'a resume landing exactly on the wait horizon must still be accepted');
   assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
+});
+
+// ---------------------------------------------------------------------------
+// RESET_GRACE_MS: a resolved reset in the past is still due now within the
+// window, and history just beyond it. `readAt` - the real current time - is
+// deliberately distinct from `now` - the basis a relative notice is resolved
+// against - to pin that the grace check is decided against the former, not
+// the latter (transcriptWatcher passes the entry's own timestamp as `now`
+// and the actual wall clock as `readAt`).
+// ---------------------------------------------------------------------------
+
+test('detectLimit: RESET_GRACE_MS boundary, decided against readAt rather than the resolving basis', () => {
+  const readAt = new Date('2026-08-03T12:00:00Z');
+  // 25 minutes before readAt, so "in 10 minutes" resolves to 15 minutes
+  // (RESET_GRACE_MS) before readAt - exactly the edge of the window.
+  const basis = new Date(readAt.getTime() - RESET_GRACE_MS - 10 * 60_000);
+  const text = 'Claude AI usage limit reached. Try again in 10 minutes';
+
+  const atEdge = detectLimit(text, basis, MAXW, { readAt });
+  assert.ok(atEdge, 'exactly RESET_GRACE_MS old (by readAt) is "at most" the grace, not history');
+  assert.equal(atEdge.resumeAt.getTime(), readAt.getTime() - RESET_GRACE_MS);
+
+  const pastEdge = detectLimit(text, basis, MAXW, { readAt: new Date(readAt.getTime() + 1) });
+  assert.equal(pastEdge, undefined, 'one millisecond further back (by readAt) must tip it into history');
+});
+
+test('detectLimit: omitting readAt keeps every existing caller unaffected (readAt defaults to now)', () => {
+  // Every caller before readAt existed passed a single time reference for
+  // both roles; the default must reproduce that.
+  const past = 'Claude AI usage limit reached. Try again in 10 minutes';
+  assert.ok(detectLimit(past, new Date(NOW.getTime() - 20 * 60_000), MAXW), 'still within grace of its own basis');
+});
+
+// ---------------------------------------------------------------------------
+// resolveStructuredReset: quotaLimits.resetsAt, an already-absolute instant.
+// Same grace and horizon rules as detectLimit, but only one time reference -
+// there is no separate "written at" basis for an absolute value to resolve
+// against.
+// ---------------------------------------------------------------------------
+
+test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
+  const now = new Date('2026-08-03T12:00:00Z');
+  const atEdge = Math.floor((now.getTime() - RESET_GRACE_MS) / 1000);
+  assert.ok(resolveStructuredReset(atEdge, now, MAXW), 'exactly RESET_GRACE_MS old is still due now');
+  assert.equal(
+    resolveStructuredReset(atEdge - 1, now, MAXW),
+    undefined,
+    'a further second back is history',
+  );
+});
+
+test('resolveStructuredReset: wait-horizon boundary accepts an exact tie, rejects beyond it', () => {
+  const now = new Date('2026-08-03T12:00:00Z');
+  const atHorizon = Math.floor((now.getTime() + MAXW * 3_600_000) / 1000);
+  assert.ok(resolveStructuredReset(atHorizon, now, MAXW), 'exactly at the horizon must still be accepted');
+  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW), undefined, 'an hour beyond the horizon is rejected');
+});
+
+test('resolveStructuredReset: a non-finite value is rejected outright', () => {
+  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The clock-reset rollover, made grace-aware so a notice read moments after
+// its own clock time struck is not skipped forward a full day.
+// ---------------------------------------------------------------------------
+
+test('the clock-reset rollover accepts a today occurrence still inside the grace window', () => {
+  // 1:05am America/Chicago (CST, UTC-6): five minutes after the target clock
+  // time, inside RESET_GRACE_MS. Without the grace-aware rollover this would
+  // be judged "already past" and rolled a full day forward, to tomorrow's
+  // 1am - a ~24h miss for a limit that lifted five minutes ago.
+  const now = new Date('2026-01-15T07:05:00Z');
+  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
+  assert.ok(hit, "today's occurrence, five minutes gone, must still be picked");
+  assert.equal(hit.resumeAt.toISOString(), '2026-01-15T07:00:00.000Z', "today's 1am CST, not tomorrow's");
+});
+
+test('the clock-reset rollover still rolls to tomorrow once the grace window has passed', () => {
+  // Same notice, twenty minutes past 1am CST - past RESET_GRACE_MS, so
+  // today's occurrence is history and the next real occurrence is tomorrow.
+  const now = new Date('2026-01-15T07:20:00Z');
+  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
+  assert.ok(hit, 'a genuinely missed reset still resolves to the next occurrence');
+  assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
 });
