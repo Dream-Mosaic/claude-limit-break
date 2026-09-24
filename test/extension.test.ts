@@ -1649,3 +1649,241 @@ test('with no trusted spelling on record, the recorded cwd is used as it was', a
     teardown(ctx);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task 2: never start a second writer on a live session.
+//
+// `fakeAgentRows` stands in for `claude agents --json`; `sessionRecordFor`
+// stands in for the per-pid `~/.claude/sessions/<pid>.json` record. Both
+// default to "nobody else is running anything", so every test above this
+// section runs exactly as it did before this task existed.
+// ---------------------------------------------------------------------------
+
+/** SESSION's row, live via the fake listing, holding the session with the given entrypoint and status. */
+const holderRow = (entrypoint: string, status: string, over: Partial<AgentRow> = {}): void => {
+  fakeAgentRows = [{ pid: 111, kind: 'interactive', sessionId: SESSION, status, ...over }];
+  sessionRecordFor.set(111, { sessionId: SESSION, entrypoint });
+};
+
+const clearHolders = () => {
+  fakeAgentRows = [];
+  sessionRecordFor.clear();
+};
+
+test('scheduler.onFire resumes as normal when the only other process is an IDLE panel', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'an idle panel is the main use case - it must not block the resume');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
+      0,
+      'must not notify instead of spawning',
+    );
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire silently drops the job when the only other process is a BUSY panel', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'busy');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a busy panel already holds the session');
+    // Not the raw message count: a fresh activation also offers the
+    // first-run "check for updates?" prompt, which is unrelated noise here.
+    // The thing under test is that nothing NAMES this job at all.
+    assert.equal(
+      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
+      0,
+      'a busy holder drops silently - no notification naming this job',
+    );
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.ok(
+      vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
+      'the dropped job must not have been remembered for manual resume',
+    );
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire silently drops the job when the only other process is a WAITING terminal', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('cli', 'waiting');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.equal(
+      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
+      0,
+      'a waiting terminal drops silently too',
+    );
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-continue is on', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'auto-continue is already going to pick this session back up');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
+      0,
+      'auto-continue being on means there is nothing to offer',
+    );
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'not yet - the button has not been clicked');
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `no offer was made; saw ${JSON.stringify(vscodeFake.info)}`);
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'the button claims the job and resumes it');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFFERENT session is busy in the same folder', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  // A different sessionId, busy, in the same folder as the job (REAL_CWD,
+  // pastJob()'s default cwd) - nobody is on THIS session, so classifyHolder
+  // alone would say 'none' and resume unmodified; busyFolderPeers is what
+  // finds this row and feeds the coordination prompt.
+  fakeAgentRows = [
+    { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
+  ];
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'this is "resume anyway", not a block');
+    const prompt = argsOf(0)?.[2];
+    assert.match(prompt ?? '', /other-session/, 'the peer must be named in the resumed prompt');
+    assert.match(prompt ?? '', /SendMessage/, 'the resumed model must be told how to coordinate');
+    assert.ok(prompt?.startsWith(PROMPT), `the user's own prompt must still lead: ${prompt}`);
+    assert.ok(
+      vscodeFake.info.some((m) => m.message.includes('other-session')),
+      'the person is told too, non-blockingly',
+    );
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire does not touch the prompt when the folder is quiet', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(argsOf(0)?.[2], PROMPT, 'no busy peers - the prompt must be exactly the user\'s own');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resumeNow shows a modal fork warning for a busy holder; declining leaves it unresumed', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'busy');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  start(ctx);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const pending = resumeNow();
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal, 'a busy panel must warn modally before a manual resume');
+    assert.equal(modal.items[0], 'Resume Anyway');
+    assert.match(modal.message, /fork/i);
+    assert.equal(vscodeFake.terminals.length, 0, 'must not resume before the modal is answered');
+    modal.answer(undefined);
+    await pending;
+    assert.equal(vscodeFake.terminals.length, 0, 'declining the modal must not launch anything');
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('resumeNow proceeds after Resume Anyway is clicked on the modal', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'busy');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  start(ctx);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const pending = resumeNow();
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal);
+    modal.answer('Resume Anyway');
+    await pending;
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Anyway must still launch the resume');
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('resumeNow shows no modal for an idle panel - it is not a live conflict', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  start(ctx);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    await flush();
+    assert.equal(vscodeFake.warningOffers.length, 0, 'an idle panel needs no modal');
+    assert.equal(vscodeFake.terminals.length, 1, 'and the resume proceeds directly');
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
