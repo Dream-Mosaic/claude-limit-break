@@ -46,6 +46,7 @@ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
+import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
 
 const NS = 'claudeLimitBuster';
 
@@ -92,6 +93,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel('Claude Limit Buster');
   const log = createLogger('limit-buster', (line) => channel.appendLine(line));
   const settings = () => readSettings(vscode.workspace.getConfiguration(NS));
+
+  // Task 10: sweep claim files this window's own crashes or a stale race left
+  // behind. Disk hygiene, not a correctness step - claimResume's own 1h
+  // staleness check is what keeps a claim from blocking anything for long;
+  // this just keeps the machine-wide directory from growing forever.
+  cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
 
   const scheduler = new ResumeScheduler(context.globalState, log);
   const status = new CountdownStatusBar();
@@ -775,6 +782,22 @@ export function activate(context: vscode.ExtensionContext): void {
       status.update(job, scheduler.jobs.length, settings().statusBar);
     }),
     scheduler.onFire((job) => {
+      // Task 10: claim this reset before anything else. Every window watching
+      // this account can independently detect and schedule the SAME reset -
+      // watchScope: machine means every copy of the extension watches every
+      // transcript - and two windows have been seen firing within a second or
+      // two of each other, too close for Task 2's holder check (which reads
+      // `claude agents`) to have caught the first window's child yet. A
+      // machine-wide file claim is first-past-the-post across windows in a way
+      // an in-memory guard inside one extension host cannot be. 'taken' means
+      // some other window already won this race: drop entirely, before the
+      // autoResume split below, so the off-autoResume path cannot become a
+      // backdoor around a lost claim either.
+      const claimKey = claimKeyFor(job);
+      if (claimResume(claimsDir(), claimKey, Date.now(), fs, log) === 'taken') {
+        log.info(`Resume for ${job.sessionId.slice(0, 8)} claimed by another window; dropping.`);
+        return;
+      }
       const s = settings();
       if (!s.autoResume) {
         rememberReady(job);
@@ -857,6 +880,10 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       }
       if (!decision.resume) {
+        // This window is not launching anything automatically - the claim it
+        // just took must not sit there blocking another window (or a later
+        // manual retry) for up to an hour over a resume nobody is making.
+        releaseClaim(claimsDir(), claimKey, fs, log);
         return;
       }
       // A second, independent controller ruling: on EVERY resume we are
@@ -899,6 +926,11 @@ export function activate(context: vscode.ExtensionContext): void {
       // sentence tied to a folder-busy snapshot from this particular fire.
       if (!resume(resumeJob)) {
         rememberReady(job);
+        // A resume that never launched must not hold the claim: a manual
+        // retry (which bypasses the claim anyway) is not what this protects -
+        // a LATER automatic attempt, from this window's own retry path or
+        // another window's, is.
+        releaseClaim(claimsDir(), claimKey, fs, log);
       }
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
@@ -914,12 +946,27 @@ export function activate(context: vscode.ExtensionContext): void {
       //
       // confirmManualResume runs first in both branches: a live holder gets a
       // modal warning naming it before anything is claimed or launched (#2).
+      //
+      // Task 10: this is a MANUAL resume - the user's own explicit click or
+      // command - so it bypasses whatever claimResume reports (another
+      // window's claim, even a fresh one, is not a reason to refuse someone
+      // who is looking right at this). It still calls claimResume, purely for
+      // the write: the original claim from this job's own fire may have gone
+      // stale by now (the user did not answer right away), and refreshing it
+      // here is what stops a different window's own automatic attempt from
+      // also firing while this launch is in flight.
       const counting = scheduler.current;
       if (counting) {
         // Only this session's job: others may still be counting down, and
         // "Resume Now" moves exactly one.
-        if ((await confirmManualResume(counting)) && resume(counting)) {
-          scheduler.cancel(counting.sessionId);
+        if (await confirmManualResume(counting)) {
+          const key = claimKeyFor(counting);
+          claimResume(claimsDir(), key, Date.now(), fs, log);
+          if (resume(counting)) {
+            scheduler.cancel(counting.sessionId);
+          } else {
+            releaseClaim(claimsDir(), key, fs, log);
+          }
         }
         return;
       }
@@ -931,8 +978,14 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
         return;
       }
-      if ((await confirmManualResume(ready)) && resume(ready)) {
-        forgetReady(ready.sessionId);
+      if (await confirmManualResume(ready)) {
+        const key = claimKeyFor(ready);
+        claimResume(claimsDir(), key, Date.now(), fs, log);
+        if (resume(ready)) {
+          forgetReady(ready.sessionId);
+        } else {
+          releaseClaim(claimsDir(), key, fs, log);
+        }
       }
     }),
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
