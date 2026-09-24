@@ -2214,3 +2214,91 @@ test('a failed manual launch on a ready (already-fired) job releases the claim i
     teardown(ctx);
   }
 });
+
+// --- Fix round 1 -------------------------------------------------------------
+
+test('the off-autoResume "Resume Now" notification button releases its claim when the launch fails', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  fakeClaimResult = 'claimed';
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
+    // Isolate to the button's own release: autoResume is off, so onFire's
+    // top-of-function claim was never released by a holder-decline branch
+    // (decideOnFire is not even called on this path) - it is still sitting
+    // there when the button is clicked, exactly as a real failed manual
+    // resume would find it.
+    releasedKeys.length = 0;
+    offer.answer('Resume Now');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
+    assert.ok(
+      releasedKeys.length > 0,
+      `a failed launch from the off-autoResume button must release its claim, symmetric with every other failed-launch path; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('"Resume in Terminal Anyway" writes a fresh claim before resuming, exactly as manual Resume Now does', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimCalls.length = 0;
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
+    const callsBeforeClick = claimCalls.length;
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the button must have resumed');
+    assert.ok(
+      claimCalls.length > callsBeforeClick,
+      'the click must write/refresh its own claim before launching, exactly as manual Resume Now does',
+    );
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('"Resume in Terminal Anyway" releases its own claim if the launch fails', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
+    // decideOnFire's decision.resume is false here (idle terminal,
+    // auto-continue off), so onFire's own top-level release already fired
+    // once by this point - isolate to the button click's own write+release.
+    releasedKeys.length = 0;
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
+    assert.ok(
+      releasedKeys.length > 0,
+      `a failed launch from the button must release the claim it just wrote; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+  }
+});

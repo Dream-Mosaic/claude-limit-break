@@ -835,6 +835,10 @@ export function activate(context: vscode.ExtensionContext): void {
           // job is gone with no way back.
           if (!resume(job)) {
             rememberReady(job);
+            // Task 10, fix round 1: symmetric with every other failed-launch
+            // path - a resume that never started must not hold the
+            // cross-window claim either.
+            releaseClaim(claimsDir(), claimKey, fs, log);
           }
         });
         return;
@@ -865,17 +869,30 @@ export function activate(context: vscode.ExtensionContext): void {
           if (choice !== notice.button) {
             return;
           }
-          // "Resume in Terminal Anyway" claims the job exactly as the
-          // off-autoResume "Resume Now" button does, then resumes it - no
-          // second confirmation, because this button IS the confirmation.
+          // "Resume in Terminal Anyway" takes ownership of the job
+          // (forgetReady) exactly as the off-autoResume "Resume Now" button
+          // does, then resumes it - no second confirmation, because this
+          // button IS the confirmation.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
               `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
             );
             return;
           }
+          // Task 10, fix round 1: this branch is reached only after
+          // decideOnFire declined to auto-resume, which already released
+          // this job's original claim (see `!decision.resume` above) - by
+          // the time someone clicks this button that claim is long gone. The
+          // click is exactly as much an explicit user action as the
+          // resumeNow command, so - same as resumeNow - it writes/refreshes
+          // its own claim before launching, ignoring whatever claimResume
+          // reports, so another window's own automatic attempt cannot also
+          // fire while this launch is in flight; a failed launch releases it
+          // again.
+          claimResume(claimsDir(), claimKey, Date.now(), fs, log);
           if (!resume(job)) {
             rememberReady(job);
+            releaseClaim(claimsDir(), claimKey, fs, log);
           }
         });
       }
