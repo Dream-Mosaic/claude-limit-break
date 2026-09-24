@@ -112,15 +112,33 @@ export class ResumeScheduler {
    * earlier one still counting down for the same session: repeated limit
    * notices for one cooldown would otherwise keep pushing that resume further
    * out. Deadlines belonging to other sessions are never compared at all.
+   *
+   * Task 10 fix (2026-09-24): `baseResumeAtMs` - the un-jittered reset - is
+   * also compared, not just `resumeAtMs`. planResume rolls a fresh random
+   * jitter on every detection, so a REPEAT notice for the identical reset
+   * produces a different `resumeAtMs` each time; a re-detection that happened
+   * to re-roll a SMALLER jitter has an earlier `resumeAtMs` than the job
+   * already scheduled, which slipped past the check above (only a strictly
+   * LATER resumeAtMs was ever blocked) and replaced it - on 2026-09-24 this
+   * moved a window's resume from 2:27:19 to 2:20:11 on a re-detection. Same
+   * `baseResumeAtMs` means the same reset no matter which way the new jitter
+   * roll moved it, so it is dropped either way, keeping the first schedule.
    */
   schedule(job: PendingJob): boolean {
     const existing = this.pending.get(job.sessionId);
-    if (existing && existing.resumeAtMs >= Date.now() && job.resumeAtMs > existing.resumeAtMs) {
-      this.log.info(
-        `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
-          `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
-      );
-      return false;
+    if (existing && existing.resumeAtMs >= Date.now()) {
+      const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
+      if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
+        this.log.info(
+          sameReset
+            ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +
+                `${new Date(job.baseResumeAtMs).toISOString()}); keeping the resume already scheduled for ` +
+                `${new Date(existing.resumeAtMs).toISOString()}.`
+            : `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
+                `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
+        );
+        return false;
+      }
     }
     this.pending.set(job.sessionId, job);
     this.persist();
