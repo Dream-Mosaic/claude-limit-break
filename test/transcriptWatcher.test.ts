@@ -583,3 +583,27 @@ test('a flagged real banner still arms a timer (positive case)', () => {
   });
   assert.ok(make().inspectLine(line, FILE).limit);
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 1: the subagent-file veto must not swallow a FLAGGED entry. A
+// subagent that genuinely hits the limit still writes Claude Code's own
+// rate-limit marker into its own file, and that must still arm - only an
+// unflagged note merely quoting what happened is vetoed. Flagged entries are
+// exempt from every veto in this module, subagent-file included.
+// ---------------------------------------------------------------------------
+
+test('a flagged banner in a subagents/ file still arms a timer', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
+  });
+  assert.ok(make().inspectLine(line, SUBAGENT_FILE).limit, 'a flagged entry must not be dropped by the subagent-file veto');
+});
+
+test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a timer', () => {
+  const resetsAt = Date.now() + 2 * 3_600_000;
+  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
+  assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
+  assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
+});

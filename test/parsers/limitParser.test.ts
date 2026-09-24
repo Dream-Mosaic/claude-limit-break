@@ -402,6 +402,25 @@ test('a bare "path:line-" grep prefix (no file extension) is still recognised', 
   assert.equal(detectLimit(text, NOW, MAXW), undefined);
 });
 
+test('fix round 1: an absolute Windows path with a drive letter is still recognised as a grep prefix', () => {
+  const text = 'C:\\Users\\x\\y.ts:12:Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a drive-letter grep citation must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('fix round 1: drive-letter support does not open a hole for real banners', () => {
+  // "12:40pm" must not itself be read as a drive letter + path.
+  const cases = [
+    "You've hit your session limit · resets 12:40am (America/Chicago)",
+    "You've hit your session limit · resets 2am (America/Chicago)",
+    'Claude usage limit reached, resets at 12:00 (UTC+3)',
+    'Claude AI usage limit reached. Try again in 5 hours',
+  ];
+  for (const text of cases) {
+    assert.ok(detectLimit(text, NOW, MAXW), `real banner must still arm: ${text}`);
+  }
+});
+
 test('a real banner with no quoting marks still arms untrusted (positive control)', () => {
   // The new vetoes must not catch an ordinary, unquoted banner - the whole
   // point of the guard is to stay narrow.
@@ -430,4 +449,9 @@ test('looksLikeQuotedNotice checks each physical line, since normalize() collaps
   // prefix - the veto must still catch it even though it is not on line one.
   const text = 'Found 2 matches:\ndocs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
   assert.ok(looksLikeQuotedNotice(text));
+});
+
+test('fix round 1: looksLikeQuotedNotice recognises an absolute Windows path with a drive letter', () => {
+  assert.ok(looksLikeQuotedNotice('C:\\Users\\x\\y.ts:12: Claude AI usage limit reached'), 'drive-letter grep prefix');
+  assert.equal(looksLikeQuotedNotice("You've hit your session limit \u00b7 resets 12:40pm"), false, '"12:40pm" is not a drive letter');
 });

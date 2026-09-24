@@ -431,14 +431,19 @@ export class TranscriptWatcher {
         // `flagged` has to come first: Claude Code writes its own API-error notices as
         // synthetic entries that can carry type "user", so a bare type check would
         // suppress exactly the detection this extension exists for.
-        // A subagent's own transcript never arms a limit itself (synthesis A3): a
-        // subagent that hits the limit stops its parent, whose own transcript
-        // records the same event, so scanning the subagent's file too only risks
-        // re-arming on a note that merely quotes what happened (a checkpoint
-        // recap, a summary). Nothing else here is affected - turn-end and
-        // overload detection below still run over subagent files exactly as
-        // before.
-        if (!isSubagentFile(file) && (flagged || apiError || entry.type !== 'user')) {
+        // A subagent's own transcript need not arm a limit itself (synthesis A3):
+        // a subagent that hits the limit stops its parent, whose own transcript
+        // records the same event too, so an unflagged note in the subagent's own
+        // file that merely quotes what happened - a checkpoint recap, a summary -
+        // must not re-arm. But `flagged` comes first, ahead of the subagent-file
+        // check, same as it already does ahead of the user-type check above: a
+        // subagent that genuinely hits the limit still writes Claude Code's own
+        // rate-limit marker into its own file, and that must still arm (fix round
+        // 1 - the first version of this guard dropped a real limit hit whenever it
+        // landed in a subagents/ file, flagged or not). Nothing else here is
+        // affected - turn-end and overload detection below still run over
+        // subagent files exactly as before.
+        if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
             // on the flagged entry itself - immune to every way the text can be
             // misread (zone, DST, calendar rollover) - so it wins over the text

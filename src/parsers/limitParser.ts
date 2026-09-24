@@ -470,10 +470,14 @@ export function looksLikePercentageUsage(text: string): boolean {
  * Checked per physical line of the *raw* text, before normalize() collapses
  * every run of whitespace (newlines included) to a single space: a prefix
  * only has to sit at the start of its own line, not the whole candidate.
- * The grep pattern is deliberately narrow - a bare token, no whitespace or
- * colon in it, immediately followed by ":<digits>:" or ":<digits>-" - so an
- * ordinary banner ("resets 12:40pm") never matches: "12" is followed by
- * ":40pm", not a run of digits followed by ':' or '-'.
+ * The grep pattern is deliberately narrow - an optional single-letter drive
+ * ("C:"), then a bare token with no whitespace or colon in it, immediately
+ * followed by ":<digits>:" or ":<digits>-" - so an ordinary banner ("resets
+ * 12:40pm") never matches: "12" is followed by ":40pm", not a run of digits
+ * followed by ':' or '-'. The drive letter is optional (fix round 1: an
+ * absolute Windows path like "C:\Users\x\y.ts:12:" was missed without it -
+ * "C" alone has no trailing digits, so the un-prefixed pattern never got
+ * past the drive letter to the real path).
  */
 export function looksLikeQuotedNotice(rawText: string): boolean {
     return rawText.split(/\r?\n/).some((line) => {
@@ -481,7 +485,7 @@ export function looksLikeQuotedNotice(rawText: string): boolean {
         if (!t) {
             return false;
         }
-        return /`/.test(t) || /^>/.test(t) || /^[^\s:]+:\d+[:-]/.test(t);
+        return /`/.test(t) || /^>/.test(t) || /^(?:[A-Za-z]:)?[^\s:]+:\d+[:-]/.test(t);
     });
 }
 /** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
