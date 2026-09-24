@@ -451,3 +451,122 @@ test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () 
   const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
   assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
 });
+
+// ---------------------------------------------------------------------------
+// Task 3 (synthesis A3): untrusted text that merely LOOKS like a limit
+// banner must not arm a timer. Three real false positives from 2026-09-23:
+// a subagent note quoting a banner, a usage-percentage status line, and a
+// `grep` result quoting a banner. Each is used here verbatim (or, for the
+// grep case, a realistic reconstruction - the brief gives no exact text) as
+// a negative case, alongside a flagged real banner as a positive case.
+// ---------------------------------------------------------------------------
+
+const SUBAGENT_FILE =
+  '/home/u/.claude/projects/c--projects-example/subagents/9f1e2d3c-4b1a-4c9e-8a1e-2a5d6e8c9999.jsonl';
+
+test('a subagent file never arms a limit timer, even quoting a real banner verbatim (real false positive)', () => {
+  // Captured verbatim, 2026-09-23, from a subagent checkpoint note.
+  const line = entry({
+    type: 'assistant',
+    message: { content: '…You have used up your monthly limit. Try again in 3 hours' },
+  });
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+});
+
+test('a subagent file still reports turn-end and overload - only limit detection is skipped', () => {
+  // The veto is scoped to limits: a subagent that hits the limit stops its
+  // parent, whose own transcript records it, but a subagent's turn ending or
+  // failing over is still real information this watcher already reports.
+  const turnEndLine = entry({ type: 'assistant', message: { stop_reason: 'end_turn', content: 'Done.' } });
+  assert.ok(
+    make().inspectLine(turnEndLine, SUBAGENT_FILE).inputNeeded,
+    'turn-end must still be reported for a subagent file',
+  );
+
+  const overloadLine2 = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+  });
+  assert.ok(
+    make().inspectLine(overloadLine2, SUBAGENT_FILE).overload,
+    'overload must still be reported for a subagent file',
+  );
+});
+
+test('a percentage-usage status line does not arm a timer (real false positive)', () => {
+  // Captured verbatim, 2026-09-23. Non-flagged, non-user entry: the shape
+  // that reaches the untrusted candidate loop today.
+  const line = entry({
+    type: 'assistant',
+    message: { content: "You've used 91% of your session limit · resets 12:40pm" },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('the same percentage text still arms once Claude Code flags the entry (positive control)', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: "You've used 91% of your session limit · resets 12:40pm" },
+  });
+  assert.ok(make().inspectLine(line, FILE).limit, 'a flagged entry is unaffected by the percentage veto');
+});
+
+test('a grep result quoting a banner, inside a tool_result block, does not arm a timer (real false positive)', () => {
+  // Reconstructed: the brief names this false positive but gives no exact
+  // text. `error` (not isApiErrorMessage/rate_limit) makes the entry an
+  // apiError without flagging it as a rate-limit event, so it still reaches
+  // the untrusted candidate loop, same as a genuine failed-tool-call entry
+  // would.
+  const line = entry({
+    type: 'user',
+    error: 'tool execution failed',
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_01',
+          content: 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours',
+        },
+      ],
+    },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('plain banner wording inside a tool_result block does not arm a timer, even with no quoting marks', () => {
+  // Isolates the structural tool-result veto from the textual grep-prefix
+  // veto: this text has no `%`, no backtick, no `>`, no "file:line:" prefix
+  // at all - only its position inside a tool_result block should stop it.
+  const line = entry({
+    type: 'user',
+    error: 'tool execution failed',
+    message: {
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_02', content: 'Claude AI usage limit reached. Try again in 5 hours' },
+      ],
+    },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('a grep-style "file:line:" quote in an ordinary assistant message does not arm a timer', () => {
+  // Isolates the textual grep-prefix veto from the structural tool-result
+  // veto: this text is plain assistant content, not inside a tool_result.
+  const line = entry({
+    type: 'assistant',
+    message: { content: 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('a flagged real banner still arms a timer (positive case)', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
+  });
+  assert.ok(make().inspectLine(line, FILE).limit);
+});
