@@ -33,7 +33,15 @@ import {
   type FirstRunPromptChoice,
 } from './updateCheck';
 import { resolveSession } from './sessionResolver';
-import { livePanelDetector } from './liveSessions';
+import {
+  livePanelDetector,
+  agentRowsDetector,
+  classifyHolder,
+  busyFolderPeers,
+  type HolderRecord,
+} from './liveSessions';
+import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
+import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
@@ -361,26 +369,43 @@ export function activate(context: vscode.ExtensionContext): void {
   const resumedSessions = new Map<string, Promise<number | undefined>>();
 
   /**
+   * `claude agents --json`, run with a timeout so a hung CLI cannot take
+   * whichever handler called this with it. Shared by every reader of the
+   * listing below - detectLivePanel (end-of-turn) and detectAgentRows (a
+   * manual resume, and scheduler.onFire) - so a hang or a missing executable
+   * is one behaviour to reason about, not three.
+   */
+  const runAgentsListing = (): string => {
+    const launcher = findLauncher(settings().claudeCommand);
+    if (!launcher) {
+      throw new Error('no claude executable');
+    }
+    return execFileSync(launcher.file, [...launcher.args, 'agents', '--json'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+  };
+
+  /** One pid's `~/.claude/sessions/<pid>.json` record, the label half of the liveness/label split (see liveSessions.ts). */
+  const readHolderRecord = (pid: number): HolderRecord | undefined =>
+    readSessionRecord(sessionRegistryDir(), pid, (f) => fs.readFileSync(f, 'utf8'));
+
+  /**
    * Is a panel tab holding this session open, apart from our own resume?
    *
    * `claude agents --json` for liveness, the per-pid record for the
-   * entrypoint - see liveSessions.ts for why it is split that way. Run with a
-   * timeout: this is on the path of an end-of-turn event, and a CLI that hangs
-   * must not take the handler with it.
+   * entrypoint - see liveSessions.ts for why it is split that way.
    */
-  const detectLivePanel = livePanelDetector(
-    () => {
-      const launcher = findLauncher(settings().claudeCommand);
-      if (!launcher) {
-        throw new Error('no claude executable');
-      }
-      return execFileSync(launcher.file, [...launcher.args, 'agents', '--json'], {
-        encoding: 'utf8',
-        timeout: 10_000,
-      });
-    },
-    (pid) => readSessionRecord(sessionRegistryDir(), pid, (f) => fs.readFileSync(f, 'utf8')),
-  );
+  const detectLivePanel = livePanelDetector(runAgentsListing, readHolderRecord);
+
+  /**
+   * `claude agents --json`, run once and parsed - or `'unknown'` when the
+   * listing itself could not be run. A manual resume's live-holder check
+   * (confirmManualResume, below) and scheduler.onFire's holder AND
+   * busy-folder-peers checks are all built on this one snapshot function,
+   * via the pure `classifyHolder` / `busyFolderPeers` (liveSessions.ts).
+   */
+  const detectAgentRows = agentRowsDetector(runAgentsListing);
 
   const resume = (job: PendingJob): boolean => {
     const s = settings();
@@ -510,6 +535,32 @@ export function activate(context: vscode.ExtensionContext): void {
     }, GRACE_MS);
     stallChecks.add(check);
     return true;
+  };
+
+  /**
+   * The gate every MANUAL resume goes through before `resume()` is ever
+   * called: the command, and the off-autoResume notification's own button.
+   *
+   * A scheduled fire has its own, separate holder check (see
+   * scheduler.onFire below) that never spawns a second writer at all; this
+   * one is different on purpose - the person clicking Resume Now already
+   * knows which session they mean, so a live holder is a warning to click
+   * through, not a reason to silently redirect them into "remembered for
+   * later" the way the automatic path does. `ourPid` is omitted (undefined):
+   * the job has not been resumed yet, so there is no terminal pid of our own
+   * to exclude.
+   */
+  const confirmManualResume = async (job: PendingJob): Promise<boolean> => {
+    const rows = detectAgentRows();
+    const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
+    const warning = manualResumeWarning(holder, job.sessionId.slice(0, 8));
+    if (!warning) {
+      return true;
+    }
+    const pick = await Promise.resolve(
+      vscode.window.showWarningMessage(warning.message, { modal: true }, warning.button),
+    );
+    return pick === warning.button;
   };
 
   /**
@@ -733,31 +784,102 @@ export function activate(context: vscode.ExtensionContext): void {
             `Claude Limit Buster: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
             'Resume Now',
           ),
-        ).then((choice) => {
-          if (choice === 'Resume Now') {
-            // This job, closed over here - not "whatever is ready now". Another
-            // session can come ready while this notification is still on
-            // screen, and the offer names a session, so it must honour it.
-            //
-            // Removing it is also how this click claims it. The notification
-            // outlives the job: the same session can be resumed from the
-            // command palette first, and without the claim a later click here
-            // would launch a second `claude --resume` on it.
-            if (!forgetReady(job.sessionId)) {
-              void vscode.window.showInformationMessage(
-                `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
-              );
-              return;
-            }
-            // forgetReady above is how this click claims the job; if the
-            // launch never actually started, the claim must be undone or the
-            // job is gone with no way back.
-            if (!resume(job)) {
-              rememberReady(job);
-            }
+        ).then(async (choice) => {
+          if (choice !== 'Resume Now') {
+            return;
+          }
+          // Same live-holder gate the resumeNow command goes through - this
+          // button is just as much a manual resume as the palette command is.
+          if (!(await confirmManualResume(job))) {
+            return;
+          }
+          // This job, closed over here - not "whatever is ready now". Another
+          // session can come ready while this notification is still on
+          // screen, and the offer names a session, so it must honour it.
+          //
+          // Removing it is also how this click claims it. The notification
+          // outlives the job: the same session can be resumed from the
+          // command palette first, and without the claim a later click here
+          // would launch a second `claude --resume` on it.
+          if (!forgetReady(job.sessionId)) {
+            void vscode.window.showInformationMessage(
+              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+            );
+            return;
+          }
+          // forgetReady above is how this click claims the job; if the
+          // launch never actually started, the claim must be undone or the
+          // job is gone with no way back.
+          if (!resume(job)) {
+            rememberReady(job);
           }
         });
         return;
+      }
+      // Task 2: before ever spawning a second `claude --resume`, find out who
+      // already holds this session - a resume into a session a panel or
+      // another terminal already holds forks the transcript (see the
+      // docs/research/2026-09-20-panel-fork-experiment.md incident this task
+      // is named for). See holderPolicy.ts's decideOnFire for the full branch
+      // table; 'none', a failed listing ('unknown') and an IDLE panel are the
+      // cases that reach the ordinary resume below.
+      const rows = detectAgentRows();
+      const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
+      const decision = decideOnFire(
+        holder,
+        autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
+        job.sessionId.slice(0, 8),
+      );
+      if (decision.logMessage) {
+        (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);
+      }
+      if (decision.remember) {
+        rememberReady(job);
+      }
+      if (decision.notice) {
+        const notice = decision.notice;
+        void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then((choice) => {
+          if (choice !== notice.button) {
+            return;
+          }
+          // "Resume in Terminal Anyway" claims the job exactly as the
+          // off-autoResume "Resume Now" button does, then resumes it - no
+          // second confirmation, because this button IS the confirmation.
+          if (!forgetReady(job.sessionId)) {
+            void vscode.window.showInformationMessage(
+              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+            );
+            return;
+          }
+          if (!resume(job)) {
+            rememberReady(job);
+          }
+        });
+      }
+      if (!decision.resume) {
+        return;
+      }
+      // A second, independent controller ruling: nobody is on THIS session
+      // (holder.kind === 'none'), but a DIFFERENT session may be busy or
+      // waiting in the same folder. The extension cannot message that
+      // session itself (constraint #3 - never write into a session it did
+      // not create), so instead it tells the session it is ABOUT to create:
+      // buildResumePrompt appends a sentence naming the peer(s) and asking
+      // the resumed model to coordinate with them via SendMessage before
+      // editing anything. This never blocks the resume - only the prompt
+      // passed to it changes.
+      let resumeJob = job;
+      if (rows !== 'unknown' && holder !== 'unknown' && holder.kind === 'none' && job.cwd) {
+        const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
+        if (peers.length > 0) {
+          const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
+          log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
+          void vscode.window.showInformationMessage(
+            `Claude Limit Buster: another Claude session (${names}) is working in this folder. ` +
+              `The resumed session has been told to coordinate with it.`,
+          );
+          resumeJob = { ...job, prompt: buildResumePrompt(job.prompt, peers) };
+        }
       }
       if (s.notify) {
         void vscode.window.showInformationMessage(
@@ -767,12 +889,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // The scheduler already cleared this job before firing (its own
       // re-entrancy guard, see consume()), so if the launch never started this
       // is the only place still holding it - without rememberReady it would
-      // simply be gone.
-      if (!resume(job)) {
+      // simply be gone. The ORIGINAL job (unmodified prompt) is what gets
+      // remembered: a later manual resume should not carry a coordination
+      // sentence tied to a folder-busy snapshot from this particular fire.
+      if (!resume(resumeJob)) {
         rememberReady(job);
       }
     }),
-    vscode.commands.registerCommand(`${NS}.resumeNow`, () => {
+    vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
       // Exactly one job moves, and only its own source is touched. Cancelling
       // the scheduler while resuming a ready job - or dropping a ready job
       // while resuming the scheduler's - would throw away work nobody asked to
@@ -782,11 +906,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // reports the launch actually started. resume() can fail (missing cwd,
       // no claude executable), and doing the removal first - as this used to -
       // left a failed resume with no path back to the job.
+      //
+      // confirmManualResume runs first in both branches: a live holder gets a
+      // modal warning naming it before anything is claimed or launched (#2).
       const counting = scheduler.current;
       if (counting) {
         // Only this session's job: others may still be counting down, and
         // "Resume Now" moves exactly one.
-        if (resume(counting)) {
+        if ((await confirmManualResume(counting)) && resume(counting)) {
           scheduler.cancel(counting.sessionId);
         }
         return;
@@ -799,7 +926,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
         return;
       }
-      if (resume(ready)) {
+      if ((await confirmManualResume(ready)) && resume(ready)) {
         forgetReady(ready.sessionId);
       }
     }),

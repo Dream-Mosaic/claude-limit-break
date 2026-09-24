@@ -1,14 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOnFire, manualResumeWarning, classifyFireHolder, fireHolderDetector } from '../src/holderPolicy';
-import type { AgentRow } from '../src/liveSessions';
+import { decideOnFire, manualResumeWarning, buildResumePrompt } from '../src/holderPolicy';
 
 const SHORT = '0b3d1f66';
-const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
-const OTHER = '9a1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e';
 
 // ---------------------------------------------------------------------------
 // decideOnFire: scheduler.onFire's decision, before it ever calls resume().
+//
+// Status-driven per the controller's mid-task correction: an IDLE panel
+// resumes as normal (the product's main use case - someone leaves a panel
+// idle at a limit and walks away); a panel or terminal that is busy or
+// waiting drops the job silently (no spawn, no remember, no notice); an idle
+// terminal defers to autoContinueOn.
 // ---------------------------------------------------------------------------
 
 test('decideOnFire resumes as today when nobody holds the session', () => {
@@ -20,8 +23,8 @@ test('decideOnFire resumes as today when nobody holds the session', () => {
 
 test('decideOnFire resumes as today when the listing failed, but logs a warning about it', () => {
   // Failing closed here would silently stop every resume on a machine where
-  // `claude agents` misbehaves - the brief is explicit that 'unknown' must
-  // still resume, just be logged as a listing failure.
+  // `claude agents` misbehaves - 'unknown' must still resume, just be logged
+  // as a listing failure.
   const decision = decideOnFire('unknown', true, SHORT);
   assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
@@ -30,31 +33,69 @@ test('decideOnFire resumes as today when the listing failed, but logs a warning 
   assert.match(decision.logMessage ?? '', /could not list/i);
 });
 
-test('decideOnFire never spawns for a panel holder, and offers a Resume in Terminal Anyway button', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false }, true, SHORT);
+test('decideOnFire resumes an IDLE panel as normal - the product\'s main use case', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'idle' }, true, SHORT);
+  assert.equal(decision.resume, true);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined, 'must not notify instead of spawning');
+});
+
+test('decideOnFire drops the job silently for a BUSY panel - no spawn, no remember, no notice', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
   assert.equal(decision.resume, false);
-  assert.equal(decision.remember, true);
-  assert.ok(decision.notice, 'must show a notice naming the panel');
-  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
-  assert.match(decision.notice?.message ?? '', /claude panel/i);
-  assert.doesNotMatch(decision.notice?.message ?? '', /remote control/i);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+  assert.match(decision.logMessage ?? '', /busy/i);
 });
 
-test('decideOnFire mentions Remote Control for a bridged panel', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true }, true, SHORT);
-  assert.match(decision.notice?.message ?? '', /remote control/i);
+test('decideOnFire drops the job silently for a WAITING panel too', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'waiting' }, true, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+  assert.match(decision.logMessage ?? '', /waiting/i);
 });
 
-test('decideOnFire leaves a terminal holder alone, unremembered, when auto-continue is on', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222 }, true, SHORT);
+test('decideOnFire mentions Remote Control in the log line for a bridged, busy panel', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true, status: 'busy' }, true, SHORT);
+  assert.match(decision.logMessage ?? '', /remote control/i);
+});
+
+test('decideOnFire does not mention Remote Control when the busy panel is not bridged', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
+  assert.doesNotMatch(decision.logMessage ?? '', /remote control/i);
+});
+
+test('decideOnFire treats an unreported panel status as not-idle (conservative default)', () => {
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, false);
+});
+
+test('decideOnFire drops the job silently for a BUSY terminal, regardless of auto-continue', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+});
+
+test('decideOnFire drops the job silently for a WAITING terminal, regardless of auto-continue', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'waiting' }, false, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+});
+
+test('decideOnFire leaves an IDLE terminal alone, unremembered, when auto-continue is on', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT);
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
   assert.match(decision.logMessage ?? '', /auto-continue/i);
 });
 
-test('decideOnFire offers Resume in Terminal Anyway for a terminal holder when auto-continue is off', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222 }, false, SHORT);
+test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT);
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, true);
   assert.ok(decision.notice);
@@ -62,29 +103,17 @@ test('decideOnFire offers Resume in Terminal Anyway for a terminal holder when a
   assert.match(decision.notice?.message ?? '', /terminal/i);
 });
 
-test('decideOnFire treats a busy session elsewhere in the folder the same as a panel', () => {
-  const decision = decideOnFire({ kind: 'busy-elsewhere' }, true, SHORT);
-  assert.equal(decision.resume, false);
-  assert.equal(decision.remember, true);
-  assert.ok(decision.notice);
-  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
-  assert.match(decision.notice?.message ?? '', /another active claude session/i);
-});
-
 test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
-  for (const holder of [
-    { kind: 'panel' as const, pid: 1, bridged: false },
-    { kind: 'terminal' as const, pid: 1 },
-    { kind: 'busy-elsewhere' as const },
-  ]) {
-    const decision = decideOnFire(holder, false, SHORT);
-    assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
-  }
+  const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
+  assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
 });
 
 // ---------------------------------------------------------------------------
 // manualResumeWarning: the modal shown by the resumeNow command and the
 // off-autoResume "Resume Now" notification button.
+//
+// Per the same correction: an idle panel needs no modal. Every other live
+// holder still warns - busy/waiting of either kind, or any terminal.
 // ---------------------------------------------------------------------------
 
 test('manualResumeWarning is silent when nobody holds the session', () => {
@@ -97,85 +126,62 @@ test('manualResumeWarning is silent when the listing failed', () => {
   assert.equal(manualResumeWarning('unknown', SHORT), undefined);
 });
 
-test('manualResumeWarning names a panel and offers Resume Anyway', () => {
-  const warning = manualResumeWarning({ kind: 'panel', pid: 1, bridged: false }, SHORT);
+test('manualResumeWarning is silent for an idle panel', () => {
+  assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'idle' }, SHORT), undefined);
+});
+
+test('manualResumeWarning names a panel and offers Resume Anyway when the panel is busy', () => {
+  const warning = manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'busy' }, SHORT);
   assert.ok(warning);
   assert.equal(warning?.button, 'Resume Anyway');
   assert.match(warning?.message ?? '', /claude panel/i);
   assert.match(warning?.message ?? '', /fork/i);
 });
 
-test('manualResumeWarning names a terminal, not a panel, when that is the holder', () => {
-  const warning = manualResumeWarning({ kind: 'terminal', pid: 1 }, SHORT);
+test('manualResumeWarning warns for a waiting panel too', () => {
+  assert.ok(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'waiting' }, SHORT));
+});
+
+test('manualResumeWarning warns for an IDLE terminal - unlike an idle panel, there is no auto-resync for it', () => {
+  const warning = manualResumeWarning({ kind: 'terminal', pid: 1, status: 'idle' }, SHORT);
   assert.ok(warning);
   assert.match(warning?.message ?? '', /terminal/i);
   assert.doesNotMatch(warning?.message ?? '', /panel/i);
 });
 
-// ---------------------------------------------------------------------------
-// classifyFireHolder: composes classifyHolder and busyFolderHolder (from
-// liveSessions.ts) into the single FireHolder scheduler.onFire needs, off one
-// `claude agents --json` snapshot.
-// ---------------------------------------------------------------------------
-
-const row = (over: Partial<AgentRow> & { pid: number; sessionId: string }): AgentRow => ({ kind: 'interactive', ...over });
-
-test('classifyFireHolder reports a panel directly, without checking the folder', () => {
-  const rows = [row({ pid: 111, sessionId: SESSION })];
-  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => ({
-    sessionId: SESSION,
-    entrypoint: 'claude-vscode',
-  }));
-  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false });
-});
-
-test('classifyFireHolder reports a terminal directly, without checking the folder', () => {
-  const rows = [row({ pid: 111, sessionId: SESSION })];
-  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => ({
-    sessionId: SESSION,
-    entrypoint: 'cli',
-  }));
-  assert.deepEqual(holder, { kind: 'terminal', pid: 111 });
-});
-
-test('classifyFireHolder reports none when nobody is on this session and there is no cwd to check', () => {
-  const holder = classifyFireHolder([], SESSION, undefined, 'linux', () => undefined);
-  assert.deepEqual(holder, { kind: 'none' });
-});
-
-test('classifyFireHolder falls back to busy-elsewhere when nobody is on this session but another is busy in the same folder', () => {
-  const rows = [row({ pid: 555, sessionId: OTHER, cwd: '/work/app', status: 'busy' })];
-  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => undefined);
-  assert.deepEqual(holder, { kind: 'busy-elsewhere' });
-});
-
-test('classifyFireHolder reports none when nobody is on this session and the folder is quiet', () => {
-  const rows = [row({ pid: 555, sessionId: OTHER, cwd: '/work/app', status: 'idle' })];
-  const holder = classifyFireHolder(rows, SESSION, '/work/app', 'linux', () => undefined);
-  assert.deepEqual(holder, { kind: 'none' });
+test('manualResumeWarning warns for a busy terminal', () => {
+  assert.ok(manualResumeWarning({ kind: 'terminal', pid: 1, status: 'busy' }, SHORT));
 });
 
 // ---------------------------------------------------------------------------
-// fireHolderDetector: the impure wrapper scheduler.onFire actually calls -
-// mirrors liveSessions.ts's holderDetector, but 'unknown' on a listing
-// failure and a folder-aware classification on 'none'.
+// buildResumePrompt: appends a coordination sentence when a DIFFERENT
+// session is busy or waiting in the same folder (liveSessions.ts's
+// busyFolderPeers). Replaces the original "block and notify" treatment of
+// that case per the controller's second ruling: resume anyway, and tell the
+// resumed model to coordinate, since this extension cannot message another
+// session itself.
 // ---------------------------------------------------------------------------
 
-test('fireHolderDetector delegates to classifyFireHolder over the real listing', () => {
-  const rowsJson = JSON.stringify([{ pid: 111, kind: 'interactive', sessionId: SESSION }]);
-  const detect = fireHolderDetector(
-    () => rowsJson,
-    () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }),
-  );
-  assert.deepEqual(detect(SESSION, '/work/app', 'linux'), { kind: 'panel', pid: 111, bridged: false });
+test('buildResumePrompt returns exactly the user prompt when there are no busy peers', () => {
+  assert.equal(buildResumePrompt('Continue where you left off.', []), 'Continue where you left off.');
 });
 
-test('fireHolderDetector reports unknown when the listing cannot be run', () => {
-  const detect = fireHolderDetector(
-    () => {
-      throw new Error('ENOENT');
-    },
-    () => undefined,
-  );
-  assert.equal(detect(SESSION, '/work/app', 'linux'), 'unknown');
+test('buildResumePrompt appends a sentence naming one busy peer by its name', () => {
+  const prompt = buildResumePrompt('Continue where you left off.', [{ pid: 42, name: 'refactor-auth' }]);
+  assert.match(prompt, /^Continue where you left off\./);
+  assert.match(prompt, /Another Claude session is working in this folder: refactor-auth\./);
+  assert.match(prompt, /message it with SendMessage to coordinate who does what/);
+});
+
+test('buildResumePrompt falls back to the pid when a peer has no name', () => {
+  const prompt = buildResumePrompt('Continue.', [{ pid: 42, name: undefined }]);
+  assert.match(prompt, /working in this folder: 42\./);
+});
+
+test('buildResumePrompt names every peer, not just the first', () => {
+  const prompt = buildResumePrompt('Continue.', [
+    { pid: 1, name: 'alpha' },
+    { pid: 2, name: 'beta' },
+  ]);
+  assert.match(prompt, /working in this folder: alpha, beta\./);
 });

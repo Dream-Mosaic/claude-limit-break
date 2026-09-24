@@ -6,8 +6,8 @@ import {
   hasLivePanel,
   livePanelDetector,
   classifyHolder,
-  busyFolderHolder,
-  holderDetector,
+  busyFolderPeers,
+  agentRowsDetector,
 } from '../src/liveSessions';
 
 const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
@@ -167,6 +167,16 @@ test('parseAgentRows omits cwd and status rather than reporting them as undefine
   assert.equal('status' in rows[0]!, false);
 });
 
+test('parseAgentRows carries name when the listing reports it, for the coordination prompt', () => {
+  const rows = parseAgentRows(rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION, name: 'refactor-auth' }));
+  assert.deepEqual(rows, [{ pid: 9624, kind: 'interactive', sessionId: SESSION, name: 'refactor-auth' }]);
+});
+
+test('parseAgentRows omits name rather than reporting it as undefined', () => {
+  const rows = parseAgentRows(rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION }));
+  assert.equal('name' in rows[0]!, false);
+});
+
 // ---------------------------------------------------------------------------
 // classifyHolder: the pure classifier scheduler.onFire uses to decide whether
 // somebody already holds the session before spawning a second writer.
@@ -178,44 +188,64 @@ test('classifyHolder reports none when nothing else is live on the session', () 
 });
 
 test('classifyHolder reports a panel, not bridged, when the vouched record has no bridgeSessionId', () => {
-  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' }));
   const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }));
-  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false });
+  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false, status: 'idle' });
 });
 
 test('classifyHolder reports a bridged panel when Remote Control is connected', () => {
-  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'busy' }));
   const holder = classifyHolder(rows, SESSION, 222, () => ({
     sessionId: SESSION,
     entrypoint: 'claude-vscode',
     bridgeSessionId: 'bridge-1',
   }));
-  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: true });
+  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: true, status: 'busy' });
 });
 
 test('classifyHolder reports a terminal for a cli entrypoint', () => {
-  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' }));
   const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'cli' }));
-  assert.deepEqual(holder, { kind: 'terminal', pid: 111 });
+  assert.deepEqual(holder, { kind: 'terminal', pid: 111, status: 'idle' });
 });
 
 test('classifyHolder reports a terminal for any non-panel entrypoint, not only cli', () => {
-  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'waiting' }));
   const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'sdk' }));
-  assert.deepEqual(holder, { kind: 'terminal', pid: 111 });
+  assert.deepEqual(holder, { kind: 'terminal', pid: 111, status: 'waiting' });
+});
+
+test('classifyHolder carries status undefined when the listing did not report it', () => {
+  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }));
+  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false, status: undefined });
+});
+
+test('classifyHolder reads status off the matching row, not some other one in the listing', () => {
+  // Two other live pids on this session, with different statuses - proves the
+  // status attached to the result is actually looked up per pid, not, say,
+  // always the first row's or a constant.
+  const rows = parseAgentRows(
+    rowsJson(
+      { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
+      { pid: 222, kind: 'interactive', sessionId: SESSION, status: 'busy' },
+    ),
+  );
+  const holder = classifyHolder(rows, SESSION, 333, () => ({ sessionId: SESSION, entrypoint: 'cli' }));
+  assert.equal((holder as { status?: string }).status, 'busy', 'the last (only reported) terminal pid is 222, status busy');
 });
 
 test('classifyHolder prefers a panel over a terminal when both are present, regardless of row order', () => {
   const rows = parseAgentRows(
     rowsJson(
-      { pid: 111, kind: 'interactive', sessionId: SESSION },
-      { pid: 222, kind: 'interactive', sessionId: SESSION },
+      { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
+      { pid: 222, kind: 'interactive', sessionId: SESSION, status: 'busy' },
     ),
   );
   const holder = classifyHolder(rows, SESSION, 333, (pid) =>
     pid === 111 ? { sessionId: SESSION, entrypoint: 'cli' } : { sessionId: SESSION, entrypoint: 'claude-vscode' },
   );
-  assert.deepEqual(holder, { kind: 'panel', pid: 222, bridged: false });
+  assert.deepEqual(holder, { kind: 'panel', pid: 222, bridged: false, status: 'busy' });
 });
 
 test('classifyHolder ignores a live pid whose record names a different session', () => {
@@ -232,77 +262,94 @@ test('classifyHolder ignores a live pid with no record to read', () => {
 });
 
 // ---------------------------------------------------------------------------
-// busyFolderHolder: is a DIFFERENT session busy in the same folder?
+// busyFolderPeers: every DIFFERENT session busy or waiting in the same
+// folder. Feeds holderPolicy.ts's buildResumePrompt, which tells the
+// resumed model to coordinate with each one by name.
 // ---------------------------------------------------------------------------
 
-test('busyFolderHolder finds a different session busy in the same folder', () => {
+test('busyFolderPeers finds a different session busy in the same folder', () => {
   const rows = parseAgentRows(
     rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'busy' }),
   );
-  const found = busyFolderHolder(rows, SESSION, '/work/app', 'linux');
-  assert.equal(found?.pid, 555);
+  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
+  assert.deepEqual(found.map((r) => r.pid), [555]);
 });
 
-test('busyFolderHolder ignores the same session, even if it is somehow reported busy', () => {
+test('busyFolderPeers also finds a different session that is waiting, not only busy', () => {
+  const rows = parseAgentRows(
+    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'waiting' }),
+  );
+  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
+  assert.deepEqual(found.map((r) => r.pid), [555]);
+});
+
+test('busyFolderPeers returns every match, not just one', () => {
+  const rows = parseAgentRows(
+    rowsJson(
+      { pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'busy', name: 'a' },
+      { pid: 556, kind: 'interactive', sessionId: '11111111-1111-1111-1111-111111111111', cwd: '/work/app', status: 'waiting', name: 'b' },
+    ),
+  );
+  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
+  assert.deepEqual(found.map((r) => r.pid).sort(), [555, 556]);
+});
+
+test('busyFolderPeers ignores the same session, even if it is somehow reported busy', () => {
   const rows = parseAgentRows(
     rowsJson({ pid: 555, kind: 'interactive', sessionId: SESSION, cwd: '/work/app', status: 'busy' }),
   );
-  assert.equal(busyFolderHolder(rows, SESSION, '/work/app', 'linux'), undefined);
+  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
 });
 
-test('busyFolderHolder ignores a different session that is only idle', () => {
+test('busyFolderPeers ignores a different session that is only idle', () => {
   const rows = parseAgentRows(
     rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'idle' }),
   );
-  assert.equal(busyFolderHolder(rows, SESSION, '/work/app', 'linux'), undefined);
+  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
 });
 
-test('busyFolderHolder ignores a busy different session in a different folder', () => {
+test('busyFolderPeers ignores a busy different session in a different folder', () => {
   const rows = parseAgentRows(
     rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/other', status: 'busy' }),
   );
-  assert.equal(busyFolderHolder(rows, SESSION, '/work/app', 'linux'), undefined);
+  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
 });
 
-test('busyFolderHolder skips a busy row with no cwd rather than throwing', () => {
+test('busyFolderPeers skips a busy row with no cwd rather than throwing', () => {
   // `claude agents --json` can vouch a pid is alive and busy without ever
   // reporting its cwd; that row cannot be compared for folder equality and
-  // must not crash the search for one that can be.
+  // must not crash the search for ones that can be.
   const rows = parseAgentRows(rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, status: 'busy' }));
-  assert.equal(busyFolderHolder(rows, SESSION, '/work/app', 'linux'), undefined);
+  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
 });
 
-test('busyFolderHolder normalizes drive-letter casing and slash direction (win32)', () => {
+test('busyFolderPeers normalizes drive-letter casing and slash direction (win32)', () => {
   const rows = parseAgentRows(
     rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: 'c:/work/app', status: 'busy' }),
   );
-  const found = busyFolderHolder(rows, SESSION, 'C:\\work\\app', 'win32');
-  assert.equal(found?.pid, 555);
+  const found = busyFolderPeers(rows, SESSION, 'C:\\work\\app', 'win32');
+  assert.deepEqual(found.map((r) => r.pid), [555]);
 });
 
 // ---------------------------------------------------------------------------
-// holderDetector: the impure wrapper scheduler.onFire actually calls.
+// agentRowsDetector: the one impure listing fetch scheduler.onFire and a
+// manual resume both build their holder/peer checks on.
 // ---------------------------------------------------------------------------
 
-test('holderDetector delegates to classifyHolder over the real listing', () => {
-  const detect = holderDetector(
-    () => rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }),
-    () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }),
-  );
-  assert.deepEqual(detect(SESSION, 222), { kind: 'panel', pid: 111, bridged: false });
+test('agentRowsDetector parses the real listing', () => {
+  const detect = agentRowsDetector(() => rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
+  assert.deepEqual(detect(), [{ pid: 111, kind: 'interactive', sessionId: SESSION }]);
 });
 
-test('holderDetector reports unknown, not none, when the listing cannot be run', () => {
-  // A listing failure must not be read as "nobody holds it" - that would
-  // resume as usual anyway, but for the wrong reason, and a caller that ever
-  // treats 'unknown' more cautiously than 'none' needs the two told apart.
-  const detect = holderDetector(
-    () => {
-      throw new Error('ENOENT');
-    },
-    () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }),
-  );
-  assert.equal(detect(SESSION, 222), 'unknown');
+test('agentRowsDetector reports unknown, not an empty list, when the listing cannot be run', () => {
+  // An empty list and "could not find out" must stay distinguishable: an
+  // empty list is a fact (nobody is running anything), 'unknown' is the
+  // absence of one, and a caller that logs a listing failure needs to tell
+  // them apart.
+  const detect = agentRowsDetector(() => {
+    throw new Error('ENOENT');
+  });
+  assert.equal(detect(), 'unknown');
 });
 
 test('livePanelDetector reads a record only for pids the listing vouched for', () => {

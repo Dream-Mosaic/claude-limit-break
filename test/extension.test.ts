@@ -13,6 +13,7 @@ import {
   vscodeFake,
   type FakeTab,
 } from './helpers/vscode';
+import type { AgentRow, HolderRecord } from '../src/liveSessions';
 
 installVscodeStub();
 
@@ -128,11 +129,46 @@ stubModule('./updateCheck', {
   },
 });
 
+/**
+ * What `claude agents --json` reports for the duration of one test, consumed
+ * by `agentRowsDetector`'s fake below - Task 2's onFire holder check and its
+ * busy-folder-peers coordination check, and a manual resume's live-holder
+ * check, all read this. Default: no other processes, so every existing test
+ * that never sets this (nearly all of them) sees the same "nobody else is
+ * running" world it always has - classifyHolder/busyFolderPeers on an empty
+ * list is 'none' / no peers either way.
+ */
+let fakeAgentRows: AgentRow[] | 'unknown' = [];
+
+/**
+ * What `readSessionRecord` reports for a pid, for the duration of one test -
+ * the entrypoint/bridge label half of classifyHolder's liveness/label split
+ * (see liveSessions.ts). Keyed by pid. classifyHolder only ever asks for a
+ * pid `fakeAgentRows` already vouched for as live, so an unset pid (the
+ * default) correctly reads as "no record", same as a real machine with no
+ * file for that pid.
+ */
+const sessionRecordFor = new Map<number, HolderRecord>();
+
 stubModule('./liveSessions', {
+  ...(require('../src/liveSessions') as Record<string, unknown>),
   livePanelDetector: () => (sessionId: string, ourPid: number | undefined) => {
     detectorCalls.push({ sessionId, ourPid });
     return livePanelSessions.has(sessionId);
   },
+  agentRowsDetector: () => () => fakeAgentRows,
+});
+
+stubModule('./sessionRegistry', {
+  ...(require('../src/sessionRegistry') as Record<string, unknown>),
+  readSessionRecord: (_dir: string, pid: number) => sessionRecordFor.get(pid),
+});
+
+/** Whether Claude Code's own auto-continue is on, for the duration of one test. Default true, matching the real default (see autoContinue.ts). */
+let autoContinueOn = true;
+
+stubModule('./autoContinue', {
+  autoContinueEnabled: () => autoContinueOn,
 });
 
 /**
@@ -147,6 +183,12 @@ const trustedSpellingFor = new Map<string, string>();
 const trustReads = { count: 0 };
 
 stubModule('./trust', {
+  // Spread first so the real (pure) normalizeProjectPath is available too -
+  // liveSessions.ts's busyFolderPeers imports it from this same './trust'
+  // specifier, and a fully-replaced stub would leave it undefined. Every
+  // property below is still faked exactly as before, since object spread
+  // order means these overrides win.
+  ...(require('../src/trust') as Record<string, unknown>),
   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
   readClaudeUserConfig: () => {
     trustReads.count += 1;
@@ -258,7 +300,7 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
 
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
-    resumeNow();
+    await resumeNow();
 
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
@@ -271,7 +313,7 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
     assert.deepEqual(opts.shellArgs, ['--resume', SESSION, PROMPT]);
 
     // And it is consumed exactly once.
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1, 'a consumed job must not resume twice');
     assert.ok(
       vscodeFake.info.some((m) => m.message.includes('nothing pending')),
@@ -320,7 +362,7 @@ test('a notification resumes the session it names, not whichever came ready last
     // The second is untouched, and still reachable from the command.
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 2, 'the second session must still be recoverable');
     assert.deepEqual(argsOf(1), ['--resume', SESSION_B, PROMPT]);
   } finally {
@@ -348,7 +390,7 @@ test('resumeNow takes the counting-down job first and keeps the ready one', asyn
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1);
     assert.deepEqual(
       argsOf(0),
@@ -357,11 +399,11 @@ test('resumeNow takes the counting-down job first and keeps the ready one', asyn
     );
 
     // Resuming the scheduler's job must not have discarded the ready one.
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 2, 'the ready job must survive the first resume');
     assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 2, 'both sources are empty now');
     assert.ok(vscodeFake.info.some((m) => m.message.includes('nothing pending')));
   } finally {
@@ -435,7 +477,7 @@ test('a stale offer cannot resume a session the command already resumed', async 
     // Resume it from the command palette, leaving the notification on screen.
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1, 'the command resumes it once');
     assert.deepEqual(argsOf(0), ['--resume', SESSION, PROMPT]);
 
@@ -494,7 +536,7 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
     // Now instead of vanishing with the scheduler's own pre-fire cleanup.
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
-    resumeNow();
+    await resumeNow();
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -571,7 +613,7 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
     // undone rather than left to quietly lose the job.
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
-    resumeNow();
+    await resumeNow();
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -600,13 +642,13 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
     assert.equal(vscodeFake.errors.length, 1);
 
     // If cancel() had already run, the job would be gone and this second call
     // would report "nothing pending" instead of failing the same way again.
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
@@ -815,10 +857,10 @@ test('resumeNow on one counting-down session leaves the other one counting down'
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
-    resumeNow();
+    await resumeNow();
     assert.deepEqual(argsOf(0), ['--resume', SESSION_B, PROMPT], 'the soonest session goes first');
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 2, 'the other session must still have been counting down');
     assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
   } finally {
@@ -846,11 +888,11 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
     assert.equal(vscodeFake.errors.length, 1);
 
-    resumeNow();
+    await resumeNow();
     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
@@ -1115,7 +1157,7 @@ test('a job waiting for Resume Now survives a reload', async () => {
   try {
     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
     assert.ok(resumeNow);
-    resumeNow();
+    await resumeNow();
     await flush();
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,

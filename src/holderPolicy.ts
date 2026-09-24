@@ -1,15 +1,4 @@
-import { classifyHolder, busyFolderHolder, parseAgentRows, type AgentRow, type HolderRecord, type SessionHolder } from './liveSessions';
-
-/**
- * What `scheduler.onFire` classifies before ever calling `resume()`: the
- * outcome of `classifyHolder`, extended with the one case it cannot see by
- * itself - a DIFFERENT session already busy in the same folder - and with
- * 'unknown' for a listing that could not be run at all. See liveSessions.ts
- * for classifyHolder and busyFolderHolder, the two pure reads
- * {@link classifyFireHolder} composes this from, off one `claude agents
- * --json` snapshot.
- */
-export type FireHolder = SessionHolder | { kind: 'busy-elsewhere' } | 'unknown';
+import type { AgentRow, SessionHolder } from './liveSessions';
 
 export interface OnFireDecision {
   /** Whether `resume(job)` should be called. */
@@ -24,33 +13,53 @@ export interface OnFireDecision {
   notice?: { message: string; button: string };
 }
 
-const RESUME_ANYWAY_BUTTON = 'Resume in Terminal Anyway';
+const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
 
 /**
  * Decide what `scheduler.onFire` does with a fired job, given who (if anyone)
- * already holds the session or its folder.
+ * already holds the session.
  *
  * This exists because of the 2026-09-23 field incident this task is named
  * for: a scheduled resume spawned a second `claude --resume` terminal while a
  * panel tab was still open on the same session, forking the conversation
- * (docs/research/2026-09-20-panel-fork-experiment.md, #6). Every branch here
- * that leaves a live holder alone answers that directly; `resume: true` is
- * reserved for the two cases where nothing has been found holding the
- * session - 'none', and a listing failure, which must still resume rather
- * than fail closed and silently stop every future resume on a machine where
- * `claude agents` misbehaves.
+ * (docs/research/2026-09-20-panel-fork-experiment.md, #6).
  *
- * `panel`, `terminal` with auto-continue off, and `busy-elsewhere` all get
- * the same treatment - remembered for manual resume, and a notice with the
- * one button that claims the job (`forgetReady`, exactly like the existing
- * "Resume Now" notification) and then calls `resume(job)` anyway. Only the
- * wording differs, so the field named is enough to tell the caller which.
- * `terminal` with auto-continue on is the one case that is neither
- * remembered nor spawned: Claude Code's own terminal UI is already going to
- * pick the session back up (see autoContinue.ts), so there is nothing this
- * extension needs to do or offer.
+ * The controller corrected this policy mid-implementation (see
+ * task-2-report.md): `status` ("idle" | "busy" | "waiting", carried on
+ * `holder` by classifyHolder) now decides the outcome, not just which KIND of
+ * process holds the session -
+ *   - an IDLE panel resumes as normal. This is the product's main use case:
+ *     someone leaves a panel idle at a limit and walks away. The existing #7
+ *     stale-tab handling (handleStalePanel / onStale) runs after the resume
+ *     exactly as it already does; nothing here needs to notify instead of
+ *     spawning.
+ *   - a panel or terminal that is busy or waiting means the session is
+ *     already being continued - by the person, or by Remote Control's own
+ *     auto-continue on a bridged panel - so this silently drops the job:
+ *     no spawn, no rememberReady, no notification, just a log line (naming
+ *     Remote Control when the panel is bridged).
+ *   - an idle terminal defers to autoContinueOn: Claude Code's own
+ *     auto-continue already covers it when that setting is on (see
+ *     autoContinue.ts), so this stays silent there too; only when it is OFF
+ *     does this remember the job and offer "Resume in Terminal Anyway".
+ *
+ * `resume: true` is reserved for 'none' (nobody found), a listing failure
+ * ('unknown', which must still resume rather than fail closed and silently
+ * stop every future resume on a machine where `claude agents` misbehaves),
+ * and now an idle panel.
+ *
+ * Any status other than the exact string 'idle' - including 'busy',
+ * 'waiting', or an absent/unreported status - is treated as NOT idle: Task 2
+ * exists to avoid a second writer, so an unknown status errs toward the
+ * cautious reading rather than assuming it is safe to spawn.
+ *
+ * A DIFFERENT session busy or waiting in the same folder is no longer this
+ * function's concern - a second controller ruling replaced "block and
+ * notify" with "resume anyway, and tell the resumed model to coordinate";
+ * see {@link buildResumePrompt} and `scheduler.onFire` in extension.ts, which
+ * calls it directly off the same listing, independently of this decision.
  */
-export function decideOnFire(holder: FireHolder, autoContinueOn: boolean, shortId: string): OnFireDecision {
+export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: boolean, shortId: string): OnFireDecision {
   if (holder === 'unknown') {
     return {
       resume: true,
@@ -62,7 +71,36 @@ export function decideOnFire(holder: FireHolder, autoContinueOn: boolean, shortI
   if (holder.kind === 'none') {
     return { resume: true, remember: false };
   }
-  if (holder.kind === 'terminal' && autoContinueOn) {
+  if (holder.kind === 'panel' && holder.status === 'idle') {
+    return {
+      resume: true,
+      remember: false,
+      logMessage: `Session ${shortId} is open in an idle Claude panel (pid ${holder.pid}); resuming anyway.`,
+    };
+  }
+  if (holder.kind === 'panel') {
+    const bridgeNote = holder.bridged ? ' Remote Control may have continued it.' : '';
+    return {
+      resume: false,
+      remember: false,
+      logMessage:
+        `Session ${shortId} is open in a Claude panel (pid ${holder.pid}) and is already ` +
+        `${holder.status ?? 'active'}; not starting a second writer.${bridgeNote}`,
+    };
+  }
+  // terminal, busy or waiting (or an unreported status, treated the same
+  // way): the session is already being worked, so this drops silently.
+  if (holder.status !== 'idle') {
+    return {
+      resume: false,
+      remember: false,
+      logMessage:
+        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and is already ` +
+        `${holder.status ?? 'active'}; not starting a second writer.`,
+    };
+  }
+  // terminal, idle.
+  if (autoContinueOn) {
     return {
       resume: false,
       remember: false,
@@ -71,48 +109,17 @@ export function decideOnFire(holder: FireHolder, autoContinueOn: boolean, shortI
         `Claude Code's own auto-continue will pick it back up, so nothing was started here.`,
     };
   }
-  if (holder.kind === 'panel') {
-    const bridgeNote = holder.bridged
-      ? ' Remote Control is connected to it too, and may continue it on its own.'
-      : '';
-    return {
-      resume: false,
-      remember: true,
-      logMessage: `Session ${shortId} is open in a Claude panel (pid ${holder.pid}); not starting a second writer.`,
-      notice: {
-        message:
-          `Claude Limit Buster: the limit has reset for session ${shortId}, and it is open in a Claude panel. ` +
-          `Continue it there.${bridgeNote}`,
-        button: RESUME_ANYWAY_BUTTON,
-      },
-    };
-  }
-  if (holder.kind === 'terminal') {
-    return {
-      resume: false,
-      remember: true,
-      logMessage:
-        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and auto-continue is off; ` +
-        `not starting a second writer.`,
-      notice: {
-        message:
-          `Claude Limit Buster: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
-          `Continue it there.`,
-        button: RESUME_ANYWAY_BUTTON,
-      },
-    };
-  }
-  // busy-elsewhere: nobody else is on THIS session, but a different one is
-  // actively working in the same folder - just as much a second writer.
   return {
     resume: false,
     remember: true,
-    logMessage: `Another Claude session is busy in this folder; not starting a second writer for ${shortId}.`,
+    logMessage:
+      `Session ${shortId} is open in a terminal (pid ${holder.pid}) and auto-continue is off; ` +
+      `not starting a second writer.`,
     notice: {
       message:
-        `Claude Limit Buster: the limit has reset for session ${shortId}, but this folder already has ` +
-        `another active Claude session. Continue there.`,
-      button: RESUME_ANYWAY_BUTTON,
+        `Claude Limit Buster: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
+        `Continue it there.`,
+      button: RESUME_IN_TERMINAL_BUTTON,
     },
   };
 }
@@ -122,9 +129,13 @@ export function decideOnFire(holder: FireHolder, autoContinueOn: boolean, shortI
  * off-autoResume "Resume Now" notification's own button) shows before
  * launching into a session someone already holds.
  *
- * Unlike {@link decideOnFire}, there is no folder-wide busy check here: the
- * brief scopes the manual-resume warning to "a live holder" of THIS session,
- * and a user clicking Resume Now already knows which session they mean.
+ * Per the same controller correction {@link decideOnFire} documents: an IDLE
+ * panel needs no modal - that is the ordinary "come back and continue in the
+ * panel, or resume by hand instead" case, not a live conflict. Every other
+ * live holder still warns: a busy or waiting holder of either kind, or a
+ * terminal of any status (an idle terminal still has someone who might type
+ * into it, and unlike an idle panel there is no #7 auto-resync for it).
+ *
  * 'none' and 'unknown' both return undefined - nothing to warn about, and (for
  * 'unknown') not knowing is not a reason to block a resume asked for by hand.
  */
@@ -133,6 +144,9 @@ export function manualResumeWarning(
   shortId: string,
 ): { message: string; button: string } | undefined {
   if (holder === 'unknown' || holder.kind === 'none') {
+    return undefined;
+  }
+  if (holder.kind === 'panel' && holder.status === 'idle') {
     return undefined;
   }
   const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
@@ -144,52 +158,35 @@ export function manualResumeWarning(
   };
 }
 
-/**
- * Compose `classifyHolder` and `busyFolderHolder` (liveSessions.ts) into the
- * single `FireHolder` (minus 'unknown') `decideOnFire` consumes, off one
- * `claude agents --json` snapshot - `rows` is parsed once, by the caller, and
- * reused for both reads rather than listing twice.
- *
- * The folder-wide check only ever runs when `classifyHolder` already came
- * back 'none': a live process directly on THIS session is always the more
- * specific answer, and skipping the folder scan in that case is also what
- * keeps a job with no `cwd` (see PendingJob) from needing one - it only
- * matters for the check this never reaches.
- */
-export function classifyFireHolder(
-  rows: readonly AgentRow[],
-  sessionId: string,
-  cwd: string | undefined,
-  platform: NodeJS.Platform,
-  readRecord: (pid: number) => HolderRecord | undefined,
-): SessionHolder | { kind: 'busy-elsewhere' } {
-  const holder = classifyHolder(rows, sessionId, undefined, readRecord);
-  if (holder.kind !== 'none' || !cwd) {
-    return holder;
-  }
-  return busyFolderHolder(rows, sessionId, cwd, platform) ? { kind: 'busy-elsewhere' } : holder;
-}
+/** The one field {@link buildResumePrompt} needs from a busy peer's `claude agents --json` row. */
+export type BusyPeer = Pick<AgentRow, 'pid' | 'name'>;
 
 /**
- * The impure wrapper `scheduler.onFire` actually calls: runs the listing and
- * reports `classifyFireHolder`'s result, or `'unknown'` when the listing
- * itself could not be run. Mirrors liveSessions.ts's `holderDetector` in
- * shape and in that same reasoning - not knowing must still resume, per the
- * caller, rather than fail closed and silently stop every future resume on a
- * machine where `claude agents` misbehaves - extended with `cwd` and
- * `platform` for the folder-wide check `holderDetector` has no reason to do.
+ * Append a coordination sentence to the user's resume prompt when one or
+ * more DIFFERENT Claude sessions are busy or waiting in the same folder
+ * (see liveSessions.ts's `busyFolderPeers`).
+ *
+ * A second controller ruling replaced Task 2's original "block and notify"
+ * treatment of this case: the extension cannot message another session
+ * itself (global constraint #3 - never write into a session this extension
+ * did not create), so instead it tells the RESUMED model to, by naming the
+ * peer(s) in its own opening prompt and asking it to use SendMessage before
+ * editing anything. `resume(job)` still launches the same way either way;
+ * the prompt travels as a single argv element to `claude --resume` (see
+ * resumer.ts's buildResumeArgs), never shell-quoted by hand, so nothing here
+ * needs to escape the names it inserts.
+ *
+ * Exactly the user's own prompt, unchanged, when there are no peers - this
+ * must never add stray text to the common case, which is every resume with
+ * nobody else in the folder.
  */
-export function fireHolderDetector(
-  runAgents: () => string,
-  readRecord: (pid: number) => HolderRecord | undefined,
-): (sessionId: string, cwd: string | undefined, platform: NodeJS.Platform) => FireHolder {
-  return (sessionId, cwd, platform) => {
-    let stdout: string;
-    try {
-      stdout = runAgents();
-    } catch {
-      return 'unknown';
-    }
-    return classifyFireHolder(parseAgentRows(stdout), sessionId, cwd, platform, readRecord);
-  };
+export function buildResumePrompt(userPrompt: string, busyPeers: readonly BusyPeer[]): string {
+  if (busyPeers.length === 0) {
+    return userPrompt;
+  }
+  const names = busyPeers.map((p) => p.name ?? String(p.pid)).join(', ');
+  return (
+    `${userPrompt} Another Claude session is working in this folder: ${names}. ` +
+    `Before editing anything, message it with SendMessage to coordinate who does what.`
+  );
 }
