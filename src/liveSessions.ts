@@ -20,10 +20,16 @@
  * oracle, label from the file.
  */
 
+import { normalizeProjectPath } from './trust';
+
 export interface AgentRow {
   pid: number;
   kind: string;
   sessionId: string;
+  /** Absent when the listing did not report it. Needed for the busy-folder check. */
+  cwd?: string;
+  /** "busy" | "idle" | "waiting" as `claude agents --json` prints it. Absent when not reported. */
+  status?: string;
 }
 
 /** The entrypoint a Claude Code panel writes into its own session record. */
@@ -53,11 +59,20 @@ export function parseAgentRows(stdout: string): AgentRow[] {
     if (typeof row !== 'object' || row === null) {
       continue;
     }
-    const { pid, kind, sessionId } = row as Record<string, unknown>;
+    const { pid, kind, sessionId, cwd, status } = row as Record<string, unknown>;
     if (typeof pid !== 'number' || typeof sessionId !== 'string') {
       continue;
     }
-    rows.push({ pid, kind: typeof kind === 'string' ? kind : '', sessionId });
+    const parsedRow: AgentRow = { pid, kind: typeof kind === 'string' ? kind : '', sessionId };
+    // Added only when present and a string: an explicit `undefined` key would
+    // fail the exact-shape deepEqual assertions every existing caller uses.
+    if (typeof cwd === 'string') {
+      parsedRow.cwd = cwd;
+    }
+    if (typeof status === 'string') {
+      parsedRow.status = status;
+    }
+    rows.push(parsedRow);
   }
   return rows;
 }
@@ -129,5 +144,121 @@ export function livePanelDetector(
       const record = readRecord(pid);
       return record && record.sessionId === sessionId ? record.entrypoint : undefined;
     });
+  };
+}
+
+/** The per-pid record fields the holder classifier needs. */
+export interface HolderRecord {
+  sessionId: string;
+  entrypoint: string | undefined;
+  bridgeSessionId?: string;
+}
+
+export type SessionHolder =
+  | { kind: 'none' }
+  | { kind: 'panel'; pid: number; bridged: boolean }
+  | { kind: 'terminal'; pid: number };
+
+/**
+ * Who else is holding this session open right now, if anyone.
+ *
+ * Task 2's reason for existing: resuming into a session a panel or a terminal
+ * already holds forks the transcript (see the module doc above). This is the
+ * pure decision `scheduler.onFire` asks before it spawns anything - liveness
+ * from `rows` (already `claude agents --json`, via `parseAgentRows`), the
+ * panel/terminal label from `readRecord`, exactly the same split
+ * `livePanelDetector` uses and for the same reason (issue #6: the per-pid
+ * file cannot answer "is it alive").
+ *
+ * A panel wins over a terminal when both are present: the whole list of other
+ * live pids is scanned rather than stopping at the first one, so a terminal
+ * seen before a panel in the listing's own order cannot pre-empt it. Only one
+ * terminal pid is remembered - which one does not matter, since every branch
+ * that consumes a 'terminal' result treats any terminal the same way.
+ *
+ * A live pid whose record cannot be read, or names a different session (pid
+ * reuse, or a record left behind by an earlier process, per #6), contributes
+ * nothing - it is liveness with no readable label, and cannot be called
+ * either a panel or a terminal.
+ *
+ * Which terminal pid is reported when more than one is live does not matter -
+ * every caller that consumes a 'terminal' result treats any terminal the same
+ * way - so the loop simply keeps the last one seen rather than guarding for
+ * "only the first", which would be a branch nothing distinguishes.
+ */
+export function classifyHolder(
+  rows: readonly AgentRow[],
+  sessionId: string,
+  ourPid: number | undefined,
+  readRecord: (pid: number) => HolderRecord | undefined,
+): SessionHolder {
+  let terminalPid: number | undefined;
+  for (const pid of otherLivePids(rows, sessionId, ourPid)) {
+    const record = readRecord(pid);
+    if (!record || record.sessionId !== sessionId) {
+      continue;
+    }
+    if (record.entrypoint === PANEL_ENTRYPOINT) {
+      return { kind: 'panel', pid, bridged: Boolean(record.bridgeSessionId) };
+    }
+    terminalPid = pid;
+  }
+  return terminalPid !== undefined ? { kind: 'terminal', pid: terminalPid } : { kind: 'none' };
+}
+
+/**
+ * A DIFFERENT session already busy in the same folder as `cwd`, if any.
+ *
+ * classifyHolder answers "is anyone else on THIS session"; this answers the
+ * other case Task 2 asks for: nobody else is on this session, but a second,
+ * unrelated Claude session in the same folder is actively working, which is
+ * just as much a second writer waiting to happen. Folders are compared with
+ * `normalizeProjectPath`, the same folding `trust.ts` uses for the CLI's own
+ * project keys, so a Windows drive-letter or slash-direction difference does
+ * not hide a real collision.
+ *
+ * `status: 'busy'` only - an idle or waiting session in the same folder is not
+ * actively writing anything right now, so it is not the collision this exists
+ * to catch.
+ */
+export function busyFolderHolder(
+  rows: readonly AgentRow[],
+  sessionId: string,
+  cwd: string,
+  platform: NodeJS.Platform,
+): AgentRow | undefined {
+  const target = normalizeProjectPath(cwd, platform);
+  return rows.find(
+    (r) =>
+      r.sessionId !== sessionId &&
+      r.status === 'busy' &&
+      r.cwd !== undefined &&
+      normalizeProjectPath(r.cwd, platform) === target,
+  );
+}
+
+/**
+ * Compose the listing and the per-pid reads into the question
+ * `scheduler.onFire` actually asks: who, if anyone, holds this session?
+ *
+ * Mirrors {@link livePanelDetector}'s shape, but a listing failure comes back
+ * as `'unknown'`, not `'none'` (false there): a plain "no holder" and "the
+ * listing itself could not be trusted" call for different handling upstream -
+ * `'unknown'` still resumes as usual, but is logged as a listing failure
+ * rather than silently agreeing nobody is there. Failing closed here would
+ * silently stop every resume on a machine where `claude agents` misbehaves.
+ */
+export function holderDetector(
+  runAgents: () => string,
+  readRecord: (pid: number) => HolderRecord | undefined,
+): (sessionId: string, ourPid: number | undefined) => SessionHolder | 'unknown' {
+  return (sessionId, ourPid) => {
+    let stdout: string;
+    try {
+      stdout = runAgents();
+    } catch {
+      return 'unknown';
+    }
+    return classifyHolder(parseAgentRows(stdout), sessionId, ourPid, readRecord);
   };
 }
