@@ -200,7 +200,16 @@ const RULES: Rule[] = [
 /**
  * The soonest instant, starting from `today` and walking forward up to two
  * calendar days, at which the named zone's wall clock reads `h:minute` and
- * the result is still in the future relative to `now`.
+ * the result is still in the future relative to `now`, or - within
+ * {@link RESET_GRACE_MS} - has only just passed.
+ *
+ * That last clause matters for a notice read moments after its own clock
+ * time struck: without it, "resets 1am" read at 1:03am would skip today's
+ * occurrence for being three minutes stale and roll all the way to tomorrow,
+ * arming a needless ~24h wait for a limit that had just lifted. The final
+ * accept/reject call on how stale is still acceptable belongs to
+ * detectLimit's own grace check against the real current time; this only
+ * has to stop rolling forward past a candidate that check might still want.
  *
  * Re-derives the wall clock for each date instead of adding a flat 24h, so a
  * DST change during the walk does not shift the result by an hour (issue
@@ -216,7 +225,7 @@ function nextZonedOccurrence(
 ): Date | undefined {
     for (let dayOffset = 0; dayOffset <= 2; dayOffset++) {
         const attempt = zonedWallClockToInstant(zone, today.y, today.m, today.d + dayOffset, h, minute);
-        if (attempt && attempt.getTime() > now.getTime()) {
+        if (attempt && attempt.getTime() >= now.getTime() - RESET_GRACE_MS) {
             return attempt;
         }
     }
@@ -305,7 +314,32 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
     return best;
 }
 /**
+ * How far in the past a resolved reset time may lie and still count as an
+ * event due right now, rather than history. Exists because a notice is
+ * resolved against when it was *written*, not when this pass happens to read
+ * it (see the `now` parameter below) - and a session left alone past its own
+ * reset time is a real, current situation: it needs resuming now, not
+ * skipped as stale, and it certainly does not need to wait for the same
+ * clock time tomorrow. Longer ago than this is instead treated as history:
+ * a limit that lifted last night is not a reason to act this morning.
+ *
+ * 15 minutes: comfortably past the couple of minutes a fork's own write and
+ * this watcher's poll interval could add, without being so wide that a
+ * genuinely stale notice from hours ago slips through as "current".
+ */
+export const RESET_GRACE_MS = 15 * 60_000;
+
+/**
  * Scan a chunk of text for a usage-limit notice.
+ *
+ * `now` is the instant the notice is resolved *against* - the entry's own
+ * timestamp when the caller has one, so "try again in 5 hours" means 5 hours
+ * from when Claude Code wrote that line, not from whenever this pass happens
+ * to read it. `opts.readAt` is the actual current time, used only to decide
+ * whether a reset that has already passed is still within {@link
+ * RESET_GRACE_MS} of now (a live event) or further back than that (history).
+ * It defaults to `now` itself, which is exactly right when a caller has only
+ * one instant to give - every existing caller, before `readAt` existed.
  *
  * `maxWaitHours` rejects absurd results (a stray year in the text, a misread
  * timezone) rather than arming a timer that would never sensibly fire.
@@ -314,7 +348,7 @@ export function detectLimit(
     rawText: string,
     now: Date = new Date(),
     maxWaitHours: number = 24,
-    opts: { trusted?: boolean; zone?: string } = {}
+    opts: { trusted?: boolean; zone?: string; readAt?: Date } = {}
 ): LimitDetection | undefined {
     const text = normalize(rawText);
     if (!text || text.length > MAX_NOTICE_LENGTH) {
@@ -330,6 +364,7 @@ export function detectLimit(
     if (!opts.trusted && looksLikeCode(text)) {
         return undefined;
     }
+    const readAt = opts.readAt ?? now;
     const horizon = now.getTime() + maxWaitHours * HOUR_MS;
     for (const rule of RULES) {
         const m = rule.re.exec(text);
@@ -340,12 +375,53 @@ export function detectLimit(
         if (!at || Number.isNaN(at.getTime())) {
             continue;
         }
-        if (at.getTime() <= now.getTime() || at.getTime() > horizon) {
+        if (at.getTime() > horizon) {
+            continue;
+        }
+        // History, not an event: further in the past (relative to the real
+        // current time) than the grace window allows. A reset still inside
+        // the window is returned as-is, resumeAt at or before readAt, which
+        // is exactly the "due now" signal the scheduler already treats a
+        // past deadline as (see planResume/ResumeScheduler.tick).
+        if (at.getTime() < readAt.getTime() - RESET_GRACE_MS) {
             continue;
         }
         return { resumeAt: at, rule: rule.id, text };
     }
     return undefined;
+}
+
+/**
+ * Resolve an already-absolute reset time - `quotaLimits.resetsAt`, epoch
+ * seconds Claude Code writes on a flagged rate-limit entry - against the same
+ * grace and horizon rules a parsed notice gets. There is no text to
+ * misread here (no zone, no DST, no calendar rollover), which is exactly why
+ * this field wins over the text when both are present: it is simply trusted,
+ * checked only for staleness (too far in the past) and absurdity (too far in
+ * the future).
+ *
+ * Unlike {@link detectLimit}, there is only one time reference: the value is
+ * already absolute, so nothing needs a separate "when this was written"
+ * basis to resolve a relative expression against. `now` here is the real
+ * current time, used for both the horizon and the grace check.
+ */
+export function resolveStructuredReset(
+    resetsAtSeconds: number,
+    now: Date,
+    maxWaitHours: number
+): Date | undefined {
+    if (!Number.isFinite(resetsAtSeconds)) {
+        return undefined;
+    }
+    const at = new Date(resetsAtSeconds * 1000);
+    const horizon = now.getTime() + maxWaitHours * HOUR_MS;
+    if (at.getTime() > horizon) {
+        return undefined;
+    }
+    if (at.getTime() < now.getTime() - RESET_GRACE_MS) {
+        return undefined;
+    }
+    return at;
 }
 /**
  * A genuine limit banner is a short line. Anything longer is prose or source
