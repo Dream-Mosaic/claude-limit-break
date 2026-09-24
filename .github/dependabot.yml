@@ -15,3 +15,9 @@ updates:
       dev-dependencies:
         dependency-type: development
         update-types: [minor, patch]
+    ignore:
+      # @types/node tracks the Node inside VS Code's Electron (Node 24 for
+      # VS Code 1.138), not the newest Node. Bump its major by hand together
+      # with engines.vscode.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]

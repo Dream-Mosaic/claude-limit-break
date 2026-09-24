@@ -10,7 +10,7 @@
     "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git"
   },
   "engines": {
-    "vscode": "^1.93.0"
+    "vscode": "^1.138.0"
   },
   "categories": [
     "Other"
@@ -213,10 +213,13 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "^22.9.0",
-    "@types/vscode": "^1.93.0",
+    "@types/node": "^24.13.6",
+    "@types/vscode": "^1.138.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
     "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5"
   }
 }
