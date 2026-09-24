@@ -100,7 +100,40 @@ test('releaseClaim removes an existing claim, freeing the key', () => {
 
 test('releaseClaim on a claim that does not exist is a silent no-op', () => {
   const dir = tempDir();
-  assert.doesNotThrow(() => releaseClaim(dir, 'never-claimed', fs));
+  const { log, lines } = logger();
+  releaseClaim(dir, 'never-claimed', fs, log);
+  assert.equal(lines.length, 0, 'a missing claim is expected, not a failure worth logging');
+});
+
+test('releaseClaim logs when the underlying error is something other than "missing"', () => {
+  const dir = tempDir();
+  const { log, lines } = logger();
+  const brokenFs: ClaimFs = {
+    ...fs,
+    unlinkSync: () => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    },
+  };
+  assert.doesNotThrow(() => releaseClaim(dir, 'sess-1', brokenFs, log));
+  assert.ok(lines.length > 0, 'an unexpected release failure must be logged');
+});
+
+test('claimResume retries a stale claim exactly once, then fails open rather than looping', () => {
+  // A pathological fs that reports EEXIST + a stale mtime forever, so every
+  // attempt wants to retry. This must still terminate after one retry.
+  const dir = tempDir();
+  let opens = 0;
+  const pathologicalFs: ClaimFs = {
+    ...fs,
+    openSync: () => {
+      opens += 1;
+      throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+    },
+    statSync: () => ({ mtimeMs: 0 }),
+    unlinkSync: () => {},
+  };
+  assert.equal(claimResume(dir, 'sess-1', Date.now(), pathologicalFs), 'claimed');
+  assert.equal(opens, 2, 'exactly one retry: two open attempts total, never more');
 });
 
 // --- cleanupStaleClaims ----------------------------------------------------
