@@ -260,6 +260,20 @@ test('an entry with no timestamp is resolved against now, as before', () => {
   assert.ok(make().inspectLine(line, FILE).limit);
 });
 
+test('an entry with an unparseable timestamp falls back to now, same as a missing one', () => {
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    timestamp: 'not-a-real-date',
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit, 'a garbled timestamp must not make a live limit disappear');
+  const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
+  assert.ok(hoursOut > 4.9 && hoursOut < 5.1, `expected ~5h out, got ${hoursOut.toFixed(2)}h`);
+});
+
 test('an old server error replayed into a new file does not trigger a retry', () => {
   // An overload has no reset time to go stale by, so age is the test: a 529
   // from last night is not a reason to resume a fork this morning.
