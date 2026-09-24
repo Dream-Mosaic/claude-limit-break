@@ -1,4 +1,5 @@
 # Limit Break 1.0 — finishing plan
+**Spec:** `docs/design/2026-09-01-design.md` (Goals, Non-goals, Findings) and the README's shipped "panel tab after a resume" behaviour. This plan argues from them; where a task conflicts, the spec wins.
 
 Branch `fix/1.0-field-reports`, worktree `C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster-lead`.
 Base for this plan: `3c0de89` (seven red tests, written on purpose, for Task 1).
