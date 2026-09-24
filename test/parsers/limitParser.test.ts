@@ -4,6 +4,8 @@ import {
   detectLimit,
   looksLikeCode,
   looksLikeLimitMessage,
+  looksLikePercentageUsage,
+  looksLikeQuotedNotice,
   normalize,
   formatDuration,
   MAX_NOTICE_LENGTH,
@@ -365,4 +367,67 @@ test('the clock-reset rollover still rolls to tomorrow once the grace window has
   const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
   assert.ok(hit, 'a genuinely missed reset still resolves to the next occurrence');
   assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
+});
+
+// ---------------------------------------------------------------------------
+// Task 3 (synthesis A3): text that merely LOOKS like a limit banner - a
+// percentage-usage status line, or text someone else is visibly quoting -
+// must not arm a timer on the untrusted path. A flagged entry (Claude Code's
+// own rate-limit marker) is unaffected, exactly like the existing
+// looksLikeCode guard.
+// ---------------------------------------------------------------------------
+
+test('a percentage-usage status line does not arm untrusted, but does trusted (real false positive)', () => {
+  // Captured verbatim, 2026-09-23: "You've used 91% of your session limit ·
+  // resets 12:40pm" armed a timer from an untrusted entry.
+  const text = "You've used 91% of your session limit · resets 12:40pm";
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a usage-percentage line must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a line prefixed with `>` does not arm untrusted, but does trusted', () => {
+  const text = '> Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a blockquoted line must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a grep-style "file.ext:line:" prefix does not arm untrusted, but does trusted', () => {
+  const text = 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a grep citation must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a bare "path:line-" grep prefix (no file extension) is still recognised', () => {
+  const text = 'notes:42-Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined);
+});
+
+test('a real banner with no quoting marks still arms untrusted (positive control)', () => {
+  // The new vetoes must not catch an ordinary, unquoted banner - the whole
+  // point of the guard is to stay narrow.
+  const text = "You've hit your session limit · resets 2am (America/Chicago)";
+  assert.ok(detectLimit(text, NOW, MAXW), 'a genuine unquoted banner must still arm');
+});
+
+test('looksLikePercentageUsage flags a "used N%" status line and nothing else', () => {
+  assert.ok(looksLikePercentageUsage("You've used 91% of your session limit"));
+  assert.equal(looksLikePercentageUsage('Claude AI usage limit reached. Try again in 5 hours'), false);
+});
+
+test('looksLikeQuotedNotice recognises backtick, blockquote and grep-prefix forms', () => {
+  assert.ok(looksLikeQuotedNotice('`Claude AI usage limit reached`'), 'backtick-fenced');
+  assert.ok(looksLikeQuotedNotice('> Claude AI usage limit reached'), 'blockquoted');
+  assert.ok(looksLikeQuotedNotice('src/x.ts:12:Claude AI usage limit reached'), 'grep-prefixed');
+  assert.equal(
+    looksLikeQuotedNotice('Claude AI usage limit reached. Try again in 5 hours'),
+    false,
+    'a plain banner is not quoted',
+  );
+});
+
+test('looksLikeQuotedNotice checks each physical line, since normalize() collapses newlines', () => {
+  // A multi-line grep dump where only the second line carries the citation
+  // prefix - the veto must still catch it even though it is not on line one.
+  const text = 'Found 2 matches:\ndocs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+  assert.ok(looksLikeQuotedNotice(text));
 });

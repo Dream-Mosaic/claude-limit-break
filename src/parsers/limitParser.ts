@@ -361,7 +361,15 @@ export function detectLimit(
     // transcript of working on this extension looks like - must not arm a timer.
     // Mirrors detectOverload, which has always guarded internally. Entries Claude
     // Code itself tagged as a rate-limit event are trusted past this.
-    if (!opts.trusted && looksLikeCode(text)) {
+    //
+    // Two more shapes join the same guard (synthesis A3, 2026-09-23 false
+    // positives): a percentage-usage status line ("You've used 91% of your
+    // session limit"), which is Claude Code's own readout, not a "you're
+    // blocked" notice, and text someone else is visibly quoting - a subagent
+    // recap, a `grep` hit, a reply - rather than a notice Claude Code is
+    // delivering right now. All three are skipped outright on a flagged
+    // entry, exactly like looksLikeCode.
+    if (!opts.trusted && (looksLikeCode(text) || looksLikePercentageUsage(text) || looksLikeQuotedNotice(rawText))) {
         return undefined;
     }
     const readAt = opts.readAt ?? now;
@@ -438,6 +446,43 @@ export const MAX_NOTICE_LENGTH = 400;
  */
 export function looksLikeCode(text: string): boolean {
     return /[{};]|=>|\b(?:const|let|var|function|return|assert|import|export|test|describe)\b|\/\/|\/\*|`/.test(text);
+}
+/**
+ * Whether the text is a usage-percentage readout ("You've used 91% of your
+ * session limit") rather than a "you're blocked" notice. Claude Code writes
+ * these as ordinary status lines while a session is still usable; a real
+ * false positive on 2026-09-23 armed a timer from one read on the untrusted
+ * path.
+ */
+export function looksLikePercentageUsage(text: string): boolean {
+    return /\bused\s+\d{1,3}%/i.test(text);
+}
+/**
+ * Whether the text is visibly quoted rather than a live banner: fenced in
+ * backticks, blockquoted with a leading `>`, or carrying a `grep`-style
+ * "path:line:" / "path:line-" citation. (Any backtick already trips
+ * looksLikeCode above; this checks independently too, since a plain-worded
+ * quote inside backticks has none of that function's other punctuation.)
+ * Each shape is exactly how a real banner turns up as someone else's
+ * evidence - a subagent's recap, a `grep` hit on a doc, a reply quoting an
+ * earlier message - rather than a notice Claude Code is delivering now.
+ *
+ * Checked per physical line of the *raw* text, before normalize() collapses
+ * every run of whitespace (newlines included) to a single space: a prefix
+ * only has to sit at the start of its own line, not the whole candidate.
+ * The grep pattern is deliberately narrow - a bare token, no whitespace or
+ * colon in it, immediately followed by ":<digits>:" or ":<digits>-" - so an
+ * ordinary banner ("resets 12:40pm") never matches: "12" is followed by
+ * ":40pm", not a run of digits followed by ':' or '-'.
+ */
+export function looksLikeQuotedNotice(rawText: string): boolean {
+    return rawText.split(/\r?\n/).some((line) => {
+        const t = line.trim();
+        if (!t) {
+            return false;
+        }
+        return /`/.test(t) || /^>/.test(t) || /^[^\s:]+:\d+[:-]/.test(t);
+    });
 }
 /** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
 export function formatDuration(ms: number): string {
