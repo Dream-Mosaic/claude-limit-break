@@ -1830,10 +1830,11 @@ test('scheduler.onFire does not touch the prompt when the folder is quiet', asyn
   }
 });
 
-test('scheduler.onFire does not run the folder-busy check for an idle-panel resume', async () => {
-  // The busy-folder-peers check is specifically for "nobody is on THIS
-  // session" (holder.kind === 'none'); an idle panel is a different, already
-  //-decided case and must not also be run through it.
+test('scheduler.onFire also adds the coordination sentence when resuming an IDLE panel, not only "none" (fix round 1 scope ruling)', async () => {
+  // The controller's scope ruling: the busy-folder-peers coordination
+  // applies on EVERY resume this extension launches, with no condition on
+  // which holder made it happen - 'none' and an idle panel (which also
+  // resumes, per the first correction) both qualify.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeAgentRows = [
@@ -1845,8 +1846,14 @@ test('scheduler.onFire does not run the folder-busy check for an idle-panel resu
   start(ctx);
   try {
     await oneTick();
-    assert.equal(vscodeFake.terminals.length, 1);
-    assert.equal(argsOf(0)?.[2], PROMPT, 'an idle-panel resume must not be touched by the folder-busy check');
+    assert.equal(vscodeFake.terminals.length, 1, 'an idle panel still resumes as normal');
+    const prompt = argsOf(0)?.[2];
+    assert.match(prompt ?? '', /other-session/, 'the busy peer must be named even though the holder was an idle panel');
+    assert.match(prompt ?? '', /SendMessage/);
+    assert.ok(
+      vscodeFake.info.some((m) => m.message.includes('other-session')),
+      'the person is told too, non-blockingly',
+    );
   } finally {
     clearHolders();
     teardown(ctx);

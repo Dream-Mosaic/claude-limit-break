@@ -16,6 +16,23 @@ export interface OnFireDecision {
 const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
 
 /**
+ * Whether a holder's status counts as idle for Task 2's purposes.
+ *
+ * Fix round 1, controller ruling: an unknown or MISSING status counts as
+ * idle - fail OPEN, not closed. Goal 2 is to resume unattended, and a
+ * listing failure ('unknown', a level up, in `decideOnFire`'s own `holder`
+ * parameter) already resumes rather than blocking; a single row whose status
+ * is missing or an unrecognised string must not be read more cautiously than
+ * a listing that failed outright. Only the two explicit non-idle statuses -
+ * 'busy' and 'waiting' - count as not idle. (This replaces the original,
+ * opposite reading - "anything other than the literal string 'idle' is not
+ * idle" - which the controller called out as backwards for Goal 2.)
+ */
+function isIdleStatus(status: string | undefined): boolean {
+  return status !== 'busy' && status !== 'waiting';
+}
+
+/**
  * Decide what `scheduler.onFire` does with a fired job, given who (if anyone)
  * already holds the session.
  *
@@ -48,10 +65,12 @@ const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
  * stop every future resume on a machine where `claude agents` misbehaves),
  * and now an idle panel.
  *
- * Any status other than the exact string 'idle' - including 'busy',
- * 'waiting', or an absent/unreported status - is treated as NOT idle: Task 2
- * exists to avoid a second writer, so an unknown status errs toward the
- * cautious reading rather than assuming it is safe to spawn.
+ * {@link isIdleStatus}: only the two explicit statuses 'busy' and 'waiting'
+ * count as NOT idle. An unreported or unrecognised status counts as idle -
+ * fail OPEN, per the controller's fix-round-1 ruling: Goal 2 is to resume
+ * unattended, and a listing failure already resumes rather than blocking, so
+ * a single row with no readable status must not be treated more cautiously
+ * than that.
  *
  * A DIFFERENT session busy or waiting in the same folder is no longer this
  * function's concern - a second controller ruling replaced "block and
@@ -71,7 +90,7 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: 
   if (holder.kind === 'none') {
     return { resume: true, remember: false };
   }
-  if (holder.kind === 'panel' && holder.status === 'idle') {
+  if (holder.kind === 'panel' && isIdleStatus(holder.status)) {
     return {
       resume: true,
       remember: false,
@@ -88,9 +107,10 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: 
         `${holder.status ?? 'active'}; not starting a second writer.${bridgeNote}`,
     };
   }
-  // terminal, busy or waiting (or an unreported status, treated the same
-  // way): the session is already being worked, so this drops silently.
-  if (holder.status !== 'idle') {
+  // terminal, explicitly busy or waiting: the session is already being
+  // worked, so this drops silently. An unreported status is NOT this branch
+  // any more (fix round 1) - it falls through to the idle handling below.
+  if (!isIdleStatus(holder.status)) {
     return {
       resume: false,
       remember: false,
@@ -130,11 +150,13 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: 
  * launching into a session someone already holds.
  *
  * Per the same controller correction {@link decideOnFire} documents: an IDLE
- * panel needs no modal - that is the ordinary "come back and continue in the
- * panel, or resume by hand instead" case, not a live conflict. Every other
- * live holder still warns: a busy or waiting holder of either kind, or a
- * terminal of any status (an idle terminal still has someone who might type
- * into it, and unlike an idle panel there is no #7 auto-resync for it).
+ * panel (per {@link isIdleStatus} - fail open, so this also covers an
+ * unreported status) needs no modal - that is the ordinary "come back and
+ * continue in the panel, or resume by hand instead" case, not a live
+ * conflict. Every other live holder still warns: an explicitly busy or
+ * waiting holder of either kind, or a terminal of any status (an idle
+ * terminal still has someone who might type into it, and unlike an idle
+ * panel there is no #7 auto-resync for it).
  *
  * 'none' and 'unknown' both return undefined - nothing to warn about, and (for
  * 'unknown') not knowing is not a reason to block a resume asked for by hand.
@@ -146,7 +168,7 @@ export function manualResumeWarning(
   if (holder === 'unknown' || holder.kind === 'none') {
     return undefined;
   }
-  if (holder.kind === 'panel' && holder.status === 'idle') {
+  if (holder.kind === 'panel' && isIdleStatus(holder.status)) {
     return undefined;
   }
   const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';

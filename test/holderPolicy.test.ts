@@ -66,10 +66,15 @@ test('decideOnFire does not mention Remote Control when the busy panel is not br
   assert.doesNotMatch(decision.logMessage ?? '', /remote control/i);
 });
 
-test('decideOnFire treats an unreported panel status as not-idle (conservative default)', () => {
+test('decideOnFire treats an unreported panel status as IDLE (fail open) - resumes as normal', () => {
+  // Fix round 1, controller ruling: an unknown or missing status counts as
+  // idle, not "not idle". Goal 2 is to resume unattended, and a listing
+  // failure ('unknown') already resumes rather than blocking - a single row
+  // with no readable status must not be treated more cautiously than that.
   const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT);
-  assert.equal(decision.resume, false);
+  assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
 });
 
 test('decideOnFire drops the job silently for a BUSY terminal, regardless of auto-continue', () => {
@@ -103,6 +108,29 @@ test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when au
   assert.match(decision.notice?.message ?? '', /terminal/i);
 });
 
+// ---------------------------------------------------------------------------
+// Fix round 1, item 2: an unreported TERMINAL status must be evaluated as
+// idle too (fail open) - same isIdleStatus helper as the panel case, and the
+// same two outcomes as an explicitly idle terminal, one per autoContinueOn.
+// ---------------------------------------------------------------------------
+
+test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue on leaves it alone', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, true, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+  assert.match(decision.logMessage ?? '', /auto-continue/i);
+});
+
+test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue off notifies and remembers', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, false, SHORT);
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, true);
+  assert.ok(decision.notice);
+  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+  assert.match(decision.notice?.message ?? '', /terminal/i);
+});
+
 test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
   const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
   assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
@@ -128,6 +156,10 @@ test('manualResumeWarning is silent when the listing failed', () => {
 
 test('manualResumeWarning is silent for an idle panel', () => {
   assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'idle' }, SHORT), undefined);
+});
+
+test('manualResumeWarning is silent for a panel with an unreported status too (fail open)', () => {
+  assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: undefined }, SHORT), undefined);
 });
 
 test('manualResumeWarning names a panel and offers Resume Anyway when the panel is busy', () => {

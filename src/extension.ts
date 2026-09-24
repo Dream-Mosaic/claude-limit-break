@@ -859,17 +859,22 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!decision.resume) {
         return;
       }
-      // A second, independent controller ruling: nobody is on THIS session
-      // (holder.kind === 'none'), but a DIFFERENT session may be busy or
-      // waiting in the same folder. The extension cannot message that
-      // session itself (constraint #3 - never write into a session it did
-      // not create), so instead it tells the session it is ABOUT to create:
-      // buildResumePrompt appends a sentence naming the peer(s) and asking
-      // the resumed model to coordinate with them via SendMessage before
-      // editing anything. This never blocks the resume - only the prompt
-      // passed to it changes.
+      // A second, independent controller ruling: on EVERY resume we are
+      // about to launch here - whether nobody is on this session at all, or
+      // (fix round 1, scope ruling) it is an idle panel we are resuming
+      // anyway - a DIFFERENT session may be busy or waiting in the same
+      // folder. The extension cannot message that session itself
+      // (constraint #3 - never write into a session it did not create), so
+      // instead it tells the session it is ABOUT to create: buildResumePrompt
+      // appends a sentence naming the peer(s) and asking the resumed model to
+      // coordinate with them via SendMessage before editing anything. This
+      // never blocks the resume - only the prompt passed to it changes.
+      // `decision.resume` (just checked above) is the gate: it is true for
+      // exactly 'none', an idle panel, and a listing failure - and `rows !==
+      // 'unknown'` already excludes that last one, since `holder` (and so
+      // `decision`) is only ever 'unknown' when `rows` is too.
       let resumeJob = job;
-      if (rows !== 'unknown' && holder !== 'unknown' && holder.kind === 'none' && job.cwd) {
+      if (rows !== 'unknown' && decision.resume && job.cwd) {
         const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
         if (peers.length > 0) {
           const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
