@@ -1820,7 +1820,35 @@ test('scheduler.onFire does not touch the prompt when the folder is quiet', asyn
   try {
     await oneTick();
     assert.equal(argsOf(0)?.[2], PROMPT, 'no busy peers - the prompt must be exactly the user\'s own');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('another Claude session')).length,
+      0,
+      'nothing to coordinate about - no coordination notice either',
+    );
   } finally {
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire does not run the folder-busy check for an idle-panel resume', async () => {
+  // The busy-folder-peers check is specifically for "nobody is on THIS
+  // session" (holder.kind === 'none'); an idle panel is a different, already
+  //-decided case and must not also be run through it.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeAgentRows = [
+    { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
+    { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
+  ];
+  sessionRecordFor.set(111, { sessionId: SESSION, entrypoint: 'claude-vscode' });
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.equal(argsOf(0)?.[2], PROMPT, 'an idle-panel resume must not be touched by the folder-busy check');
+  } finally {
+    clearHolders();
     teardown(ctx);
   }
 });
@@ -1882,6 +1910,55 @@ test('resumeNow shows no modal for an idle panel - it is not a live conflict', a
     await flush();
     assert.equal(vscodeFake.warningOffers.length, 0, 'an idle panel needs no modal');
     assert.equal(vscodeFake.terminals.length, 1, 'and the resume proceeds directly');
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('resumeNow also warns modally for a busy holder on a job waiting in the ready list, not just a counting-down one', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  holderRow('claude-vscode', 'busy');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    // autoResume off: firing moves the job into the ready list, not
+    // scheduler.current, so this exercises resumeNow's OTHER branch.
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: not auto-resumed');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const pending = resumeNow();
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal, 'the ready-list path must also warn modally for a busy holder');
+    modal.answer('Resume Anyway');
+    await pending;
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('the off-autoResume "Resume Now" notification button also warns modally for a busy holder', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  holderRow('claude-vscode', 'busy');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
+    offer.answer('Resume Now');
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal, 'the notification button is just as much a manual resume as the command');
+    assert.equal(vscodeFake.terminals.length, 0, 'must not resume before the modal is answered');
+    modal.answer('Resume Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1);
   } finally {
     clearHolders();
     teardown(ctx);
