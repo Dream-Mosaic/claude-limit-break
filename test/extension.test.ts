@@ -206,19 +206,36 @@ stubModule('./trust', {
  * 'claimed', so every existing test above this section - none of which cares
  * about cross-window dedupe - sees exactly the behaviour it always had:
  * nothing is ever "taken".
+ *
+ * Fix round 1: `fakeClaimResult = 'real'` switches claimResume/releaseClaim
+ * to delegate to the REAL src/claims.ts implementation against
+ * `realClaimsDir` (a throwaway temp directory a test creates), instead of
+ * returning the canned `fakeClaimResult`. This is what lets one test drive
+ * `realClaims.claimResume` directly to stand in for a SECOND window - real
+ * `openSync('wx')` collision behaviour, not a scripted answer - while this
+ * window's own onFire runs through the real extension wiring.
  */
-let fakeClaimResult: 'claimed' | 'taken' = 'claimed';
+const realClaims = require('../src/claims') as typeof import('../src/claims');
+let fakeClaimResult: 'claimed' | 'taken' | 'real' = 'claimed';
+let realClaimsDir = '';
 const claimCalls: { dir: string; key: string }[] = [];
 const releasedKeys: string[] = [];
 
 stubModule('./claims', {
-  ...(require('../src/claims') as Record<string, unknown>),
-  claimResume: (dir: string, key: string) => {
+  ...(realClaims as unknown as Record<string, unknown>),
+  claimsDir: () => (fakeClaimResult === 'real' ? realClaimsDir : realClaims.claimsDir()),
+  claimResume: (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown) => {
     claimCalls.push({ dir, key });
+    if (fakeClaimResult === 'real') {
+      return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never);
+    }
     return fakeClaimResult;
   },
-  releaseClaim: (_dir: string, key: string) => {
+  releaseClaim: (dir: string, key: string, fsArg: unknown, log?: unknown) => {
     releasedKeys.push(key);
+    if (fakeClaimResult === 'real') {
+      realClaims.releaseClaim(dir, key, fsArg as never, log as never);
+    }
   },
   cleanupStaleClaims: () => {},
 });
@@ -2299,6 +2316,67 @@ test('"Resume in Terminal Anyway" releases its own claim if the launch fails', a
   } finally {
     autoContinueOn = true;
     clearHolders();
+    teardown(ctx);
+  }
+});
+
+test('scheduler.onFire on an overload job collides across two windows sharing one claims dir, despite very different jitter', async () => {
+  // End-to-end proof of the claimKeyFor fix: this uses the REAL claims.ts
+  // implementation (fakeClaimResult = 'real'), not the scripted
+  // 'claimed'/'taken' answer every other test in this file uses, so the
+  // collision comes from actual fs.openSync('wx') behaviour against one
+  // shared temp directory - exactly like two real VS Code windows would
+  // share the real machine-wide claims directory.
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: true,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-e2e-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  claimCalls.length = 0;
+  releasedKeys.length = 0;
+
+  // Both "windows" detected the identical overload at the same instant
+  // (baseResumeAtMs) but rolled very different backoffs - window A's own
+  // resumeAtMs is 2 minutes out, window B's is 25 minutes out - landing in
+  // DIFFERENT 10-minute buckets under the pre-fix (resumeAtMs-keyed) logic.
+  const base = Date.now() - 120_000; // "detected" 2 minutes ago
+  const jobA = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: Date.now() - 1000, reason: 'overload' as const };
+  const jobB = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: base + 25 * 60_000, reason: 'overload' as const };
+  assert.notEqual(jobA.resumeAtMs, jobB.resumeAtMs, 'setup: the two windows must have rolled different jitter');
+
+  // Window B "wins the race" first - stands in for a second real VS Code
+  // window whose own onFire already ran and claimed this reset.
+  const keyB = realClaims.claimKeyFor(jobB);
+  assert.equal(
+    realClaims.claimResume(dir, keyB, Date.now(), fs),
+    'claimed',
+    'setup: window B must be the first to claim this reset',
+  );
+
+  // This window's own job (jobA) - the SAME reset, a DIFFERENT jitter roll -
+  // must compute the identical key (the fix) and therefore find it already
+  // taken, dropping rather than also launching.
+  assert.equal(
+    realClaims.claimKeyFor(jobA),
+    keyB,
+    'setup check: both windows must compute the identical key despite their different jitter',
+  );
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', jobA]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(
+      vscodeFake.terminals.length,
+      0,
+      'exactly one window may launch for this reset - window B already claimed it, so window A must not',
+    );
+  } finally {
+    fakeClaimResult = 'claimed';
     teardown(ctx);
   }
 });
