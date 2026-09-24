@@ -2163,3 +2163,54 @@ test('resumeNow on an already-fired, remembered job also bypasses but rewrites i
     teardown(ctx);
   }
 });
+
+test('a failed manual launch on the counting-down job releases the claim it just wrote', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  // futureJob()'s deadline has not arrived, so it stays the scheduler's
+  // `current` job - the counting-down branch of resumeNow - rather than
+  // firing through onFire. Its cwd is pointed at a folder that does not
+  // exist, so resume() itself fails, deterministically.
+  const missingCwdJob = { ...futureJob(), cwd: MISSING_CWD };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', missingCwdJob]]));
+  start(ctx);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
+    assert.ok(
+      releasedKeys.length > 0,
+      `a failed manual launch on the counting-down job must release its claim; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a failed manual launch on a ready (already-fired) job releases the claim it just wrote', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.ok(offers()[0], 'setup: the job must have fired and been offered for manual resume');
+    releasedKeys.length = 0;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
+    assert.ok(
+      releasedKeys.length > 0,
+      `a failed manual launch on a ready job must release its claim; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
