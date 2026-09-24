@@ -820,24 +820,30 @@ export function activate(context: vscode.ExtensionContext): void {
           // session can come ready while this notification is still on
           // screen, and the offer names a session, so it must honour it.
           //
-          // Removing it is also how this click claims it. The notification
-          // outlives the job: the same session can be resumed from the
-          // command palette first, and without the claim a later click here
-          // would launch a second `claude --resume` on it.
+          // Removing it is also how this click takes ownership of it
+          // (forgetReady) - not the Task 10 cross-window claim below, which
+          // is a separate thing. The notification outlives the job: the same
+          // session can be resumed from the command palette first, and
+          // without that ownership a later click here would launch a second
+          // `claude --resume` on it.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
               `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
             );
             return;
           }
-          // forgetReady above is how this click claims the job; if the
-          // launch never actually started, the claim must be undone or the
-          // job is gone with no way back.
+          // forgetReady above is how this click takes ownership of the job;
+          // if the launch never actually started, that ownership must be
+          // undone (rememberReady) or the job is gone with no way back.
           if (!resume(job)) {
             rememberReady(job);
             // Task 10, fix round 1: symmetric with every other failed-launch
             // path - a resume that never started must not hold the
-            // cross-window claim either.
+            // cross-window claim either. This path never bypasses a claim
+            // (it does not call claimResume itself - see the comment above
+            // the counting/ready branches of resumeNow for why a manual
+            // path would need to), so the claim being released here is
+            // always this window's own, from onFire's top-of-function check.
             releaseClaim(claimsDir(), claimKey, fs, log);
           }
         });
@@ -887,12 +893,21 @@ export function activate(context: vscode.ExtensionContext): void {
           // resumeNow command, so - same as resumeNow - it writes/refreshes
           // its own claim before launching, ignoring whatever claimResume
           // reports, so another window's own automatic attempt cannot also
-          // fire while this launch is in flight; a failed launch releases it
-          // again.
-          claimResume(claimsDir(), claimKey, Date.now(), fs, log);
+          // fire while this launch is in flight.
+          //
+          // Fix round 2: bypassing the ANSWER (above) is not the same as
+          // OWNING the claim. If claimResume just reported 'taken', another
+          // window already holds this key - unconditionally releasing on a
+          // failed launch, as round 1 did, would delete THAT window's live
+          // claim out from under it. Only release when this call actually
+          // won the claim itself ('claimed', which includes a stale
+          // takeover it just performed).
+          const buttonClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
           if (!resume(job)) {
             rememberReady(job);
-            releaseClaim(claimsDir(), claimKey, fs, log);
+            if (buttonClaim === 'claimed') {
+              releaseClaim(claimsDir(), claimKey, fs, log);
+            }
           }
         });
       }
@@ -972,16 +987,22 @@ export function activate(context: vscode.ExtensionContext): void {
       // stale by now (the user did not answer right away), and refreshing it
       // here is what stops a different window's own automatic attempt from
       // also firing while this launch is in flight.
+      //
+      // Fix round 2: bypassing the ANSWER is not the same as OWNING the
+      // claim. If claimResume reports 'taken', another window already holds
+      // this key - releasing on a failed launch must not delete that OTHER
+      // window's live claim. Only release when this call actually won the
+      // claim itself ('claimed', including a stale takeover it just did).
       const counting = scheduler.current;
       if (counting) {
         // Only this session's job: others may still be counting down, and
         // "Resume Now" moves exactly one.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          claimResume(claimsDir(), key, Date.now(), fs, log);
+          const countingClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
           if (resume(counting)) {
             scheduler.cancel(counting.sessionId);
-          } else {
+          } else if (countingClaim === 'claimed') {
             releaseClaim(claimsDir(), key, fs, log);
           }
         }
@@ -997,10 +1018,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
-        claimResume(claimsDir(), key, Date.now(), fs, log);
+        const readyClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
         if (resume(ready)) {
           forgetReady(ready.sessionId);
-        } else {
+        } else if (readyClaim === 'claimed') {
           releaseClaim(claimsDir(), key, fs, log);
         }
       }

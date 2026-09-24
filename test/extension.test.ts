@@ -214,12 +214,22 @@ stubModule('./trust', {
  * `realClaims.claimResume` directly to stand in for a SECOND window - real
  * `openSync('wx')` collision behaviour, not a scripted answer - while this
  * window's own onFire runs through the real extension wiring.
+ *
+ * Fix round 2: `claimResultQueue` lets a test give SUCCESSIVE claimResume
+ * calls different answers - needed for the "releasing a claim you don't
+ * own" fix, where a test must make onFire's OWN top-of-function claim
+ * succeed ('claimed', so the job actually reaches a manual bypass button)
+ * while a LATER call from that button returns 'taken' (simulating another
+ * window having taken it in between). Popped first, in order; falls back to
+ * `fakeClaimResult` once empty, so every test that does not set it sees
+ * exactly the single-answer behaviour it always had.
  */
 const realClaims = require('../src/claims') as typeof import('../src/claims');
 let fakeClaimResult: 'claimed' | 'taken' | 'real' = 'claimed';
 let realClaimsDir = '';
 const claimCalls: { dir: string; key: string }[] = [];
 const releasedKeys: string[] = [];
+const claimResultQueue: ('claimed' | 'taken')[] = [];
 
 stubModule('./claims', {
   ...(realClaims as unknown as Record<string, unknown>),
@@ -228,6 +238,9 @@ stubModule('./claims', {
     claimCalls.push({ dir, key });
     if (fakeClaimResult === 'real') {
       return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never);
+    }
+    if (claimResultQueue.length > 0) {
+      return claimResultQueue.shift()!;
     }
     return fakeClaimResult;
   },
@@ -2377,6 +2390,112 @@ test('scheduler.onFire on an overload job collides across two windows sharing on
     );
   } finally {
     fakeClaimResult = 'claimed';
+    teardown(ctx);
+    // Fix round 2: this test's own claims dir, unlike every other test here,
+    // is a REAL directory (fakeClaimResult = 'real') that real claim files
+    // were actually written into - it must not be left behind.
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Fix round 2: releasing a claim you don't own ---------------------------
+//
+// Every manual bypass path (the "Resume in Terminal Anyway" button and both
+// resumeNow branches) ignores claimResume's own result to decide WHETHER to
+// launch - that is the bypass, the user's explicit intent - but round 1
+// wrongly also ignored it when deciding whether to RELEASE on a failed
+// launch, unconditionally deleting whatever claim file was at that key. If
+// another window held it ('taken'), that unconditional release deleted the
+// OTHER window's live claim, defeating the whole point of Task 10. Each test
+// below uses `claimResultQueue` to make the path's OWN claimResume call
+// report 'taken' - simulating another window having taken this exact reset
+// in between - and asserts the failed launch leaves `releasedKeys` empty.
+
+test('"Resume in Terminal Anyway" does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  // First call is onFire's own top-of-function claim (must succeed, or the
+  // job never reaches decideOnFire and the notice is never shown). The
+  // SECOND call is the button's own bypass write - 'taken' here stands in
+  // for another window having taken this reset in the meantime.
+  claimResultQueue.length = 0;
+  claimResultQueue.push('claimed', 'taken');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
+    releasedKeys.length = 0;
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
+    assert.equal(
+      releasedKeys.length,
+      0,
+      `a claim this window does not own ('taken') must not be released, even after its own bypassed launch failed; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    claimResultQueue.length = 0;
+    teardown(ctx);
+  }
+});
+
+test('resumeNow (counting-down branch) does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  // The job never fired through onFire (it is still counting down), so this
+  // is resumeNow's own - and only - claimResume call for this key.
+  fakeClaimResult = 'taken';
+  releasedKeys.length = 0;
+  const missingCwdJob = { ...futureJob(), cwd: MISSING_CWD };
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', missingCwdJob]]));
+  start(ctx);
+  try {
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
+    assert.equal(
+      releasedKeys.length,
+      0,
+      `a claim this window does not own ('taken') must not be released; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+  }
+});
+
+test('resumeNow (ready-list branch) does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  // First call is onFire's own top-of-function claim when the job fires into
+  // the ready list; the SECOND is resumeNow's own bypass write.
+  claimResultQueue.length = 0;
+  claimResultQueue.push('claimed', 'taken');
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.ok(offers()[0], 'setup: the job must have fired and been offered for manual resume');
+    releasedKeys.length = 0;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
+    assert.equal(
+      releasedKeys.length,
+      0,
+      `a claim this window does not own ('taken') must not be released; saw ${JSON.stringify(releasedKeys)}`,
+    );
+  } finally {
+    claimResultQueue.length = 0;
     teardown(ctx);
   }
 });
