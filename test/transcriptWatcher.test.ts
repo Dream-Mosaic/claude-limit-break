@@ -346,6 +346,21 @@ test('a structured reset hours in the past is history, not an event', () => {
   assert.equal(make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets 1am", written), FILE).limit, undefined);
 });
 
+test('a structured reset that fails its own check does not fall back to a text-parsed one', () => {
+  // The authoritative field is decisive, not merely a first guess: rejected,
+  // it must not hand the decision to the text, even when the text alone
+  // would have resolved to a perfectly valid, currently-due limit.
+  const written = new Date(Date.now() - 20 * 3_600_000); // 20 hours ago
+  const resetsAt = written.getTime() + 3_600_000; // structured: lifted 19 hours ago, history
+  // Text, resolved against the same 20-hour-old basis, lands almost exactly
+  // now - independently valid, and different from the structured value.
+  const out = make().inspectLine(
+    quotaEntry(resetsAt, "You've hit your session limit. Try again in 20 hours", written),
+    FILE,
+  );
+  assert.equal(out.limit, undefined, 'a rejected structured reset must not defer to the text');
+});
+
 test('a structured reset time is only trusted on an entry Claude Code flagged', () => {
   // quotaLimits on an ordinary assistant turn is not a limit event - the field
   // alone must not be enough to arm anything.
