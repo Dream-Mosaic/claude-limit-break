@@ -187,3 +187,159 @@ test('the idle bound and the hard cap match what the comments in src claim', () 
   assert.equal(MAX_OFFSET_IDLE_MS, 30 * 24 * 60 * 60 * 1000, 'thirty days');
   assert.equal(MAX_OFFSET_ENTRIES, 2000, 'the hard backstop');
 });
+
+// ---------------------------------------------------------------------------
+// Old notices replayed into a new file.
+//
+// Forking a conversation writes a new transcript that starts with a copy of
+// the old one, every line keeping its original timestamp - observed on
+// 2026-09-23 in ba15a9ef, a fork whose copied lines still carry dates from
+// 2026-09-10. The watcher meets that file for the first time and reads its
+// tail, so last night's "resets 1am" arrived as if it were new. Resolved
+// against the time of reading, 1am had already passed today, so it rolled to
+// tomorrow's 1am and armed an 18-hour countdown for a limit that had lifted
+// ten hours earlier.
+// ---------------------------------------------------------------------------
+
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+
+test('a limit notice whose reset passed before it was read is ignored', () => {
+  // Written 20 hours ago with a 5-hour wait: that limit lifted 15 hours ago.
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    timestamp: hoursAgo(20),
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('a notice is resolved against when it was written, not when it was read', () => {
+  // Written an hour ago with a 5-hour wait: the reset is 4 hours from now,
+  // not 5. Resolving against the time of reading would pad it by the delay.
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    timestamp: hoursAgo(1),
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit, 'a limit still in force must be detected');
+  const resumeAt = out.limit.detection.resumeAt;
+  assert.ok(resumeAt);
+  const hoursOut = (resumeAt.getTime() - Date.now()) / 3_600_000;
+  assert.ok(hoursOut > 3.9 && hoursOut < 4.1, `expected ~4h out, got ${hoursOut.toFixed(2)}h`);
+});
+
+test('a fresh notice behaves exactly as it always has', () => {
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit);
+  const hoursOut = (out.limit.detection.resumeAt!.getTime() - Date.now()) / 3_600_000;
+  assert.ok(hoursOut > 4.9 && hoursOut < 5.1);
+});
+
+test('an entry with no timestamp is resolved against now, as before', () => {
+  // Synthetic notices have been seen without the usual bookkeeping fields;
+  // missing a timestamp must not make a live limit disappear.
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  assert.ok(make().inspectLine(line, FILE).limit);
+});
+
+test('an old server error replayed into a new file does not trigger a retry', () => {
+  // An overload has no reset time to go stale by, so age is the test: a 529
+  // from last night is not a reason to resume a fork this morning.
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    timestamp: hoursAgo(10),
+    cwd: '/projects/example',
+    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('a reset that passed minutes ago still resumes, and resumes now', () => {
+  // The other side of the staleness rule. "resets 10am" read at 10:03 is a
+  // session sitting stopped at a limit that has just lifted - it needs
+  // resuming, not ignoring, and it certainly does not need to wait until
+  // 10am tomorrow, which is what rolling the clock time forward used to do.
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    timestamp: new Date(Date.now() - (5 * 60 + 3) * 60_000).toISOString(),
+    cwd: '/projects/example',
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit, 'a limit that lifted three minutes ago must still be acted on');
+  assert.ok(out.limit.detection.resumeAt.getTime() <= Date.now(), 'and it is due now, not tomorrow');
+});
+
+// ---------------------------------------------------------------------------
+// quotaLimits.resetsAt - the reset time, as a number.
+//
+// Every rate-limit entry in this project's transcripts carries it: 20 of 20
+// in 05690955, checked 2026-09-23. The newest has resetsAt 1790197800, which
+// is 4:10pm America/Chicago, beside text reading "resets 4:10pm
+// (America/Chicago)". Reading the number sidesteps every way the text can be
+// misread - zones, DST (#10), calendar dates, and the rollover past a time
+// that has just gone by.
+// ---------------------------------------------------------------------------
+
+const quotaEntry = (resetsAtMs: number, text: string, written = new Date()) =>
+  entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    timestamp: written.toISOString(),
+    cwd: '/projects/example',
+    quotaLimits: { status: 'rejected', resetsAt: Math.floor(resetsAtMs / 1000), rateLimitType: 'five_hour' },
+    message: { content: [{ type: 'text', text }] },
+  });
+
+test('the structured reset time wins over the text', () => {
+  const resetsAt = Date.now() + 2 * 3_600_000;
+  // Text that would parse to a different time, to show which one was used.
+  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 5 hours"), FILE);
+  assert.ok(out.limit);
+  assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
+});
+
+test('the structured reset time works when the text cannot be parsed at all', () => {
+  const resetsAt = Date.now() + 3_600_000;
+  const out = make().inspectLine(quotaEntry(resetsAt, 'Something went wrong with your plan limits'), FILE);
+  assert.ok(out.limit, 'the number alone is enough');
+});
+
+test('a structured reset hours in the past is history, not an event', () => {
+  const written = new Date(Date.now() - 12 * 3_600_000);
+  const resetsAt = written.getTime() + 3_600_000; // lifted 11 hours ago
+  assert.equal(make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets 1am", written), FILE).limit, undefined);
+});
+
+test('a structured reset time is only trusted on an entry Claude Code flagged', () => {
+  // quotaLimits on an ordinary assistant turn is not a limit event - the field
+  // alone must not be enough to arm anything.
+  const line = entry({
+    type: 'assistant',
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    quotaLimits: { status: 'allowed', resetsAt: Math.floor((Date.now() + 3_600_000) / 1000) },
+    message: { content: [{ type: 'text', text: 'Here is the refactor you asked for.' }] },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
