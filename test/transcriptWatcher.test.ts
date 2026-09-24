@@ -562,6 +562,19 @@ test('a grep-style "file:line:" quote in an ordinary assistant message does not 
   assert.equal(make().inspectLine(line, FILE).limit, undefined);
 });
 
+test('plain banner wording under a top-level toolUseResult field does not arm a timer', () => {
+  // Real transcripts carry the tool's raw output under this sibling field,
+  // separate from the message.content tool_result block - Claude Code's own
+  // record of what happened, not a notice it is delivering now.
+  const line = entry({
+    type: 'user',
+    error: 'tool execution failed',
+    toolUseResult: 'Claude AI usage limit reached. Try again in 5 hours',
+    message: { content: 'ok' },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
 test('a flagged real banner still arms a timer (positive case)', () => {
   const line = entry({
     type: 'assistant',
