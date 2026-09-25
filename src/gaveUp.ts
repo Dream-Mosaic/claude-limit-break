@@ -181,7 +181,7 @@ export function gaveUpNotice(
       // The trust prompt is only blamed when the schedule-time trust check
       // already said so; otherwise the honest answer is "we don't know".
       return (
-        `Claude Limit Buster: the resume of session ${s} stalled - its transcript has not grown since launch, ` +
+        `Limit Break: the resume of session ${s} stalled - its transcript has not grown since launch, ` +
         'so it will not be retried automatically.' +
         (n.folderTrusted === false
           ? ' This folder is not trusted by the Claude CLI, which is the most likely reason: Claude is waiting at ' +
@@ -190,12 +190,12 @@ export function gaveUpNotice(
       );
     case 'launcher':
       return (
-        `Claude Limit Buster: could not resume session ${s}: the claude executable was not found. ` +
-        'Set claudeLimitBuster.claudeCommand to its full path, then use "Resume Now".'
+        `Limit Break: could not resume session ${s}: the claude executable was not found. ` +
+        'Set claudeLimitBreak.claudeCommand to its full path, then use "Resume Now".'
       );
     case 'cwd':
       return (
-        `Claude Limit Buster: the folder for session ${s} no longer exists: ${n.cwd}. ` +
+        `Limit Break: the folder for session ${s} no longer exists: ${n.cwd}. ` +
         'The resume was not started. Use "Resume Now" again once the folder is back, or check the transcript.'
       );
   }
@@ -209,7 +209,7 @@ export function gaveUpNotice(
  */
 export function budgetRefusalNotice(sessionId: string, reason: string): string {
   return (
-    `Claude Limit Buster: not resuming session ${short(sessionId)}. ${reason} ` +
-    'Choose "Resume anyway" to go ahead this once, or raise claudeLimitBuster.maxResumeTokens.'
+    `Limit Break: not resuming session ${short(sessionId)}. ${reason} ` +
+    'Choose "Resume anyway" to go ahead this once, or raise claudeLimitBreak.maxResumeTokens.'
   );
 }

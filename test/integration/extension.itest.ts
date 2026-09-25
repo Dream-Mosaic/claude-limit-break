@@ -19,10 +19,10 @@ import { execFileSync } from 'node:child_process';
  * cost milliseconds, so anything provable against the fake stays there.
  */
 
-const ID = 'dream-mosaic.claude-limit-buster';
-const NS = 'claudeLimitBuster';
+const ID = 'dream-mosaic.claude-limit-break';
+const NS = 'claudeLimitBreak';
 
-suite('claude-limit-buster activation', () => {
+suite('claude-limit-break activation', () => {
   test('the extension is present and activates', async () => {
     const ext = vscode.extensions.getExtension(ID);
     assert.ok(ext, `${ID} is not installed in the test instance`);

@@ -70,7 +70,7 @@ jobs:
       # Only this job writes. The check job above stays read-only.
       contents: write
     env:
-      VSIX: claude-limit-buster-${{ needs.check.outputs.version }}.vsix
+      VSIX: claude-limit-break-${{ needs.check.outputs.version }}.vsix
       VERSION: ${{ needs.check.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:

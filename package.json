@@ -1,14 +1,14 @@
 {
-  "name": "claude-limit-buster",
-  "displayName": "Claude Limit Buster",
-  "description": "Waits out Claude Code usage limits and resumes your session by ID.",
+  "name": "claude-limit-break",
+  "displayName": "Limit Break",
+  "description": "Watches Claude Code transcripts for usage limits and resumes your session automatically.",
   "version": "0.1.2",
   "publisher": "dream-mosaic",
   "license": "MIT",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git"
+    "url": "https://github.com/Dream-Mosaic/claude-limit-break.git"
   },
   "engines": {
     "vscode": "^1.138.0"
@@ -32,50 +32,50 @@
   "contributes": {
     "commands": [
       {
-        "command": "claudeLimitBuster.resumeNow",
-        "title": "Claude Limit Buster: Resume Now"
+        "command": "claudeLimitBreak.resumeNow",
+        "title": "Limit Break: Resume Now"
       },
       {
-        "command": "claudeLimitBuster.cancel",
-        "title": "Claude Limit Buster: Cancel Pending Resume"
+        "command": "claudeLimitBreak.cancel",
+        "title": "Limit Break: Cancel Pending Resume"
       },
       {
-        "command": "claudeLimitBuster.showLog",
-        "title": "Claude Limit Buster: Show Log"
+        "command": "claudeLimitBreak.showLog",
+        "title": "Limit Break: Show Log"
       },
       {
-        "command": "claudeLimitBuster.statusBarMenu",
-        "title": "Claude Limit Buster: Status Bar Menu"
+        "command": "claudeLimitBreak.statusBarMenu",
+        "title": "Limit Break: Status Bar Menu"
       },
       {
-        "command": "claudeLimitBuster.openClaudeToTrust",
-        "title": "Claude Limit Buster: Open Claude to Trust"
+        "command": "claudeLimitBreak.openClaudeToTrust",
+        "title": "Limit Break: Open Claude to Trust"
       }
     ],
     "menus": {
       "commandPalette": [
         {
-          "command": "claudeLimitBuster.openClaudeToTrust",
+          "command": "claudeLimitBreak.openClaudeToTrust",
           "when": "false"
         }
       ]
     },
     "configuration": {
-      "title": "Claude Limit Buster",
+      "title": "Limit Break",
       "properties": {
-        "claudeLimitBuster.enabled": {
+        "claudeLimitBreak.enabled": {
           "type": "boolean",
           "default": true,
           "scope": "window",
           "description": "Watch Claude Code transcripts for usage limits and server errors."
         },
-        "claudeLimitBuster.autoResume": {
+        "claudeLimitBreak.autoResume": {
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "description": "Resume automatically when the cooldown elapses. When off, a notification offers a Resume Now action instead, and the job stays resumable from the \"Claude Limit Buster: Resume Now\" command until you use it."
+          "description": "Resume automatically when the cooldown elapses. When off, a notification offers a Resume Now action instead, and the job stays resumable from the \"Limit Break: Resume Now\" command until you use it."
         },
-        "claudeLimitBuster.resumeMode": {
+        "claudeLimitBreak.resumeMode": {
           "type": "string",
           "enum": [
             "interactive",
@@ -89,7 +89,7 @@
           "scope": "machine",
           "markdownDescription": "`interactive` opens a new terminal running Claude at your normal autonomy level. `headless` runs it with `-p` and needs an explicit permission mode to do any tool work. Machine-scoped: a workspace cannot change how the extension launches Claude."
         },
-        "claudeLimitBuster.headlessPermissionMode": {
+        "claudeLimitBreak.headlessPermissionMode": {
           "type": "string",
           "enum": [
             "",
@@ -107,67 +107,67 @@
           "scope": "machine",
           "markdownDescription": "Permission mode passed to headless resumes. Empty means none, so tool calls are denied. Machine-scoped: a workspace must not be able to grant autonomy."
         },
-        "claudeLimitBuster.claudeCommand": {
+        "claudeLimitBreak.claudeCommand": {
           "type": "string",
           "default": "",
           "scope": "machine",
           "markdownDescription": "Path to the `claude` executable. Empty auto-detects from PATH. Machine-scoped: this names the program that gets run."
         },
-        "claudeLimitBuster.resumePrompt": {
+        "claudeLimitBreak.resumePrompt": {
           "type": "string",
           "default": "[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.",
           "scope": "machine",
           "description": "Prompt sent when resuming. Passed as a single argument, never through a shell. Machine-scoped: this is the instruction a tool-using agent acts on, so a workspace must not be able to set it."
         },
-        "claudeLimitBuster.maxResumeTokens": {
+        "claudeLimitBreak.maxResumeTokens": {
           "type": "number",
           "default": 500000,
           "scope": "window",
           "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - and falls back to a byte count only when there is none. Set to `0` to never refuse."
         },
-        "claudeLimitBuster.maxWaitHours": {
+        "claudeLimitBreak.maxWaitHours": {
           "type": "number",
           "default": 24,
           "scope": "window",
           "description": "Ignore a reset time further out than this, which is usually a misparse."
         },
-        "claudeLimitBuster.transcriptPollSeconds": {
+        "claudeLimitBreak.transcriptPollSeconds": {
           "type": "number",
           "default": 5,
           "scope": "window",
           "description": "Polling backstop interval, for when recursive file watching is unreliable."
         },
-        "claudeLimitBuster.randomDelayMinMinutes": {
+        "claudeLimitBreak.randomDelayMinMinutes": {
           "type": "number",
           "default": 5,
           "scope": "window",
           "description": "Minimum random padding added after a reset time."
         },
-        "claudeLimitBuster.randomDelayMaxMinutes": {
+        "claudeLimitBreak.randomDelayMaxMinutes": {
           "type": "number",
           "default": 30,
           "scope": "window",
           "description": "Maximum random padding added after a reset time."
         },
-        "claudeLimitBuster.notify": {
+        "claudeLimitBreak.notify": {
           "type": "boolean",
           "default": true,
           "scope": "window",
           "description": "Show a notification when a limit is detected and when a resume fires."
         },
-        "claudeLimitBuster.alertSound": {
+        "claudeLimitBreak.alertSound": {
           "type": "boolean",
           "default": true,
           "scope": "window",
           "description": "Chime when a Claude turn finishes in a folder open in this window."
         },
-        "claudeLimitBuster.alertSoundFile": {
+        "claudeLimitBreak.alertSoundFile": {
           "type": "string",
           "default": "",
           "scope": "machine",
           "markdownDescription": "Sound file to play. Empty uses the system default. Machine-scoped: the path reaches a media player."
         },
-        "claudeLimitBuster.onStale": {
+        "claudeLimitBreak.onStale": {
           "type": "string",
           "enum": [
             "notify",
@@ -178,9 +178,9 @@
             "Close and reopen the tab automatically."
           ],
           "default": "notify",
-          "markdownDescription": "What to do when a resumed session is still open in a Claude Code panel tab. That tab holds its own idea of where the conversation ends, so typing into it starts a branch that drops the resumed turn ([#6](https://github.com/Dream-Mosaic/claude-limit-buster/issues/6)). Reopening the tab clears it."
+          "markdownDescription": "What to do when a resumed session is still open in a Claude Code panel tab. That tab holds its own idea of where the conversation ends, so typing into it starts a branch that drops the resumed turn ([#6](https://github.com/Dream-Mosaic/claude-limit-break/issues/6)). Reopening the tab clears it."
         },
-        "claudeLimitBuster.statusBar": {
+        "claudeLimitBreak.statusBar": {
           "type": "string",
           "enum": [
             "always",
@@ -195,7 +195,7 @@
           "default": "always",
           "markdownDescription": "When to show the status bar item. `always` keeps a small marker visible while watching, so a window with the extension running does not look identical to one where it failed to load."
         },
-        "claudeLimitBuster.watchScope": {
+        "claudeLimitBreak.watchScope": {
           "type": "string",
           "enum": [
             "machine",
@@ -208,7 +208,7 @@
           "default": "machine",
           "markdownDescription": "Which sessions to watch. `machine` also catches a session started in a plain terminal in a project no window has open, which is the case the global watcher exists for; `workspace` is cheaper and stops two open windows both reacting to the same limit."
         },
-        "claudeLimitBuster.checkForUpdates": {
+        "claudeLimitBreak.checkForUpdates": {
           "type": "boolean",
           "default": false,
           "scope": "window",

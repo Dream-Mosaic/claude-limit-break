@@ -133,7 +133,7 @@ test('decideOnFire treats an unreported terminal status as IDLE (fail open) - au
 
 test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
   const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
-  assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
+  assert.match(decision.notice?.message ?? '', /^Limit Break:/);
 });
 
 // ---------------------------------------------------------------------------
