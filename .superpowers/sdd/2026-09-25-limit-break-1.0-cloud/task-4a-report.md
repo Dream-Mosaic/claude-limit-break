@@ -246,3 +246,204 @@ elsewhere as deliberately not applying to the overload path at all. I
 applied the two that are relevant and left the other two out, rather than
 inventing an overload-specific percentage guard or subagent veto that
 nothing in the brief's fixtures needs.
+
+---
+
+# Fix round 1
+
+Base: `49ea168` (current HEAD at dispatch of the fix round; the controller
+had committed only `.superpowers/` bookkeeping on top of `abc9ccf`).
+
+Three Important findings from review 1, addressed per the controller's
+rulings. Minors were deferred, not touched.
+
+## What changed
+
+### Finding #1 — ruling 1 broken on the flagged path (`src/transcriptWatcher.ts`)
+
+The quotaLimits branch (`~line 452`) returned before any candidate text was
+ever read, so a flagged entry shaped like
+`{isApiErrorMessage:true, error:'rate_limit', quotaLimits:{status:'allowed',
+resetsAt: now+3h}}` whose text is the transient-429 render was read as
+`limit: quota-limits`, with no overload reported — exactly the outcome
+ruling 1 (no path may arm a usage-limit timer from this message) forbids.
+
+**Ruling followed:** skip the quotaLimits branch when the entry's text
+matches the transient-429 render, reusing the parser's own predicate (not a
+duplicated regex), and do **not** add a `quotaLimits.status` gate.
+
+**Fix:** before entering the quotaLimits branch, compute
+`isTransientRateLimit = flagged && candidates.some((c) =>
+detectOverload(c.text)?.rule === 'transient-429')` — this calls
+`detectOverload` itself (already imported into this module), inheriting the
+line-anchoring fix from finding #2 automatically rather than re-implementing
+any part of the match. The quotaLimits branch is now gated on `flagged &&
+!isTransientRateLimit`, with no reference to `quotaLimits.status` at all.
+Once skipped, execution falls through to the ordinary per-candidate
+`detectLimit` loop (which resolves no time from this text, matching no
+RULES entry, regardless of `trusted`) and from there to the overload block,
+which now reports `transient-429`.
+
+### Finding #2 — new overload rules not line-anchored (`src/parsers/overloadParser.ts`)
+
+The `transient-429` and `stream-interrupted` RULES entries matched their
+vocabulary anywhere in the (fully normalized, single-line) text, so all
+three of the review's untrusted-path examples fired:
+- `"Added a rule so API Error: Your computer went to sleep mid-response. …"`
+- `"When Claude Code prints API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited we should back off."`
+- `echo "API Error: Your computer went to sleep mid-response."` (a Bash
+  `tool_use` input)
+
+**Ruling followed:** anchor the two new rules at a line start,
+`^\s*(?:[⏺●]\s*)?api error:` per physical line (multiline); leave the older
+`api-error-status` rule unanchored (deferred).
+
+**Fix:** added `OverloadRule.lineAnchored` and `matchesApiErrorLine(rawText,
+innerRe)`, which splits `rawText` on `/\r?\n/` and only accepts a line whose
+own trimmed content starts with `LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api
+error:/i`, then tests the rule's existing vocabulary regex against that
+one line's normalized text. This checks the **raw** text rather than the
+fully normalized `text` `detectOverload` already computes, because
+`normalize()` collapses every real newline into a single space before the
+ordinary RULES loop ever runs — the same reason `looksLikeQuotedNotice`
+(`limitParser.ts`) already works line-by-line on raw text rather than on
+the normalized whole string. `detectOverload`'s RULES loop now branches on
+`rule.lineAnchored` to call `matchesApiErrorLine(rawText, rule.re)` instead
+of `rule.re.exec(text)` for these two rules only. The vocabulary regexes
+(`TRANSIENT_429_RE`, `STREAM_INTERRUPTED_RE`) themselves are unchanged —
+they still carry their own `api error:` requirement internally, which is
+harmless once the line-start gate has already confirmed the line begins
+with it.
+
+### Finding #3 — subagent-file veto missing on the overload path (`src/transcriptWatcher.ts`)
+
+The overload loop's `!flagged`-gated veto covered `tool_result` text and
+quoted notices, but not `isSubagentFile(file)`, so an unflagged assistant
+note in a `subagents/…jsonl` file containing one of the new overload
+renders still scheduled a retry. My original report's rationale ("a
+subagent file still reports … overload") cited a test whose entry is
+flagged, so it never exercised this gap.
+
+**Ruling followed:** add `isSubagentFile(file)` to the same `!flagged`
+veto; flagged entries stay exempt.
+
+**Fix:** the overload loop's veto condition is now `!flagged &&
+(candidate.toolResult || looksLikeQuotedNotice(candidate.text) ||
+isSubagentFile(file))`. This applies uniformly to every overload rule
+(old and new) when the entry is unflagged and the file is a subagent
+file, matching the plain wording of the ruling; the one existing test
+that exercises overload detection in a subagents/ file uses a flagged
+entry and is unaffected. Updated the surrounding doc comments (both at
+the top of the `if (flagged || …)` block and at the veto site itself),
+which previously stated the overload path ran over subagent files
+"exactly as before" — no longer accurate for the untrusted path.
+
+## Covering tests
+
+New/updated test files: `test/parsers/overloadParser.test.ts`,
+`test/transcriptWatcher.test.ts`.
+
+**overloadParser.test.ts** (finding #2): three verbatim negative cases from
+the review, plus positive controls (verbatim renders still fire at string
+start, after a real newline, and behind the message glyph).
+
+**transcriptWatcher.test.ts** (findings #1 and #3): the exact fixture from
+finding #1 (flagged transient-429 entry with `quotaLimits.status: 'allowed'`
+and a plausible future `resetsAt`) now yields overload + no limit; a
+positive control confirms an ordinary flagged `quotaLimits` limit entry
+still arms via the structured field. For finding #3: an unflagged
+subagent-file note with the sleep render now yields no overload; a
+positive control confirms a flagged banner in a subagents/ file still
+fires.
+
+## TDD evidence (RED then GREEN)
+
+All new/changed-behavior tests were written first and run to confirm they
+failed for the expected reason before any implementation change.
+
+`node --test out/test/parsers/overloadParser.test.js` before the fix
+(finding #2's three negative tests):
+```
+not ok 15 - mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)
+    + { rule: 'stream-interrupted', ... }
+    - undefined
+not ok 16 - mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)
+    + { rule: 'transient-429', ... }
+    - undefined
+not ok 17 - a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)
+    + { rule: 'stream-interrupted', ... }
+    - undefined
+# tests 20
+# pass 17
+# fail 3
+```
+
+`node --test out/test/transcriptWatcher.test.js` before the fix (findings
+#1 and #3):
+```
+not ok 56 - a flagged transient-429 entry WITH quotaLimits still routes to overload, not a limit timer (fix round 1, finding #1)
+    error: 'must not be read as a usage limit via quotaLimits'
+    + { detection: { resumeAt: ..., rule: 'quota-limits', ... }, ... }
+    - undefined
+not ok 58 - an unflagged assistant note in a subagents/ file does not schedule an overload retry (fix round 1, finding #3)
+    + { detection: { rule: 'stream-interrupted', ... }, ... }
+    - undefined
+# tests 59
+# pass 57
+# fail 2
+```
+
+After implementing all three fixes, every test above turned GREEN (see full
+suite result below): `node --test out/test/parsers/overloadParser.test.js`
+→ 20/20 pass; `node --test out/test/transcriptWatcher.test.js` → 59/59 pass.
+
+## Mutation table (fix round 1)
+
+Run: `python3 .superpowers/sdd/2026-09-25-limit-break-1.0-cloud/mutate.py <spec>`
+
+| Guard | Mutation | Result | Named red test |
+|---|---|---|---|
+| `matchesApiErrorLine`'s line-start requirement (`overloadParser.ts`) | dropped the `LINE_HEAD_RE.test(line) &&` conjunct | CAUGHT | `a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)`, `mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)`, `mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)` |
+| `isTransientRateLimit` quotaLimits skip (`transcriptWatcher.ts`) | forced to `false` | CAUGHT | `a flagged transient-429 entry WITH quotaLimits still routes to overload, not a limit timer (fix round 1, finding #1)` |
+| overload-path subagent-file veto (`transcriptWatcher.ts`) | dropped `|| isSubagentFile(file)` | CAUGHT | `an unflagged assistant note in a subagents/ file does not schedule an overload retry (fix round 1, finding #3)` |
+
+Final run:
+```
+$ python3 .superpowers/sdd/2026-09-25-limit-break-1.0-cloud/mutate.py <spec>
+CAUGHT  matchesApiErrorLine: line-start anchor requirement removed
+CAUGHT  transient-429 quotaLimits skip disabled
+CAUGHT  overload path: subagent-file veto removed
+mutate_exit=0
+```
+
+## Full test results (fix round 1)
+
+Unit suite: `npm test > /tmp/t4a-fix1.log 2>&1; echo "exit=$?"`
+```
+exit=0
+# tests 524
+# pass 524
+# fail 0
+```
+
+Integration suite: `xvfb-run -a npm run test:integration > /tmp/it4a-fix1.log 2>&1; echo "exit=$?"`
+```
+exit=0
+  9 passing (1s)
+```
+
+## Commit
+
+`29c97b7` fix(overloadParser,transcriptWatcher): Task 4a fix round 1 - three review findings
+
+## Concerns
+
+None outstanding. The overload-path subagent-file veto (finding #3) now
+applies to every overload rule for an unflagged entry in a subagents/ file,
+not only the two new textual rules — this matches the ruling's plain
+wording ("add `isSubagentFile(file)` to the `!flagged` veto for overload
+text") and there is no existing test that exercised an unflagged overload
+render (old-style, e.g. a bare 529) in a subagents/ file, so this is a
+genuine (deliberate) behavior change beyond the two new rules, not merely a
+gap-fill. Flagged entries remain fully exempt, matching every other veto in
+this module.

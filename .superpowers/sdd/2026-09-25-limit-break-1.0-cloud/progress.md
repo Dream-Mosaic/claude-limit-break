@@ -120,3 +120,4 @@ Task 9a: complete (commits 82dddfb..48fbb64, review clean)
   - Task 4a: minor (deferred): the in-flight regex's narrowness is unpinned (no terminal case containing "attempt").
   - Task 4a: minor (deferred, pre-existing): the old api-error-status rule fires on mid-sentence "API Error: 529" prose.
   - ⚠️ open: whether Claude Code writes these renders into JSONL with the literal "API Error:" head, and whether a transient-429 entry carries quotaLimits — evidence covers the TUI render and CHANGELOG only. For NEXT.md.
+- Task 4a: fix round 1/5 (3 claimed addressed, awaiting re-review; commits abc9ccf..29c97b7); 524/524 unit, 9/9 integration; 3/3 mutations caught. Implementer note: the subagent veto now covers the OLD overload rules too for unflagged subagent entries (intended by the ruling's wording). Scoped re-review dispatched (sonnet).

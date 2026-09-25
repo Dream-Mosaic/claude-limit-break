@@ -1,0 +1,395 @@
+## Commits
+29c97b7 fix(overloadParser,transcriptWatcher): Task 4a fix round 1 - three review findings
+ src/parsers/overloadParser.ts       | 46 +++++++++++++++++++++++++
+ src/transcriptWatcher.ts            | 33 +++++++++++++++---
+ test/parsers/overloadParser.test.ts | 66 +++++++++++++++++++++++++++++++++++
+ test/transcriptWatcher.test.ts      | 68 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 208 insertions(+), 5 deletions(-)
+## Diff
+diff --git a/src/parsers/overloadParser.ts b/src/parsers/overloadParser.ts
+index ce7c843..5dfbcef 100644
+--- a/src/parsers/overloadParser.ts
++++ b/src/parsers/overloadParser.ts
+@@ -17,20 +17,24 @@ import { normalize, looksLikeLimitMessage, looksLikeCode, MAX_NOTICE_LENGTH } fr
+ export interface OverloadDetection {
+     rule: string;
+     status?: number;
+     text: string;
+ }
+ 
+ interface OverloadRule {
+     id: string;
+     re: RegExp;
+     statusGroup?: number;
++    // Require `re` to match on a physical line of the RAW text whose own
++    // visible content genuinely begins with "API Error:" - not merely
++    // contains it somewhere. See matchesApiErrorLine below.
++    lineAnchored?: boolean;
+ }
+ 
+ /**
+  * A line must read like an error report before any pattern is applied, so
+  * prose that merely contains the word "overloaded" is left alone.
+  */
+ const ERROR_MARKERS = [
+     /\berror\b/i,
+     /\bfailed\b/i,
+     /\bunavailable\b/i,
+@@ -80,20 +84,54 @@ const TRANSIENT_429_RE = /\bapi error:\s*server is temporarily limiting requests
+  * variant is anchored on the literal "API Error:" head, as the brief
+  * requires, so prose that merely mentions sleep or a dropped connection never
+  * matches - the alternation only starts matching after that head is seen.
+  * The seven variants themselves are exactly the ones the prior-art evidence
+  * names (1-autoretry-detection.md:80-81, 2-autoretry-resume.md:296-297); no
+  * additional phrasing has been invented beyond what that evidence shows.
+  */
+ const STREAM_INTERRUPTED_RE =
+     /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
+ 
++/**
++ * The head every genuine "API Error:" banner line starts with - optionally
++ * behind the single message glyph Claude Code's own renders show ("⏺ API
++ * Error: ..." / "● API Error: ..."), with nothing but leading whitespace in
++ * front of it.
++ */
++const LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api error:/i;
++
++/**
++ * Whether `innerRe` matches a physical line of `rawText` whose own visible
++ * content genuinely BEGINS with "API Error:" - not one where the phrase
++ * merely turns up mid-sentence in a longer line of prose, or inside a quoted
++ * shell argument (Task 4a fix round 1, review finding #2: model notes like
++ * "Added a rule so API Error: Your computer went to sleep mid-response. …"
++ * and a Bash tool_use argument `echo "API Error: ..."` both fired the
++ * transient-429/stream-interrupted rules on the untrusted path before this).
++ *
++ * Checked per physical line of the RAW text, before normalize() collapses
++ * every real newline into a single space and destroys the position a
++ * line-start anchor would need to see - the same reason looksLikeQuotedNotice
++ * (limitParser.ts) is checked this way rather than against the normalized
++ * whole-text string. `innerRe` (which still carries its own "api error:"
++ * requirement) is then tested against that one line's own normalized text, so
++ * it keeps matching through normalize()'s usual quote/dash/whitespace
++ * cleanup.
++ *
++ * Only used for the two rules the brief calls "NEW" (transient-429,
++ * stream-interrupted); the older api-error-status rule is left unanchored,
++ * unchanged, per the controller's ruling (deferred, not this round).
++ */
++function matchesApiErrorLine(rawText: string, innerRe: RegExp): boolean {
++    return rawText.split(/\r?\n/).some((line) => LINE_HEAD_RE.test(line) && innerRe.test(normalize(line)));
++}
++
+ export function looksLikeOverloadMessage(text: string): boolean {
+     const t = normalize(text);
+     // The transient-429 render names "rate limit" vocabulary in its own text
+     // while explicitly disclaiming being a usage limit - it must be claimed as
+     // an overload before the carve-out below hands anything "rate limit"-shaped
+     // to the limit parser, or it is dropped by both (see TRANSIENT_429_RE).
+     if (TRANSIENT_429_RE.test(t)) {
+         return true;
+     }
+     // A 429 is a rate limit, not an overload: it belongs to the limit parser,
+@@ -129,25 +167,27 @@ const RULES: OverloadRule[] = [
+     },
+     {
+         // "Request timed out", "API Error: Request timeout"
+         id: 'timeout',
+         re: /\b(?:request timed out|request timeout|read timed out|stream timed out)\b/i,
+     },
+     {
+         // "Server is temporarily limiting requests (not your usage limit)"
+         id: 'transient-429',
+         re: TRANSIENT_429_RE,
++        lineAnchored: true,
+     },
+     {
+         // "Your computer went to sleep mid-response", dropped connection, stalled stream.
+         id: 'stream-interrupted',
+         re: STREAM_INTERRUPTED_RE,
++        lineAnchored: true,
+     },
+ ];
+ 
+ /**
+  * Whether an "API Error:" line is really a quotation of one.
+  *
+  * The general code guard cannot be used on these, because the error Claude Code
+  * prints embeds the API's JSON body — `API Error (529 {"type":"error",...})` —
+  * and braces alone would throw the real thing away. Only the markers that no
+  * error message ever carries are grounds for rejection here.
+@@ -185,19 +225,25 @@ export function detectOverload(rawText: string): OverloadDetection | undefined {
+     // Source code and conversation *about* these errors — which is exactly what a
+     // transcript of working on this extension looks like — must not arm a retry.
+     // An explicit "API Error:" prefix is trusted further, since the CLI's own
+     // wording of it carries a JSON body that the general guard cannot tell from
+     // code.
+     const isBanner = /\bapi error\b/i.test(text);
+     if (isBanner ? quotesSourceCode(text) : looksLikeCode(text)) {
+         return undefined;
+     }
+     for (const rule of RULES) {
++        if (rule.lineAnchored) {
++            if (!matchesApiErrorLine(rawText, rule.re)) {
++                continue;
++            }
++            return { rule: rule.id, status: sniffStatus(text), text };
++        }
+         const m = rule.re.exec(text);
+         if (!m) {
+             continue;
+         }
+         const status = rule.statusGroup ? Number(m[rule.statusGroup] ?? '') : sniffStatus(text);
+         return { rule: rule.id, status, text };
+     }
+     return undefined;
+ }
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index 2cdc32b..e60ef29 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -433,30 +433,44 @@ export class TranscriptWatcher {
+         // suppress exactly the detection this extension exists for.
+         // A subagent's own transcript need not arm a limit itself (synthesis A3):
+         // a subagent that hits the limit stops its parent, whose own transcript
+         // records the same event too, so an unflagged note in the subagent's own
+         // file that merely quotes what happened - a checkpoint recap, a summary -
+         // must not re-arm. But `flagged` comes first, ahead of the subagent-file
+         // check, same as it already does ahead of the user-type check above: a
+         // subagent that genuinely hits the limit still writes Claude Code's own
+         // rate-limit marker into its own file, and that must still arm (fix round
+         // 1 - the first version of this guard dropped a real limit hit whenever it
+-        // landed in a subagents/ file, flagged or not). Nothing else here is
+-        // affected - turn-end and overload detection below still run over
+-        // subagent files exactly as before.
++        // landed in a subagents/ file, flagged or not). Turn-end detection below
++        // is unaffected by this gate either way. Overload detection below now has
++        // its own separate subagent-file veto too (Task 4a fix round 1), applied
++        // per candidate rather than gating entry to the loop, so it stays exempt
++        // for flagged entries the same way this gate does.
+         if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
+             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
+             // on the flagged entry itself - immune to every way the text can be
+             // misread (zone, DST, calendar rollover) - so it wins over the text
+             // outright when present. Only trusted on a flagged entry: the field
+             // turning up on an ordinary turn is not itself a limit event.
+-            if (flagged) {
++            // The transient-429 render disclaims being a usage limit in its own
++            // text (ruling 1), but Claude Code writes quotaLimits on every
++            // rate_limit entry regardless of which kind of rate limit it is
++            // (fix round 1, review finding #1) - so this field alone is not
++            // enough to tell a genuine limit reset apart from a transient-429
++            // entry that merely happens to carry it. Checked by asking the
++            // overload parser itself (not a duplicated regex) whether any of
++            // the entry's own candidate text is that exact render; if so, the
++            // quotaLimits branch is skipped outright; regardless of its
++            // status, so the entry falls through to the ordinary text/overload
++            // path below and is routed to overload instead.
++            const isTransientRateLimit = flagged && candidates.some((c) => detectOverload(c.text)?.rule === 'transient-429');
++            if (flagged && !isTransientRateLimit) {
+                 const quotaLimits = entry.quotaLimits;
+                 const resetsAt =
+                     quotaLimits && typeof quotaLimits === 'object'
+                         ? (quotaLimits as Record<string, unknown>).resetsAt
+                         : undefined;
+                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
+                     const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
+                     // Decisive either way: this is the authoritative field, so a
+                     // value that fails the grace/horizon check is not a cue to
+                     // fall back to the text - it is history (or absurd), and the
+@@ -503,21 +517,30 @@ export class TranscriptWatcher {
+                     continue;
+                 }
+                 // Task 4a: routing the transient-429 and stream-interruption renders
+                 // through the overload path (see overloadParser.ts) reopens exactly
+                 // the false-positive class Task 3 closed for limits - a tool's raw
+                 // output, or someone else's quotation, is evidence Claude Code fed
+                 // back to the model or a person is discussing, not a notice it is
+                 // delivering now. Mirrors the same two guards the limit loop above
+                 // already has; flagged entries stay exempt, same as every other veto
+                 // in this module.
+-                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text))) {
++                //
++                // Fix round 1 (review finding #3): an unflagged note in a
++                // subagents/ file must not arm an overload retry either, for the
++                // same reason the limit loop above skips subagent files - a
++                // subagent that genuinely hits an overload still writes Claude
++                // Code's own API-error marker (flagged), which stays exempt from
++                // this veto exactly like every other one. Applies to every
++                // overload rule here, old and new, since it is checked before
++                // detectOverload is ever called on the candidate.
++                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
+                     continue;
+                 }
+                 const overload = detectOverload(candidate.text);
+                 if (overload) {
+                     return { overload: { detection: overload, cwd, file } };
+                 }
+             }
+         }
+         return { inputNeeded };
+     }
+diff --git a/test/parsers/overloadParser.test.ts b/test/parsers/overloadParser.test.ts
+index e2f2dfc..3a79976 100644
+--- a/test/parsers/overloadParser.test.ts
++++ b/test/parsers/overloadParser.test.ts
+@@ -144,10 +144,76 @@ test('the exact stream-interruption wording without the API Error: head does not
+   // ("error") so it clears looksLikeOverloadMessage and actually reaches the
+   // RULES loop, and it carries the literal "your computer went to sleep
+   // mid-response" phrase the rule matches - but with a bare "error:", not
+   // "API Error:", ahead of it. Only the head anchor stands between this and
+   // a false positive.
+   assert.equal(
+     detectOverload('There was an error: your computer went to sleep mid-response, apparently.'),
+     undefined,
+   );
+ });
++
++// ---------------------------------------------------------------------------
++// Task 4a fix round 1 (review finding #2, Important): the transient-429 and
++// stream-interrupted RULES entries were not anchored to a line start, so
++// "API Error:" turning up mid-sentence in model prose - or inside a quoted
++// shell argument - fired both on the untrusted path. Anchored per physical
++// line of the raw text (matchesApiErrorLine), the same technique
++// looksLikeQuotedNotice (limitParser.ts) already uses, since normalize()
++// collapses every real newline before the RULES loop ever sees the text.
++// Sources: prior-art/1-autoretry-detection.md:82 ("NOT just 'API Error
++// nearby'... these are ordinary-English causes... that get quoted in prose
++// easily"); 5-history-issues.md:55, :174.
++// ---------------------------------------------------------------------------
++
++test('mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)', () => {
++  // Verbatim from the review finding.
++  assert.equal(
++    detectOverload(
++      'Added a rule so API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
++    ),
++    undefined,
++  );
++});
++
++test('mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)', () => {
++  assert.equal(
++    detectOverload(
++      'When Claude Code prints API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited we should back off.',
++    ),
++    undefined,
++  );
++});
++
++test('a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)', () => {
++  // The Bash tool_use `command` shape: a shell string literal, not a banner
++  // line of its own.
++  assert.equal(detectOverload('echo "API Error: Your computer went to sleep mid-response."'), undefined);
++});
++
++test('the verbatim renders still fire at the true start of the string', () => {
++  assert.equal(detectOverload(TRANSIENT_429)?.rule, 'transient-429');
++  assert.equal(
++    detectOverload('API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
++      ?.rule,
++    'stream-interrupted',
++  );
++});
++
++test('the verbatim renders still fire on their own physical line, after a real newline', () => {
++  const preceded = (banner: string) => `Some preceding context.\n${banner}`;
++  assert.equal(detectOverload(preceded(TRANSIENT_429))?.rule, 'transient-429');
++  assert.equal(
++    detectOverload(
++      preceded('API Error: Your computer went to sleep mid-response. The response above may be incomplete.'),
++    )?.rule,
++    'stream-interrupted',
++  );
++});
++
++test('the message glyph Claude Code prefixes a banner line with is still accepted', () => {
++  assert.equal(
++    detectOverload('⏺ API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
++      ?.rule,
++    'stream-interrupted',
++  );
++});
+diff --git a/test/transcriptWatcher.test.ts b/test/transcriptWatcher.test.ts
+index 0f32292..106a91c 100644
+--- a/test/transcriptWatcher.test.ts
++++ b/test/transcriptWatcher.test.ts
+@@ -720,10 +720,78 @@ test('a flagged entry is exempt from the new tool-result/quoted vetoes on the ov
+           content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+         },
+       ],
+     },
+   });
+   assert.ok(
+     make().inspectLine(line, FILE).overload,
+     'a flagged entry must still fire even from text inside a tool_result block',
+   );
+ });
++
++// ---------------------------------------------------------------------------
++// Task 4a fix round 1 (review finding #1, Important): the quotaLimits branch
++// (line ~452) used to return before any text was ever read, so a flagged
++// transient-429 entry that also happens to carry quotaLimits (the research
++// doc says every rate_limit entry does) was read as a usage limit instead of
++// routed to overload - exactly the outcome ruling 1 forbids. Ruling: skip
++// the quotaLimits branch outright when the entry's own text is a
++// transient-429 render, regardless of quotaLimits.status.
++// ---------------------------------------------------------------------------
++
++test('a flagged transient-429 entry WITH quotaLimits still routes to overload, not a limit timer (fix round 1, finding #1)', () => {
++  // Verbatim shape from the review finding: quotaLimits.status "allowed" (not
++  // "rejected"), a plausible future resetsAt - the kind of entry Claude Code
++  // could plausibly write for a transient-429.
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    error: 'rate_limit',
++    quotaLimits: { status: 'allowed', resetsAt: Math.floor((Date.now() + 3 * 3_600_000) / 1000) },
++    message: {
++      content: [
++        { type: 'text', text: 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited' },
++      ],
++    },
++  });
++  const out = make().inspectLine(line, FILE);
++  assert.equal(out.limit, undefined, 'must not be read as a usage limit via quotaLimits');
++  assert.ok(out.overload, 'must be routed to overload');
++  assert.equal(out.overload.detection.rule, 'transient-429');
++});
++
++test('an ordinary flagged quotaLimits entry is unaffected by the transient-429 skip', () => {
++  // Positive control: a genuine limit banner with quotaLimits must keep
++  // winning via the structured field, exactly as before.
++  const resetsAt = Date.now() + 2 * 3_600_000;
++  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 5 hours"), FILE);
++  assert.ok(out.limit, 'a genuine quotaLimits entry must still arm via the structured field');
++  assert.equal(out.overload, undefined);
++});
++
++// ---------------------------------------------------------------------------
++// Task 4a fix round 1 (review finding #3, Important): the subagent-file veto
++// was applied to the limit path (line ~446) but never extended to the
++// overload path's new untrusted-text vetoes, so an unflagged assistant note
++// in a subagents/ file quoting one of the new overload renders still armed a
++// retry. Flagged entries stay exempt, same as every other veto here.
++// ---------------------------------------------------------------------------
++
++test('an unflagged assistant note in a subagents/ file does not schedule an overload retry (fix round 1, finding #3)', () => {
++  const line = entry({
++    type: 'assistant',
++    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
++  });
++  assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
++});
++
++test('a flagged banner in a subagents/ file still schedules an overload retry (positive control)', () => {
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
++  });
++  assert.ok(
++    make().inspectLine(line, SUBAGENT_FILE).overload,
++    'a flagged entry must not be dropped by the subagent-file veto',
++  );
++});
