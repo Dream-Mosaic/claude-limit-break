@@ -1,0 +1,653 @@
+# Review package: 6c97fd0..HEAD
+
+## Commits
+dd4f6d6 test: quotaLimits.resetsAt is decisive, not a first guess deferring to text
+fd0b23d test: cover an unparseable (not just missing) entry timestamp
+2767d66 test: boundary coverage for RESET_GRACE_MS, MAX_OVERLOAD_AGE_MS and the quotaLimits fallback
+9b42a35 fix: resolve limits against entry time, add grace window and quotaLimits.resetsAt
+
+## Files changed
+ src/parsers/limitParser.ts       |  84 ++++++++++++++++++++++++++++--
+ src/transcriptWatcher.ts         |  59 +++++++++++++++++++--
+ test/parsers/limitParser.test.ts |  87 +++++++++++++++++++++++++++++++
+ test/transcriptWatcher.test.ts   | 110 ++++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 331 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/src/parsers/limitParser.ts b/src/parsers/limitParser.ts
+index 756b7d5..31bece5 100644
+--- a/src/parsers/limitParser.ts
++++ b/src/parsers/limitParser.ts
+@@ -193,37 +193,46 @@ const RULES: Rule[] = [
+         id: 'clock-retry',
+         re: /(?:try again|available(?: again)?|come back|check back|back)\s+(?:at|after)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*(?:(utc|gmt|z)\s*([+-]\d{1,2})?(?::?(\d{2}))?|([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+))?\s*\)?/i,
+         resolve(m, now, zone) {
+             return resolveClockTime(m, now, zone);
+         },
+     },
+ ];
+ /**
+  * The soonest instant, starting from `today` and walking forward up to two
+  * calendar days, at which the named zone's wall clock reads `h:minute` and
+- * the result is still in the future relative to `now`.
++ * the result is still in the future relative to `now`, or - within
++ * {@link RESET_GRACE_MS} - has only just passed.
++ *
++ * That last clause matters for a notice read moments after its own clock
++ * time struck: without it, "resets 1am" read at 1:03am would skip today's
++ * occurrence for being three minutes stale and roll all the way to tomorrow,
++ * arming a needless ~24h wait for a limit that had just lifted. The final
++ * accept/reject call on how stale is still acceptable belongs to
++ * detectLimit's own grace check against the real current time; this only
++ * has to stop rolling forward past a candidate that check might still want.
+  *
+  * Re-derives the wall clock for each date instead of adding a flat 24h, so a
+  * DST change during the walk does not shift the result by an hour (issue
+  * #10: a flat-milliseconds roll-forward resumed the fall-back case an hour
+  * early, into a session that was still limited).
+  */
+ function nextZonedOccurrence(
+     zone: string,
+     today: { y: number; m: number; d: number },
+     h: number,
+     minute: number,
+     now: Date
+ ): Date | undefined {
+     for (let dayOffset = 0; dayOffset <= 2; dayOffset++) {
+         const attempt = zonedWallClockToInstant(zone, today.y, today.m, today.d + dayOffset, h, minute);
+-        if (attempt && attempt.getTime() > now.getTime()) {
++        if (attempt && attempt.getTime() >= now.getTime() - RESET_GRACE_MS) {
+             return attempt;
+         }
+     }
+     return undefined;
+ }
+ /**
+  * Turn a bare clock reading into the next future instant.
+  *
+  * Without a meridiem a 1-12 reading is ambiguous ("resets 3" could be 3am or
+  * 3pm), so both readings are considered and the soonest future one wins - a
+@@ -297,63 +306,130 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date |
+             if (!candidate) {
+                 continue;
+             }
+         }
+         if (!best || candidate.getTime() < best.getTime()) {
+             best = candidate;
+         }
+     }
+     return best;
+ }
++/**
++ * How far in the past a resolved reset time may lie and still count as an
++ * event due right now, rather than history. Exists because a notice is
++ * resolved against when it was *written*, not when this pass happens to read
++ * it (see the `now` parameter below) - and a session left alone past its own
++ * reset time is a real, current situation: it needs resuming now, not
++ * skipped as stale, and it certainly does not need to wait for the same
++ * clock time tomorrow. Longer ago than this is instead treated as history:
++ * a limit that lifted last night is not a reason to act this morning.
++ *
++ * 15 minutes: comfortably past the couple of minutes a fork's own write and
++ * this watcher's poll interval could add, without being so wide that a
++ * genuinely stale notice from hours ago slips through as "current".
++ */
++export const RESET_GRACE_MS = 15 * 60_000;
++
+ /**
+  * Scan a chunk of text for a usage-limit notice.
+  *
++ * `now` is the instant the notice is resolved *against* - the entry's own
++ * timestamp when the caller has one, so "try again in 5 hours" means 5 hours
++ * from when Claude Code wrote that line, not from whenever this pass happens
++ * to read it. `opts.readAt` is the actual current time, used only to decide
++ * whether a reset that has already passed is still within {@link
++ * RESET_GRACE_MS} of now (a live event) or further back than that (history).
++ * It defaults to `now` itself, which is exactly right when a caller has only
++ * one instant to give - every existing caller, before `readAt` existed.
++ *
+  * `maxWaitHours` rejects absurd results (a stray year in the text, a misread
+  * timezone) rather than arming a timer that would never sensibly fire.
+  */
+ export function detectLimit(
+     rawText: string,
+     now: Date = new Date(),
+     maxWaitHours: number = 24,
+-    opts: { trusted?: boolean; zone?: string } = {}
++    opts: { trusted?: boolean; zone?: string; readAt?: Date } = {}
+ ): LimitDetection | undefined {
+     const text = normalize(rawText);
+     if (!text || text.length > MAX_NOTICE_LENGTH) {
+         return undefined;
+     }
+     if (!looksLikeLimitMessage(text)) {
+         return undefined;
+     }
+     // Source code and conversation *about* limits - which is exactly what a
+     // transcript of working on this extension looks like - must not arm a timer.
+     // Mirrors detectOverload, which has always guarded internally. Entries Claude
+     // Code itself tagged as a rate-limit event are trusted past this.
+     if (!opts.trusted && looksLikeCode(text)) {
+         return undefined;
+     }
++    const readAt = opts.readAt ?? now;
+     const horizon = now.getTime() + maxWaitHours * HOUR_MS;
+     for (const rule of RULES) {
+         const m = rule.re.exec(text);
+         if (!m) {
+             continue;
+         }
+         const at = rule.resolve(m, now, opts.zone);
+         if (!at || Number.isNaN(at.getTime())) {
+             continue;
+         }
+-        if (at.getTime() <= now.getTime() || at.getTime() > horizon) {
++        if (at.getTime() > horizon) {
++            continue;
++        }
++        // History, not an event: further in the past (relative to the real
++        // current time) than the grace window allows. A reset still inside
++        // the window is returned as-is, resumeAt at or before readAt, which
++        // is exactly the "due now" signal the scheduler already treats a
++        // past deadline as (see planResume/ResumeScheduler.tick).
++        if (at.getTime() < readAt.getTime() - RESET_GRACE_MS) {
+             continue;
+         }
+         return { resumeAt: at, rule: rule.id, text };
+     }
+     return undefined;
+ }
++
++/**
++ * Resolve an already-absolute reset time - `quotaLimits.resetsAt`, epoch
++ * seconds Claude Code writes on a flagged rate-limit entry - against the same
++ * grace and horizon rules a parsed notice gets. There is no text to
++ * misread here (no zone, no DST, no calendar rollover), which is exactly why
++ * this field wins over the text when both are present: it is simply trusted,
++ * checked only for staleness (too far in the past) and absurdity (too far in
++ * the future).
++ *
++ * Unlike {@link detectLimit}, there is only one time reference: the value is
++ * already absolute, so nothing needs a separate "when this was written"
++ * basis to resolve a relative expression against. `now` here is the real
++ * current time, used for both the horizon and the grace check.
++ */
++export function resolveStructuredReset(
++    resetsAtSeconds: number,
++    now: Date,
++    maxWaitHours: number
++): Date | undefined {
++    if (!Number.isFinite(resetsAtSeconds)) {
++        return undefined;
++    }
++    const at = new Date(resetsAtSeconds * 1000);
++    const horizon = now.getTime() + maxWaitHours * HOUR_MS;
++    if (at.getTime() > horizon) {
++        return undefined;
++    }
++    if (at.getTime() < now.getTime() - RESET_GRACE_MS) {
++        return undefined;
++    }
++    return at;
++}
+ /**
+  * A genuine limit banner is a short line. Anything longer is prose or source
+  * code that merely talks about limits.
+  */
+ export const MAX_NOTICE_LENGTH = 400;
+ /**
+  * Cheap guard against text that quotes a banner inside source code rather than
+  * being one. A real notice is a plain sentence with none of this punctuation.
+  *
+  * Shared with the overload parser, which needs the same protection: a
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index 65c3c9f..c7fbc94 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -1,18 +1,18 @@
+ import * as fs from 'fs';
+ import * as fsp from 'fs/promises';
+ import * as os from 'os';
+ import * as path from 'path';
+ import * as vscode from 'vscode';
+ 
+ import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
+-import { detectLimit, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
++import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
+ import type { Logger } from './log';
+ import { detectOverload, OverloadDetection } from './parsers/overloadParser';
+ 
+ /** Never read more than this from one file in a single pass. */
+ const MAX_READ_BYTES = 2_000_000;
+ 
+ export function transcriptRoot(): string {
+     return path.join(os.homedir(), '.claude', 'projects');
+ }
+ 
+@@ -95,20 +95,31 @@ export const MAX_OFFSET_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+ /**
+  * Hard ceiling on tracked files, independent of age: a backstop for a clock
+  * that cannot advance (e.g. every file touched more often than
+  * {@link MAX_OFFSET_IDLE_MS}), not the primary mechanism. This machine
+  * reached 184 files after 46 days of continuous use (~4/day); 2000 is
+  * roughly a year of that rate, far past what the idle bound alone is
+  * expected to need.
+  */
+ export const MAX_OFFSET_ENTRIES = 2000;
+ 
++/**
++ * How stale a server-error entry's own timestamp may be before it is treated
++ * as history rather than a live overload. A usage limit carries a reset time
++ * to test staleness against; an overload has none, so age since the entry
++ * was written is the only signal a replayed transcript - a fork, or a
++ * session resumed after a long gap - gives for "this already happened and
++ * does not need retrying now". An entry with no timestamp of its own is
++ * treated as fresh, as it always has been.
++ */
++export const MAX_OVERLOAD_AGE_MS = 10 * 60_000;
++
+ /**
+  * Decide which offset entries survive a prune pass.
+  *
+  * Pure and Map-free: `existing` is whatever the caller's own directory
+  * listing turned up, `now` is the caller's own clock, so this is testable
+  * without a filesystem or a real timer. Existence is checked before age - a
+  * just-deleted file is dropped immediately regardless of how recently it was
+  * active - and the count cap is a last-resort pass, applied only if the
+  * first two were not enough.
+  */
+@@ -389,51 +400,91 @@ export class TranscriptWatcher {
+             }
+             : undefined;
+         const candidates: string[] = [];
+         collectStrings(entry, candidates, 0);
+         // Claude Code tags a genuine limit entry as an API error. When those markers
+         // are present the entry is definitely a rate-limit event, so its text is
+         // trusted outright; otherwise the text has to clear a stricter bar.
+         const flagged = isRateLimitEntry(entry);
+         const apiError = isApiErrorEntry(entry);
+         const maxWait = this.getMaxWaitHours();
++        // The real current time: staleness and the grace window are always
++        // decided against this, never against the entry's own timestamp.
+         const now = new Date();
++        // What a relative notice ("in 5 hours", "resets 1am") is resolved
++        // against: the entry's own timestamp when it has a parseable one, so
++        // a forked transcript's copied lines are read as of when they were
++        // originally written. A fork replays every line with its original
++        // timestamp intact - that is how last night's "resets 1am" re-armed
++        // an 18-hour timer when this watcher met the file fresh and resolved
++        // it against the time of reading instead. Missing or unparseable
++        // falls back to now, exactly as it behaved before entries carried a
++        // timestamp into this calculation at all.
++        const rawTimestamp = typeof entry.timestamp === 'string' ? new Date(entry.timestamp) : undefined;
++        const writtenAt = rawTimestamp && !Number.isNaN(rawTimestamp.getTime()) ? rawTimestamp : undefined;
++        const basis = writtenAt ?? now;
+ 
+         // The user pasting a limit notice into the chat - or asking about one - must
+         // never arm a resume timer. This is the same rule the overload scan below has
+         // always had; it was never applied to limits, and 4 of 6 ordinary user
+         // questions armed a timer as a result.
+         //
+         // `flagged` has to come first: Claude Code writes its own API-error notices as
+         // synthetic entries that can carry type "user", so a bare type check would
+         // suppress exactly the detection this extension exists for.
+         if (flagged || apiError || entry.type !== 'user') {
++            // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
++            // on the flagged entry itself - immune to every way the text can be
++            // misread (zone, DST, calendar rollover) - so it wins over the text
++            // outright when present. Only trusted on a flagged entry: the field
++            // turning up on an ordinary turn is not itself a limit event.
++            if (flagged) {
++                const quotaLimits = entry.quotaLimits;
++                const resetsAt =
++                    quotaLimits && typeof quotaLimits === 'object'
++                        ? (quotaLimits as Record<string, unknown>).resetsAt
++                        : undefined;
++                if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
++                    const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
++                    // Decisive either way: this is the authoritative field, so a
++                    // value that fails the grace/horizon check is not a cue to
++                    // fall back to the text - it is history (or absurd), and the
++                    // text does not get a second opinion on that.
++                    return resumeAt
++                        ? { limit: { detection: { resumeAt, rule: 'quota-limits', text: 'quotaLimits.resetsAt' }, cwd, file } }
++                        : { inputNeeded };
++                }
++            }
+             for (const candidate of candidates) {
+                 // Only short strings are considered: a real banner is one line, whereas a
+                 // long string is a file the session happened to read. Without this, a
+                 // transcript containing source code about rate limits arms a timer.
+                 if (candidate.length > MAX_NOTICE_LENGTH) {
+                     continue;
+                 }
+                 // Trusted entries skip the source-code guard inside detectLimit, which is
+                 // where that guard now lives.
+-                const detection = detectLimit(candidate, now, maxWait, { trusted: flagged });
++                const detection = detectLimit(candidate, basis, maxWait, { trusted: flagged, readAt: now });
+                 if (detection) {
+                     return { limit: { detection, cwd, file } };
+                 }
+             }
+         }
+         // No limit here. A transient server error is worth reporting instead, but
+         // only from an entry Claude Code itself marked as an API failure or from a
+         // non-user entry: the user pasting an error into the chat - or asking about
+-        // one - must never kick off an automatic retry.
+-        if (apiError || entry.type !== 'user') {
++        // one - must never kick off an automatic retry. An overload carries no reset
++        // time of its own, so a replayed one is judged on age alone: written longer
++        // ago than MAX_OVERLOAD_AGE_MS, it is history rather than something to retry
++        // now.
++        const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
++        if (!overloadTooOld && (apiError || entry.type !== 'user')) {
+             for (const candidate of candidates) {
+                 if (candidate.length > MAX_NOTICE_LENGTH) {
+                     continue;
+                 }
+                 const overload = detectOverload(candidate);
+                 if (overload) {
+                     return { overload: { detection: overload, cwd, file } };
+                 }
+             }
+         }
+diff --git a/test/parsers/limitParser.test.ts b/test/parsers/limitParser.test.ts
+index 772e42c..6d13632 100644
+--- a/test/parsers/limitParser.test.ts
++++ b/test/parsers/limitParser.test.ts
+@@ -1,19 +1,21 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import {
+   detectLimit,
+   looksLikeCode,
+   looksLikeLimitMessage,
+   normalize,
+   formatDuration,
+   MAX_NOTICE_LENGTH,
++  RESET_GRACE_MS,
++  resolveStructuredReset,
+ } from '../../src/parsers/limitParser';
+ 
+ const NOW = new Date('2026-08-03T12:00:00Z');
+ const MAXW = 24;
+ const epochAt = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
+ 
+ test('detects every documented limit format', () => {
+   const positives: [string, string][] = [
+     [`Claude AI usage limit reached|${epochAt('2026-08-03T17:00:00Z')}`, 'epoch'],
+     ['You have hit your session limit, resets at 2026-08-03T18:00:00Z', 'iso'],
+@@ -272,10 +274,95 @@ test('detectLimit: MAX_NOTICE_LENGTH boundary (400 accepted, 401 rejected)', ()
+   assert.equal(detectLimit(at401, NOW, MAXW), undefined, '401 chars must be rejected');
+ });
+ 
+ test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
+   // MAXW is 24, so "24 hours" resolves to exactly now + maxWaitHours*HOUR_MS -
+   // precisely the wait horizon, not past it. `>` accepts a tie; `>=` would not.
+   const hit = detectLimit('Usage limit reached. Try again in 24 hours', NOW, MAXW);
+   assert.ok(hit, 'a resume landing exactly on the wait horizon must still be accepted');
+   assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
+ });
++
++// ---------------------------------------------------------------------------
++// RESET_GRACE_MS: a resolved reset in the past is still due now within the
++// window, and history just beyond it. `readAt` - the real current time - is
++// deliberately distinct from `now` - the basis a relative notice is resolved
++// against - to pin that the grace check is decided against the former, not
++// the latter (transcriptWatcher passes the entry's own timestamp as `now`
++// and the actual wall clock as `readAt`).
++// ---------------------------------------------------------------------------
++
++test('detectLimit: RESET_GRACE_MS boundary, decided against readAt rather than the resolving basis', () => {
++  const readAt = new Date('2026-08-03T12:00:00Z');
++  // 25 minutes before readAt, so "in 10 minutes" resolves to 15 minutes
++  // (RESET_GRACE_MS) before readAt - exactly the edge of the window.
++  const basis = new Date(readAt.getTime() - RESET_GRACE_MS - 10 * 60_000);
++  const text = 'Claude AI usage limit reached. Try again in 10 minutes';
++
++  const atEdge = detectLimit(text, basis, MAXW, { readAt });
++  assert.ok(atEdge, 'exactly RESET_GRACE_MS old (by readAt) is "at most" the grace, not history');
++  assert.equal(atEdge.resumeAt.getTime(), readAt.getTime() - RESET_GRACE_MS);
++
++  const pastEdge = detectLimit(text, basis, MAXW, { readAt: new Date(readAt.getTime() + 1) });
++  assert.equal(pastEdge, undefined, 'one millisecond further back (by readAt) must tip it into history');
++});
++
++test('detectLimit: omitting readAt keeps every existing caller unaffected (readAt defaults to now)', () => {
++  // Every caller before readAt existed passed a single time reference for
++  // both roles; the default must reproduce that.
++  const past = 'Claude AI usage limit reached. Try again in 10 minutes';
++  assert.ok(detectLimit(past, new Date(NOW.getTime() - 20 * 60_000), MAXW), 'still within grace of its own basis');
++});
++
++// ---------------------------------------------------------------------------
++// resolveStructuredReset: quotaLimits.resetsAt, an already-absolute instant.
++// Same grace and horizon rules as detectLimit, but only one time reference -
++// there is no separate "written at" basis for an absolute value to resolve
++// against.
++// ---------------------------------------------------------------------------
++
++test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
++  const now = new Date('2026-08-03T12:00:00Z');
++  const atEdge = Math.floor((now.getTime() - RESET_GRACE_MS) / 1000);
++  assert.ok(resolveStructuredReset(atEdge, now, MAXW), 'exactly RESET_GRACE_MS old is still due now');
++  assert.equal(
++    resolveStructuredReset(atEdge - 1, now, MAXW),
++    undefined,
++    'a further second back is history',
++  );
++});
++
++test('resolveStructuredReset: wait-horizon boundary accepts an exact tie, rejects beyond it', () => {
++  const now = new Date('2026-08-03T12:00:00Z');
++  const atHorizon = Math.floor((now.getTime() + MAXW * 3_600_000) / 1000);
++  assert.ok(resolveStructuredReset(atHorizon, now, MAXW), 'exactly at the horizon must still be accepted');
++  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW), undefined, 'an hour beyond the horizon is rejected');
++});
++
++test('resolveStructuredReset: a non-finite value is rejected outright', () => {
++  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW), undefined);
++});
++
++// ---------------------------------------------------------------------------
++// The clock-reset rollover, made grace-aware so a notice read moments after
++// its own clock time struck is not skipped forward a full day.
++// ---------------------------------------------------------------------------
++
++test('the clock-reset rollover accepts a today occurrence still inside the grace window', () => {
++  // 1:05am America/Chicago (CST, UTC-6): five minutes after the target clock
++  // time, inside RESET_GRACE_MS. Without the grace-aware rollover this would
++  // be judged "already past" and rolled a full day forward, to tomorrow's
++  // 1am - a ~24h miss for a limit that lifted five minutes ago.
++  const now = new Date('2026-01-15T07:05:00Z');
++  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
++  assert.ok(hit, "today's occurrence, five minutes gone, must still be picked");
++  assert.equal(hit.resumeAt.toISOString(), '2026-01-15T07:00:00.000Z', "today's 1am CST, not tomorrow's");
++});
++
++test('the clock-reset rollover still rolls to tomorrow once the grace window has passed', () => {
++  // Same notice, twenty minutes past 1am CST - past RESET_GRACE_MS, so
++  // today's occurrence is history and the next real occurrence is tomorrow.
++  const now = new Date('2026-01-15T07:20:00Z');
++  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
++  assert.ok(hit, 'a genuinely missed reset still resolves to the next occurrence');
++  assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
++});
+diff --git a/test/transcriptWatcher.test.ts b/test/transcriptWatcher.test.ts
+index 47c6f03..e3da093 100644
+--- a/test/transcriptWatcher.test.ts
++++ b/test/transcriptWatcher.test.ts
+@@ -1,20 +1,21 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import * as os from 'node:os';
+ import * as path from 'node:path';
+ import { installVscodeStub } from './helpers/vscode';
+ 
+ installVscodeStub();
+ 
+-const { TranscriptWatcher, isInScope, pruneOffsets, MAX_OFFSET_IDLE_MS, MAX_OFFSET_ENTRIES } =
++const { TranscriptWatcher, isInScope, pruneOffsets, MAX_OFFSET_IDLE_MS, MAX_OFFSET_ENTRIES, MAX_OVERLOAD_AGE_MS } =
+   require('../src/transcriptWatcher') as typeof import('../src/transcriptWatcher');
++const { RESET_GRACE_MS } = require('../src/parsers/limitParser') as typeof import('../src/parsers/limitParser');
+ 
+ const FILE = '/home/u/.claude/projects/c--projects-example/0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl';
+ const silent = { info() {}, warn() {}, error() {} };
+ const make = () => new TranscriptWatcher(() => 24, () => 5, silent);
+ 
+ const entry = (o: Record<string, unknown>) => JSON.stringify(o);
+ 
+ test('a flagged rate-limit entry arms a timer', () => {
+   const line = entry({
+     type: 'user',
+@@ -252,20 +253,34 @@ test('an entry with no timestamp is resolved against now, as before', () => {
+   // missing a timestamp must not make a live limit disappear.
+   const line = entry({
+     type: 'user',
+     isApiErrorMessage: true,
+     cwd: '/projects/example',
+     message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+   });
+   assert.ok(make().inspectLine(line, FILE).limit);
+ });
+ 
++test('an entry with an unparseable timestamp falls back to now, same as a missing one', () => {
++  const line = entry({
++    type: 'user',
++    isApiErrorMessage: true,
++    timestamp: 'not-a-real-date',
++    cwd: '/projects/example',
++    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
++  });
++  const out = make().inspectLine(line, FILE);
++  assert.ok(out.limit, 'a garbled timestamp must not make a live limit disappear');
++  const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
++  assert.ok(hoursOut > 4.9 && hoursOut < 5.1, `expected ~5h out, got ${hoursOut.toFixed(2)}h`);
++});
++
+ test('an old server error replayed into a new file does not trigger a retry', () => {
+   // An overload has no reset time to go stale by, so age is the test: a 529
+   // from last night is not a reason to resume a fork this morning.
+   const line = entry({
+     type: 'assistant',
+     isApiErrorMessage: true,
+     timestamp: hoursAgo(10),
+     cwd: '/projects/example',
+     message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+   });
+@@ -324,22 +339,115 @@ test('the structured reset time works when the text cannot be parsed at all', ()
+   const out = make().inspectLine(quotaEntry(resetsAt, 'Something went wrong with your plan limits'), FILE);
+   assert.ok(out.limit, 'the number alone is enough');
+ });
+ 
+ test('a structured reset hours in the past is history, not an event', () => {
+   const written = new Date(Date.now() - 12 * 3_600_000);
+   const resetsAt = written.getTime() + 3_600_000; // lifted 11 hours ago
+   assert.equal(make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets 1am", written), FILE).limit, undefined);
+ });
+ 
++test('a structured reset that fails its own check does not fall back to a text-parsed one', () => {
++  // The authoritative field is decisive, not merely a first guess: rejected,
++  // it must not hand the decision to the text, even when the text alone
++  // would have resolved to a perfectly valid, currently-due limit.
++  const written = new Date(Date.now() - 20 * 3_600_000); // 20 hours ago
++  const resetsAt = written.getTime() + 3_600_000; // structured: lifted 19 hours ago, history
++  // Text, resolved against the same 20-hour-old basis, lands almost exactly
++  // now - independently valid, and different from the structured value.
++  const out = make().inspectLine(
++    quotaEntry(resetsAt, "You've hit your session limit. Try again in 20 hours", written),
++    FILE,
++  );
++  assert.equal(out.limit, undefined, 'a rejected structured reset must not defer to the text');
++});
++
+ test('a structured reset time is only trusted on an entry Claude Code flagged', () => {
+   // quotaLimits on an ordinary assistant turn is not a limit event - the field
+   // alone must not be enough to arm anything.
+   const line = entry({
+     type: 'assistant',
+     timestamp: new Date().toISOString(),
+     cwd: '/projects/example',
+     quotaLimits: { status: 'allowed', resetsAt: Math.floor((Date.now() + 3_600_000) / 1000) },
+     message: { content: [{ type: 'text', text: 'Here is the refactor you asked for.' }] },
+   });
+   assert.equal(make().inspectLine(line, FILE).limit, undefined);
+ });
++
++test('a flagged entry whose quotaLimits has no numeric resetsAt falls back to the text', () => {
++  // The authoritative field only decides anything when it is actually there
++  // as a number; otherwise a flagged entry is still a limit event and the
++  // text is exactly what today's (pre-quotaLimits) detection already reads.
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    error: 'rate_limit',
++    timestamp: new Date().toISOString(),
++    cwd: '/projects/example',
++    quotaLimits: { status: 'rejected' }, // no resetsAt at all
++    message: { content: [{ type: 'text', text: "You've hit your session limit. Try again in 2 hours" }] },
++  });
++  const out = make().inspectLine(line, FILE);
++  assert.ok(out.limit, 'the text must still be read when the number is absent');
++  const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
++  assert.ok(hoursOut > 1.9 && hoursOut < 2.1, `expected ~2h out, got ${hoursOut.toFixed(2)}h`);
++});
++
++test('a structured reset far beyond maxWait is rejected, the same as a parsed one', () => {
++  // "Keep maxWait semantics": a structured reset is not exempt from the same
++  // absurd-result cap a parsed one has always had. make() reports 24h.
++  const resetsAt = Date.now() + 30 * 3_600_000;
++  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 30 hours"), FILE);
++  assert.equal(out.limit, undefined, 'a 30-hour-out structured reset must not arm a 24h-capped timer');
++});
++
++// ---------------------------------------------------------------------------
++// RESET_GRACE_MS boundary, both sides. Exercised through quotaLimits.resetsAt
++// because it is a bare epoch comparison against the real clock, with no
++// zone/DST/rollover machinery in the way. The exact millisecond edge is
++// pinned separately, deterministically, against a fixed `now` in
++// resolveStructuredReset's own unit tests (test/parsers/limitParser.test.ts) -
++// resetsAt here is epoch *seconds* and the real clock is genuinely running
++// between this line and the moment inspectLine reads Date.now(), so this
++// integration-level pair uses a few seconds of headroom on each side rather
++// than the exact edge, to demonstrate the wiring without being racy.
++// ---------------------------------------------------------------------------
++
++const GRACE_TEST_MARGIN_MS = 5_000;
++
++test('RESET_GRACE_MS boundary: still comfortably inside the grace window resumes', () => {
++  const resetsAt = Date.now() - RESET_GRACE_MS + GRACE_TEST_MARGIN_MS;
++  const out = make().inspectLine(quotaEntry(resetsAt, 'irrelevant text'), FILE);
++  assert.ok(out.limit, 'a reset just inside the grace window is due now, not history');
++});
++
++test('RESET_GRACE_MS boundary: just past the grace window is history', () => {
++  const resetsAt = Date.now() - RESET_GRACE_MS - GRACE_TEST_MARGIN_MS;
++  const out = make().inspectLine(quotaEntry(resetsAt, 'irrelevant text'), FILE);
++  assert.equal(out.limit, undefined, 'a reset just past the grace window must not resume');
++});
++
++// ---------------------------------------------------------------------------
++// MAX_OVERLOAD_AGE_MS boundary, both sides. Same headroom rationale as above:
++// the entry's timestamp is fixed at construction, but the age comparison
++// itself happens against Date.now() inside inspectLine a moment later.
++// ---------------------------------------------------------------------------
++
++const overloadLine = (age: number) =>
++  entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    timestamp: new Date(Date.now() - age).toISOString(),
++    cwd: '/projects/example',
++    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
++  });
++
++test('MAX_OVERLOAD_AGE_MS boundary: still comfortably inside the age limit retries', () => {
++  const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
++  assert.ok(out.overload, 'an overload just inside MAX_OVERLOAD_AGE_MS is not yet too old');
++});
++
++test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () => {
++  const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
++  assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
++});

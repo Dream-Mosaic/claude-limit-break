@@ -1,0 +1,204 @@
+# Review package: 2925f81..ca4f2ae
+
+## Commits
+ca4f2ae fix: exempt flagged entries from the subagent-file veto, cover Windows drive-letter grep prefixes
+
+## Files changed
+ src/parsers/limitParser.ts       | 14 +++++++++-----
+ src/transcriptWatcher.ts         | 21 +++++++++++++--------
+ test/parsers/limitParser.test.ts | 24 ++++++++++++++++++++++++
+ test/transcriptWatcher.test.ts   | 24 ++++++++++++++++++++++++
+ 4 files changed, 70 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/src/parsers/limitParser.ts b/src/parsers/limitParser.ts
+index fe04133..1d1aaa5 100644
+--- a/src/parsers/limitParser.ts
++++ b/src/parsers/limitParser.ts
+@@ -463,32 +463,36 @@ export function looksLikePercentageUsage(text: string): boolean {
+  * "path:line:" / "path:line-" citation. (Any backtick already trips
+  * looksLikeCode above; this checks independently too, since a plain-worded
+  * quote inside backticks has none of that function's other punctuation.)
+  * Each shape is exactly how a real banner turns up as someone else's
+  * evidence - a subagent's recap, a `grep` hit on a doc, a reply quoting an
+  * earlier message - rather than a notice Claude Code is delivering now.
+  *
+  * Checked per physical line of the *raw* text, before normalize() collapses
+  * every run of whitespace (newlines included) to a single space: a prefix
+  * only has to sit at the start of its own line, not the whole candidate.
+- * The grep pattern is deliberately narrow - a bare token, no whitespace or
+- * colon in it, immediately followed by ":<digits>:" or ":<digits>-" - so an
+- * ordinary banner ("resets 12:40pm") never matches: "12" is followed by
+- * ":40pm", not a run of digits followed by ':' or '-'.
++ * The grep pattern is deliberately narrow - an optional single-letter drive
++ * ("C:"), then a bare token with no whitespace or colon in it, immediately
++ * followed by ":<digits>:" or ":<digits>-" - so an ordinary banner ("resets
++ * 12:40pm") never matches: "12" is followed by ":40pm", not a run of digits
++ * followed by ':' or '-'. The drive letter is optional (fix round 1: an
++ * absolute Windows path like "C:\Users\x\y.ts:12:" was missed without it -
++ * "C" alone has no trailing digits, so the un-prefixed pattern never got
++ * past the drive letter to the real path).
+  */
+ export function looksLikeQuotedNotice(rawText: string): boolean {
+     return rawText.split(/\r?\n/).some((line) => {
+         const t = line.trim();
+         if (!t) {
+             return false;
+         }
+-        return /`/.test(t) || /^>/.test(t) || /^[^\s:]+:\d+[:-]/.test(t);
++        return /`/.test(t) || /^>/.test(t) || /^(?:[A-Za-z]:)?[^\s:]+:\d+[:-]/.test(t);
+     });
+ }
+ /** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
+ export function formatDuration(ms: number): string {
+     if (ms <= 0) {
+         return '0s';
+     }
+     const totalSeconds = Math.round(ms / 1000);
+     const hours = Math.floor(totalSeconds / 3600);
+     const minutes = Math.floor((totalSeconds % 3600) / 60);
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index 63ad11b..3bd4599 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -424,28 +424,33 @@ export class TranscriptWatcher {
+         const basis = writtenAt ?? now;
+ 
+         // The user pasting a limit notice into the chat - or asking about one - must
+         // never arm a resume timer. This is the same rule the overload scan below has
+         // always had; it was never applied to limits, and 4 of 6 ordinary user
+         // questions armed a timer as a result.
+         //
+         // `flagged` has to come first: Claude Code writes its own API-error notices as
+         // synthetic entries that can carry type "user", so a bare type check would
+         // suppress exactly the detection this extension exists for.
+-        // A subagent's own transcript never arms a limit itself (synthesis A3): a
+-        // subagent that hits the limit stops its parent, whose own transcript
+-        // records the same event, so scanning the subagent's file too only risks
+-        // re-arming on a note that merely quotes what happened (a checkpoint
+-        // recap, a summary). Nothing else here is affected - turn-end and
+-        // overload detection below still run over subagent files exactly as
+-        // before.
+-        if (!isSubagentFile(file) && (flagged || apiError || entry.type !== 'user')) {
++        // A subagent's own transcript need not arm a limit itself (synthesis A3):
++        // a subagent that hits the limit stops its parent, whose own transcript
++        // records the same event too, so an unflagged note in the subagent's own
++        // file that merely quotes what happened - a checkpoint recap, a summary -
++        // must not re-arm. But `flagged` comes first, ahead of the subagent-file
++        // check, same as it already does ahead of the user-type check above: a
++        // subagent that genuinely hits the limit still writes Claude Code's own
++        // rate-limit marker into its own file, and that must still arm (fix round
++        // 1 - the first version of this guard dropped a real limit hit whenever it
++        // landed in a subagents/ file, flagged or not). Nothing else here is
++        // affected - turn-end and overload detection below still run over
++        // subagent files exactly as before.
++        if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
+             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
+             // on the flagged entry itself - immune to every way the text can be
+             // misread (zone, DST, calendar rollover) - so it wins over the text
+             // outright when present. Only trusted on a flagged entry: the field
+             // turning up on an ordinary turn is not itself a limit event.
+             if (flagged) {
+                 const quotaLimits = entry.quotaLimits;
+                 const resetsAt =
+                     quotaLimits && typeof quotaLimits === 'object'
+                         ? (quotaLimits as Record<string, unknown>).resetsAt
+diff --git a/test/parsers/limitParser.test.ts b/test/parsers/limitParser.test.ts
+index 1e141fd..829d57f 100644
+--- a/test/parsers/limitParser.test.ts
++++ b/test/parsers/limitParser.test.ts
+@@ -395,20 +395,39 @@ test('a grep-style "file.ext:line:" prefix does not arm untrusted, but does trus
+   const text = 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+   assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a grep citation must not arm');
+   assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+ });
+ 
+ test('a bare "path:line-" grep prefix (no file extension) is still recognised', () => {
+   const text = 'notes:42-Claude AI usage limit reached. Try again in 5 hours';
+   assert.equal(detectLimit(text, NOW, MAXW), undefined);
+ });
+ 
++test('fix round 1: an absolute Windows path with a drive letter is still recognised as a grep prefix', () => {
++  const text = 'C:\\Users\\x\\y.ts:12:Claude AI usage limit reached. Try again in 5 hours';
++  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a drive-letter grep citation must not arm');
++  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
++});
++
++test('fix round 1: drive-letter support does not open a hole for real banners', () => {
++  // "12:40pm" must not itself be read as a drive letter + path.
++  const cases = [
++    "You've hit your session limit · resets 12:40am (America/Chicago)",
++    "You've hit your session limit · resets 2am (America/Chicago)",
++    'Claude usage limit reached, resets at 12:00 (UTC+3)',
++    'Claude AI usage limit reached. Try again in 5 hours',
++  ];
++  for (const text of cases) {
++    assert.ok(detectLimit(text, NOW, MAXW), `real banner must still arm: ${text}`);
++  }
++});
++
+ test('a real banner with no quoting marks still arms untrusted (positive control)', () => {
+   // The new vetoes must not catch an ordinary, unquoted banner - the whole
+   // point of the guard is to stay narrow.
+   const text = "You've hit your session limit · resets 2am (America/Chicago)";
+   assert.ok(detectLimit(text, NOW, MAXW), 'a genuine unquoted banner must still arm');
+ });
+ 
+ test('looksLikePercentageUsage flags a "used N%" status line and nothing else', () => {
+   assert.ok(looksLikePercentageUsage("You've used 91% of your session limit"));
+   assert.equal(looksLikePercentageUsage('Claude AI usage limit reached. Try again in 5 hours'), false);
+@@ -424,10 +443,15 @@ test('looksLikeQuotedNotice recognises backtick, blockquote and grep-prefix form
+     'a plain banner is not quoted',
+   );
+ });
+ 
+ test('looksLikeQuotedNotice checks each physical line, since normalize() collapses newlines', () => {
+   // A multi-line grep dump where only the second line carries the citation
+   // prefix - the veto must still catch it even though it is not on line one.
+   const text = 'Found 2 matches:\ndocs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+   assert.ok(looksLikeQuotedNotice(text));
+ });
++
++test('fix round 1: looksLikeQuotedNotice recognises an absolute Windows path with a drive letter', () => {
++  assert.ok(looksLikeQuotedNotice('C:\\Users\\x\\y.ts:12: Claude AI usage limit reached'), 'drive-letter grep prefix');
++  assert.equal(looksLikeQuotedNotice("You've hit your session limit \u00b7 resets 12:40pm"), false, '"12:40pm" is not a drive letter');
++});
+diff --git a/test/transcriptWatcher.test.ts b/test/transcriptWatcher.test.ts
+index 3c079dd..3761fa8 100644
+--- a/test/transcriptWatcher.test.ts
++++ b/test/transcriptWatcher.test.ts
+@@ -576,10 +576,34 @@ test('plain banner wording under a top-level toolUseResult field does not arm a
+ });
+ 
+ test('a flagged real banner still arms a timer (positive case)', () => {
+   const line = entry({
+     type: 'assistant',
+     isApiErrorMessage: true,
+     message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
+   });
+   assert.ok(make().inspectLine(line, FILE).limit);
+ });
++
++// ---------------------------------------------------------------------------
++// Fix round 1: the subagent-file veto must not swallow a FLAGGED entry. A
++// subagent that genuinely hits the limit still writes Claude Code's own
++// rate-limit marker into its own file, and that must still arm - only an
++// unflagged note merely quoting what happened is vetoed. Flagged entries are
++// exempt from every veto in this module, subagent-file included.
++// ---------------------------------------------------------------------------
++
++test('a flagged banner in a subagents/ file still arms a timer', () => {
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
++  });
++  assert.ok(make().inspectLine(line, SUBAGENT_FILE).limit, 'a flagged entry must not be dropped by the subagent-file veto');
++});
++
++test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a timer', () => {
++  const resetsAt = Date.now() + 2 * 3_600_000;
++  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
++  assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
++  assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
++});

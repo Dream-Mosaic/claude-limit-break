@@ -1,0 +1,387 @@
+# Review package: 852215c..1a0e082
+
+## Commits
+1a0e082 fix: Task 2 review round 1 - fail open on unknown holder status; coordinate on every resume
+
+## Files changed
+ src/extension.ts          | 25 ++++++++++++++----------
+ src/holderPolicy.ts       | 50 ++++++++++++++++++++++++++++++++++-------------
+ test/extension.test.ts    | 19 ++++++++++++------
+ test/holderPolicy.test.ts | 36 ++++++++++++++++++++++++++++++++--
+ 4 files changed, 98 insertions(+), 32 deletions(-)
+
+## Diff
+diff --git a/src/extension.ts b/src/extension.ts
+index 97c95fd..89178a3 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -852,31 +852,36 @@ export function activate(context: vscode.ExtensionContext): void {
+             return;
+           }
+           if (!resume(job)) {
+             rememberReady(job);
+           }
+         });
+       }
+       if (!decision.resume) {
+         return;
+       }
+-      // A second, independent controller ruling: nobody is on THIS session
+-      // (holder.kind === 'none'), but a DIFFERENT session may be busy or
+-      // waiting in the same folder. The extension cannot message that
+-      // session itself (constraint #3 - never write into a session it did
+-      // not create), so instead it tells the session it is ABOUT to create:
+-      // buildResumePrompt appends a sentence naming the peer(s) and asking
+-      // the resumed model to coordinate with them via SendMessage before
+-      // editing anything. This never blocks the resume - only the prompt
+-      // passed to it changes.
++      // A second, independent controller ruling: on EVERY resume we are
++      // about to launch here - whether nobody is on this session at all, or
++      // (fix round 1, scope ruling) it is an idle panel we are resuming
++      // anyway - a DIFFERENT session may be busy or waiting in the same
++      // folder. The extension cannot message that session itself
++      // (constraint #3 - never write into a session it did not create), so
++      // instead it tells the session it is ABOUT to create: buildResumePrompt
++      // appends a sentence naming the peer(s) and asking the resumed model to
++      // coordinate with them via SendMessage before editing anything. This
++      // never blocks the resume - only the prompt passed to it changes.
++      // `decision.resume` (just checked above) is the gate: it is true for
++      // exactly 'none', an idle panel, and a listing failure - and `rows !==
++      // 'unknown'` already excludes that last one, since `holder` (and so
++      // `decision`) is only ever 'unknown' when `rows` is too.
+       let resumeJob = job;
+-      if (rows !== 'unknown' && holder !== 'unknown' && holder.kind === 'none' && job.cwd) {
++      if (rows !== 'unknown' && decision.resume && job.cwd) {
+         const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
+         if (peers.length > 0) {
+           const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
+           log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
+           void vscode.window.showInformationMessage(
+             `Claude Limit Buster: another Claude session (${names}) is working in this folder. ` +
+               `The resumed session has been told to coordinate with it.`,
+           );
+           resumeJob = { ...job, prompt: buildResumePrompt(job.prompt, peers) };
+         }
+diff --git a/src/holderPolicy.ts b/src/holderPolicy.ts
+index 7cf5115..0793a88 100644
+--- a/src/holderPolicy.ts
++++ b/src/holderPolicy.ts
+@@ -8,20 +8,37 @@ export interface OnFireDecision {
+   /** Present whenever there is something worth writing to the output channel. */
+   logMessage?: string;
+   /** Defaults to 'info' when omitted; 'warn' marks a listing failure. */
+   logLevel?: 'info' | 'warn';
+   /** Present only when the user should be told, with exactly one button. */
+   notice?: { message: string; button: string };
+ }
+ 
+ const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
+ 
++/**
++ * Whether a holder's status counts as idle for Task 2's purposes.
++ *
++ * Fix round 1, controller ruling: an unknown or MISSING status counts as
++ * idle - fail OPEN, not closed. Goal 2 is to resume unattended, and a
++ * listing failure ('unknown', a level up, in `decideOnFire`'s own `holder`
++ * parameter) already resumes rather than blocking; a single row whose status
++ * is missing or an unrecognised string must not be read more cautiously than
++ * a listing that failed outright. Only the two explicit non-idle statuses -
++ * 'busy' and 'waiting' - count as not idle. (This replaces the original,
++ * opposite reading - "anything other than the literal string 'idle' is not
++ * idle" - which the controller called out as backwards for Goal 2.)
++ */
++function isIdleStatus(status: string | undefined): boolean {
++  return status !== 'busy' && status !== 'waiting';
++}
++
+ /**
+  * Decide what `scheduler.onFire` does with a fired job, given who (if anyone)
+  * already holds the session.
+  *
+  * This exists because of the 2026-09-23 field incident this task is named
+  * for: a scheduled resume spawned a second `claude --resume` terminal while a
+  * panel tab was still open on the same session, forking the conversation
+  * (docs/research/2026-09-20-panel-fork-experiment.md, #6).
+  *
+  * The controller corrected this policy mid-implementation (see
+@@ -41,63 +58,66 @@ const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
+  *   - an idle terminal defers to autoContinueOn: Claude Code's own
+  *     auto-continue already covers it when that setting is on (see
+  *     autoContinue.ts), so this stays silent there too; only when it is OFF
+  *     does this remember the job and offer "Resume in Terminal Anyway".
+  *
+  * `resume: true` is reserved for 'none' (nobody found), a listing failure
+  * ('unknown', which must still resume rather than fail closed and silently
+  * stop every future resume on a machine where `claude agents` misbehaves),
+  * and now an idle panel.
+  *
+- * Any status other than the exact string 'idle' - including 'busy',
+- * 'waiting', or an absent/unreported status - is treated as NOT idle: Task 2
+- * exists to avoid a second writer, so an unknown status errs toward the
+- * cautious reading rather than assuming it is safe to spawn.
++ * {@link isIdleStatus}: only the two explicit statuses 'busy' and 'waiting'
++ * count as NOT idle. An unreported or unrecognised status counts as idle -
++ * fail OPEN, per the controller's fix-round-1 ruling: Goal 2 is to resume
++ * unattended, and a listing failure already resumes rather than blocking, so
++ * a single row with no readable status must not be treated more cautiously
++ * than that.
+  *
+  * A DIFFERENT session busy or waiting in the same folder is no longer this
+  * function's concern - a second controller ruling replaced "block and
+  * notify" with "resume anyway, and tell the resumed model to coordinate";
+  * see {@link buildResumePrompt} and `scheduler.onFire` in extension.ts, which
+  * calls it directly off the same listing, independently of this decision.
+  */
+ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: boolean, shortId: string): OnFireDecision {
+   if (holder === 'unknown') {
+     return {
+       resume: true,
+       remember: false,
+       logMessage: `Could not list live Claude sessions; resuming ${shortId} as usual.`,
+       logLevel: 'warn',
+     };
+   }
+   if (holder.kind === 'none') {
+     return { resume: true, remember: false };
+   }
+-  if (holder.kind === 'panel' && holder.status === 'idle') {
++  if (holder.kind === 'panel' && isIdleStatus(holder.status)) {
+     return {
+       resume: true,
+       remember: false,
+       logMessage: `Session ${shortId} is open in an idle Claude panel (pid ${holder.pid}); resuming anyway.`,
+     };
+   }
+   if (holder.kind === 'panel') {
+     const bridgeNote = holder.bridged ? ' Remote Control may have continued it.' : '';
+     return {
+       resume: false,
+       remember: false,
+       logMessage:
+         `Session ${shortId} is open in a Claude panel (pid ${holder.pid}) and is already ` +
+         `${holder.status ?? 'active'}; not starting a second writer.${bridgeNote}`,
+     };
+   }
+-  // terminal, busy or waiting (or an unreported status, treated the same
+-  // way): the session is already being worked, so this drops silently.
+-  if (holder.status !== 'idle') {
++  // terminal, explicitly busy or waiting: the session is already being
++  // worked, so this drops silently. An unreported status is NOT this branch
++  // any more (fix round 1) - it falls through to the idle handling below.
++  if (!isIdleStatus(holder.status)) {
+     return {
+       resume: false,
+       remember: false,
+       logMessage:
+         `Session ${shortId} is open in a terminal (pid ${holder.pid}) and is already ` +
+         `${holder.status ?? 'active'}; not starting a second writer.`,
+     };
+   }
+   // terminal, idle.
+   if (autoContinueOn) {
+@@ -123,37 +143,39 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn:
+     },
+   };
+ }
+ 
+ /**
+  * The modal warning a MANUAL resume (the resumeNow command, or the
+  * off-autoResume "Resume Now" notification's own button) shows before
+  * launching into a session someone already holds.
+  *
+  * Per the same controller correction {@link decideOnFire} documents: an IDLE
+- * panel needs no modal - that is the ordinary "come back and continue in the
+- * panel, or resume by hand instead" case, not a live conflict. Every other
+- * live holder still warns: a busy or waiting holder of either kind, or a
+- * terminal of any status (an idle terminal still has someone who might type
+- * into it, and unlike an idle panel there is no #7 auto-resync for it).
++ * panel (per {@link isIdleStatus} - fail open, so this also covers an
++ * unreported status) needs no modal - that is the ordinary "come back and
++ * continue in the panel, or resume by hand instead" case, not a live
++ * conflict. Every other live holder still warns: an explicitly busy or
++ * waiting holder of either kind, or a terminal of any status (an idle
++ * terminal still has someone who might type into it, and unlike an idle
++ * panel there is no #7 auto-resync for it).
+  *
+  * 'none' and 'unknown' both return undefined - nothing to warn about, and (for
+  * 'unknown') not knowing is not a reason to block a resume asked for by hand.
+  */
+ export function manualResumeWarning(
+   holder: SessionHolder | 'unknown',
+   shortId: string,
+ ): { message: string; button: string } | undefined {
+   if (holder === 'unknown' || holder.kind === 'none') {
+     return undefined;
+   }
+-  if (holder.kind === 'panel' && holder.status === 'idle') {
++  if (holder.kind === 'panel' && isIdleStatus(holder.status)) {
+     return undefined;
+   }
+   const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
+   return {
+     message:
+       `Claude Limit Buster: session ${shortId} is already open in ${where}. ` +
+       `Resuming here will fork the conversation.`,
+     button: 'Resume Anyway',
+   };
+ }
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index fd03e96..a56a1be 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -1823,37 +1823,44 @@ test('scheduler.onFire does not touch the prompt when the folder is quiet', asyn
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('another Claude session')).length,
+       0,
+       'nothing to coordinate about - no coordination notice either',
+     );
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+-test('scheduler.onFire does not run the folder-busy check for an idle-panel resume', async () => {
+-  // The busy-folder-peers check is specifically for "nobody is on THIS
+-  // session" (holder.kind === 'none'); an idle panel is a different, already
+-  //-decided case and must not also be run through it.
++test('scheduler.onFire also adds the coordination sentence when resuming an IDLE panel, not only "none" (fix round 1 scope ruling)', async () => {
++  // The controller's scope ruling: the busy-folder-peers coordination
++  // applies on EVERY resume this extension launches, with no condition on
++  // which holder made it happen - 'none' and an idle panel (which also
++  // resumes, per the first correction) both qualify.
+   resetVscodeFake();
+   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+   fakeAgentRows = [
+     { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
+     { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
+   ];
+   sessionRecordFor.set(111, { sessionId: SESSION, entrypoint: 'claude-vscode' });
+   const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+   start(ctx);
+   try {
+     await oneTick();
+-    assert.equal(vscodeFake.terminals.length, 1);
+-    assert.equal(argsOf(0)?.[2], PROMPT, 'an idle-panel resume must not be touched by the folder-busy check');
++    assert.equal(vscodeFake.terminals.length, 1, 'an idle panel still resumes as normal');
++    const prompt = argsOf(0)?.[2];
++    assert.match(prompt ?? '', /other-session/, 'the busy peer must be named even though the holder was an idle panel');
++    assert.match(prompt ?? '', /SendMessage/);
++    assert.ok(
++      vscodeFake.info.some((m) => m.message.includes('other-session')),
++      'the person is told too, non-blockingly',
++    );
+   } finally {
+     clearHolders();
+     teardown(ctx);
+   }
+ });
+ 
+ test('resumeNow shows a modal fork warning for a busy holder; declining leaves it unresumed', async () => {
+   resetVscodeFake();
+   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+   holderRow('claude-vscode', 'busy');
+diff --git a/test/holderPolicy.test.ts b/test/holderPolicy.test.ts
+index 8a3dd65..6cf7294 100644
+--- a/test/holderPolicy.test.ts
++++ b/test/holderPolicy.test.ts
+@@ -59,24 +59,29 @@ test('decideOnFire drops the job silently for a WAITING panel too', () => {
+ test('decideOnFire mentions Remote Control in the log line for a bridged, busy panel', () => {
+   const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true, status: 'busy' }, true, SHORT);
+   assert.match(decision.logMessage ?? '', /remote control/i);
+ });
+ 
+ test('decideOnFire does not mention Remote Control when the busy panel is not bridged', () => {
+   const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
+   assert.doesNotMatch(decision.logMessage ?? '', /remote control/i);
+ });
+ 
+-test('decideOnFire treats an unreported panel status as not-idle (conservative default)', () => {
++test('decideOnFire treats an unreported panel status as IDLE (fail open) - resumes as normal', () => {
++  // Fix round 1, controller ruling: an unknown or missing status counts as
++  // idle, not "not idle". Goal 2 is to resume unattended, and a listing
++  // failure ('unknown') already resumes rather than blocking - a single row
++  // with no readable status must not be treated more cautiously than that.
+   const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT);
+-  assert.equal(decision.resume, false);
++  assert.equal(decision.resume, true);
+   assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
+ });
+ 
+ test('decideOnFire drops the job silently for a BUSY terminal, regardless of auto-continue', () => {
+   const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT);
+   assert.equal(decision.resume, false);
+   assert.equal(decision.remember, false);
+   assert.equal(decision.notice, undefined);
+ });
+ 
+ test('decideOnFire drops the job silently for a WAITING terminal, regardless of auto-continue', () => {
+@@ -96,20 +101,43 @@ test('decideOnFire leaves an IDLE terminal alone, unremembered, when auto-contin
+ 
+ test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', () => {
+   const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT);
+   assert.equal(decision.resume, false);
+   assert.equal(decision.remember, true);
+   assert.ok(decision.notice);
+   assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+   assert.match(decision.notice?.message ?? '', /terminal/i);
+ });
+ 
++// ---------------------------------------------------------------------------
++// Fix round 1, item 2: an unreported TERMINAL status must be evaluated as
++// idle too (fail open) - same isIdleStatus helper as the panel case, and the
++// same two outcomes as an explicitly idle terminal, one per autoContinueOn.
++// ---------------------------------------------------------------------------
++
++test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue on leaves it alone', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++  assert.match(decision.logMessage ?? '', /auto-continue/i);
++});
++
++test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue off notifies and remembers', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, false, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, true);
++  assert.ok(decision.notice);
++  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
++  assert.match(decision.notice?.message ?? '', /terminal/i);
++});
++
+ test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
+   const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
+   assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
+ });
+ 
+ // ---------------------------------------------------------------------------
+ // manualResumeWarning: the modal shown by the resumeNow command and the
+ // off-autoResume "Resume Now" notification button.
+ //
+ // Per the same correction: an idle panel needs no modal. Every other live
+@@ -123,20 +151,24 @@ test('manualResumeWarning is silent when nobody holds the session', () => {
+ test('manualResumeWarning is silent when the listing failed', () => {
+   // Consistent with decideOnFire: not knowing is not a reason to block a
+   // resume the user explicitly asked for by hand.
+   assert.equal(manualResumeWarning('unknown', SHORT), undefined);
+ });
+ 
+ test('manualResumeWarning is silent for an idle panel', () => {
+   assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'idle' }, SHORT), undefined);
+ });
+ 
++test('manualResumeWarning is silent for a panel with an unreported status too (fail open)', () => {
++  assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: undefined }, SHORT), undefined);
++});
++
+ test('manualResumeWarning names a panel and offers Resume Anyway when the panel is busy', () => {
+   const warning = manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'busy' }, SHORT);
+   assert.ok(warning);
+   assert.equal(warning?.button, 'Resume Anyway');
+   assert.match(warning?.message ?? '', /claude panel/i);
+   assert.match(warning?.message ?? '', /fork/i);
+ });
+ 
+ test('manualResumeWarning warns for a waiting panel too', () => {
+   assert.ok(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'waiting' }, SHORT));

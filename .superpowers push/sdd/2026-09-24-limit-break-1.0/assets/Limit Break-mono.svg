@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" shape-rendering="crispEdges">
+  <!--
+    A solid square in the current colour, with the frame line, the word
+    "Limit" and the gauge cut out of it so the background shows through.
+    In the mask, white keeps the square and black cuts it away.
+  -->
+  <mask id="cutouts">
+    <rect width="1254" height="1254" fill="#fff"/>
+
+    <g fill="#000">
+      <!-- Frame line: a ring 46px in from the edge, 46px thick -->
+      <path fill-rule="evenodd" d="M24 25H1228V1229H24Z  M70 72H1181V1182H70Z"/>
+
+      <!-- L -->
+      <path d="M171 375H234V657H366V708H171Z"/>
+
+      <!-- i -->
+      <rect x="406" y="375" width="63" height="55"/>   <!-- dot -->
+      <rect x="406" y="478" width="63" height="230"/>  <!-- stem -->
+
+      <!-- m: three stems joined by a top bar with pixel notches -->
+      <path d="M512 478H560V503H576V478H682V503H703V478H806V503H830V708
+               H767V529H746V515H725V529H703V708
+               H640V529H619V515H598V529H576V708
+               H512Z"/>
+
+      <!-- i -->
+      <rect x="869" y="375" width="65" height="55"/>   <!-- dot -->
+      <rect x="869" y="478" width="65" height="230"/>  <!-- stem -->
+
+      <!-- t: stem, crossbar, and a foot that kicks right -->
+      <path d="M994 403H1057V478H1101V529H1057V657H1101V708
+               H1017V682H994V529H964V478H994Z"/>
+
+      <!-- Gauge outline: a ring with notched pixel corners -->
+      <path fill-rule="evenodd" d="M196 757H1076V784H1101V908H1076V934H196V908H171V784H196Z
+                                   M196 784H1076V908H196Z"/>
+
+      <!-- Gauge fill -->
+      <rect x="222" y="807" width="829" height="77"/>
+    </g>
+  </mask>
+
+  <rect width="1254" height="1254" fill="currentColor" mask="url(#cutouts)"/>
+</svg>

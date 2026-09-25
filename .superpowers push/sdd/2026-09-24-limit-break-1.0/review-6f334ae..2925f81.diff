@@ -1,0 +1,544 @@
+# Review package: 6f334ae..HEAD
+
+## Commits
+2925f81 test(transcriptWatcher): pin toolUseResult-field tagging, found by mutation testing
+1ce287f fix(transcriptWatcher): skip limit detection for subagent files and tool_result text
+3688d55 fix(limitParser): veto percentage-usage and visibly-quoted text on the untrusted path
+
+## Files changed
+ src/parsers/limitParser.ts       |  47 +++++++++++++-
+ src/transcriptWatcher.ts         |  71 +++++++++++++++++----
+ test/parsers/limitParser.test.ts |  65 +++++++++++++++++++
+ test/transcriptWatcher.test.ts   | 132 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 302 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/src/parsers/limitParser.ts b/src/parsers/limitParser.ts
+index 31bece5..fe04133 100644
+--- a/src/parsers/limitParser.ts
++++ b/src/parsers/limitParser.ts
+@@ -354,21 +354,29 @@ export function detectLimit(
+     if (!text || text.length > MAX_NOTICE_LENGTH) {
+         return undefined;
+     }
+     if (!looksLikeLimitMessage(text)) {
+         return undefined;
+     }
+     // Source code and conversation *about* limits - which is exactly what a
+     // transcript of working on this extension looks like - must not arm a timer.
+     // Mirrors detectOverload, which has always guarded internally. Entries Claude
+     // Code itself tagged as a rate-limit event are trusted past this.
+-    if (!opts.trusted && looksLikeCode(text)) {
++    //
++    // Two more shapes join the same guard (synthesis A3, 2026-09-23 false
++    // positives): a percentage-usage status line ("You've used 91% of your
++    // session limit"), which is Claude Code's own readout, not a "you're
++    // blocked" notice, and text someone else is visibly quoting - a subagent
++    // recap, a `grep` hit, a reply - rather than a notice Claude Code is
++    // delivering right now. All three are skipped outright on a flagged
++    // entry, exactly like looksLikeCode.
++    if (!opts.trusted && (looksLikeCode(text) || looksLikePercentageUsage(text) || looksLikeQuotedNotice(rawText))) {
+         return undefined;
+     }
+     const readAt = opts.readAt ?? now;
+     const horizon = now.getTime() + maxWaitHours * HOUR_MS;
+     for (const rule of RULES) {
+         const m = rule.re.exec(text);
+         if (!m) {
+             continue;
+         }
+         const at = rule.resolve(m, now, opts.zone);
+@@ -432,20 +440,57 @@ export const MAX_NOTICE_LENGTH = 400;
+  * Cheap guard against text that quotes a banner inside source code rather than
+  * being one. A real notice is a plain sentence with none of this punctuation.
+  *
+  * Shared with the overload parser, which needs the same protection: a
+  * transcript of working on this very extension is full of strings that read
+  * exactly like the errors it hunts for.
+  */
+ export function looksLikeCode(text: string): boolean {
+     return /[{};]|=>|\b(?:const|let|var|function|return|assert|import|export|test|describe)\b|\/\/|\/\*|`/.test(text);
+ }
++/**
++ * Whether the text is a usage-percentage readout ("You've used 91% of your
++ * session limit") rather than a "you're blocked" notice. Claude Code writes
++ * these as ordinary status lines while a session is still usable; a real
++ * false positive on 2026-09-23 armed a timer from one read on the untrusted
++ * path.
++ */
++export function looksLikePercentageUsage(text: string): boolean {
++    return /\bused\s+\d{1,3}%/i.test(text);
++}
++/**
++ * Whether the text is visibly quoted rather than a live banner: fenced in
++ * backticks, blockquoted with a leading `>`, or carrying a `grep`-style
++ * "path:line:" / "path:line-" citation. (Any backtick already trips
++ * looksLikeCode above; this checks independently too, since a plain-worded
++ * quote inside backticks has none of that function's other punctuation.)
++ * Each shape is exactly how a real banner turns up as someone else's
++ * evidence - a subagent's recap, a `grep` hit on a doc, a reply quoting an
++ * earlier message - rather than a notice Claude Code is delivering now.
++ *
++ * Checked per physical line of the *raw* text, before normalize() collapses
++ * every run of whitespace (newlines included) to a single space: a prefix
++ * only has to sit at the start of its own line, not the whole candidate.
++ * The grep pattern is deliberately narrow - a bare token, no whitespace or
++ * colon in it, immediately followed by ":<digits>:" or ":<digits>-" - so an
++ * ordinary banner ("resets 12:40pm") never matches: "12" is followed by
++ * ":40pm", not a run of digits followed by ':' or '-'.
++ */
++export function looksLikeQuotedNotice(rawText: string): boolean {
++    return rawText.split(/\r?\n/).some((line) => {
++        const t = line.trim();
++        if (!t) {
++            return false;
++        }
++        return /`/.test(t) || /^>/.test(t) || /^[^\s:]+:\d+[:-]/.test(t);
++    });
++}
+ /** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
+ export function formatDuration(ms: number): string {
+     if (ms <= 0) {
+         return '0s';
+     }
+     const totalSeconds = Math.round(ms / 1000);
+     const hours = Math.floor(totalSeconds / 3600);
+     const minutes = Math.floor((totalSeconds % 3600) / 60);
+     const seconds = totalSeconds % 60;
+     if (hours > 0) {
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index c7fbc94..63ad11b 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -392,22 +392,22 @@ export class TranscriptWatcher {
+         }
+         // Decided before the text scan, because a finished turn is a property of
+         // the entry itself rather than of anything written inside it.
+         const inputNeeded: InputHit | undefined = isTurnEndEntry(entry)
+             ? {
+                 detection: { rule: 'turn-end', kind: 'turnEnd', text: 'Claude finished its turn.' },
+                 cwd,
+                 file,
+             }
+             : undefined;
+-        const candidates: string[] = [];
+-        collectStrings(entry, candidates, 0);
++        const candidates: Candidate[] = [];
++        collectStrings(entry, candidates, 0, false);
+         // Claude Code tags a genuine limit entry as an API error. When those markers
+         // are present the entry is definitely a rate-limit event, so its text is
+         // trusted outright; otherwise the text has to clear a stricter bar.
+         const flagged = isRateLimitEntry(entry);
+         const apiError = isApiErrorEntry(entry);
+         const maxWait = this.getMaxWaitHours();
+         // The real current time: staleness and the grace window are always
+         // decided against this, never against the entry's own timestamp.
+         const now = new Date();
+         // What a relative notice ("in 5 hours", "resets 1am") is resolved
+@@ -424,21 +424,28 @@ export class TranscriptWatcher {
+         const basis = writtenAt ?? now;
+ 
+         // The user pasting a limit notice into the chat - or asking about one - must
+         // never arm a resume timer. This is the same rule the overload scan below has
+         // always had; it was never applied to limits, and 4 of 6 ordinary user
+         // questions armed a timer as a result.
+         //
+         // `flagged` has to come first: Claude Code writes its own API-error notices as
+         // synthetic entries that can carry type "user", so a bare type check would
+         // suppress exactly the detection this extension exists for.
+-        if (flagged || apiError || entry.type !== 'user') {
++        // A subagent's own transcript never arms a limit itself (synthesis A3): a
++        // subagent that hits the limit stops its parent, whose own transcript
++        // records the same event, so scanning the subagent's file too only risks
++        // re-arming on a note that merely quotes what happened (a checkpoint
++        // recap, a summary). Nothing else here is affected - turn-end and
++        // overload detection below still run over subagent files exactly as
++        // before.
++        if (!isSubagentFile(file) && (flagged || apiError || entry.type !== 'user')) {
+             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
+             // on the flagged entry itself - immune to every way the text can be
+             // misread (zone, DST, calendar rollover) - so it wins over the text
+             // outright when present. Only trusted on a flagged entry: the field
+             // turning up on an ordinary turn is not itself a limit event.
+             if (flagged) {
+                 const quotaLimits = entry.quotaLimits;
+                 const resetsAt =
+                     quotaLimits && typeof quotaLimits === 'object'
+                         ? (quotaLimits as Record<string, unknown>).resetsAt
+@@ -451,45 +458,53 @@ export class TranscriptWatcher {
+                     // text does not get a second opinion on that.
+                     return resumeAt
+                         ? { limit: { detection: { resumeAt, rule: 'quota-limits', text: 'quotaLimits.resetsAt' }, cwd, file } }
+                         : { inputNeeded };
+                 }
+             }
+             for (const candidate of candidates) {
+                 // Only short strings are considered: a real banner is one line, whereas a
+                 // long string is a file the session happened to read. Without this, a
+                 // transcript containing source code about rate limits arms a timer.
+-                if (candidate.length > MAX_NOTICE_LENGTH) {
++                if (candidate.text.length > MAX_NOTICE_LENGTH) {
++                    continue;
++                }
++                // Text inside a tool_result block (or a top-level toolUseResult) is
++                // evidence Claude Code fed back to the model, not a notice it is
++                // delivering now - a `grep` hit quoting a banner is exactly how a real
++                // false positive armed a timer (synthesis A3). Flagged entries are
++                // exempt, same as every other veto here.
++                if (!flagged && candidate.toolResult) {
+                     continue;
+                 }
+                 // Trusted entries skip the source-code guard inside detectLimit, which is
+                 // where that guard now lives.
+-                const detection = detectLimit(candidate, basis, maxWait, { trusted: flagged, readAt: now });
++                const detection = detectLimit(candidate.text, basis, maxWait, { trusted: flagged, readAt: now });
+                 if (detection) {
+                     return { limit: { detection, cwd, file } };
+                 }
+             }
+         }
+         // No limit here. A transient server error is worth reporting instead, but
+         // only from an entry Claude Code itself marked as an API failure or from a
+         // non-user entry: the user pasting an error into the chat - or asking about
+         // one - must never kick off an automatic retry. An overload carries no reset
+         // time of its own, so a replayed one is judged on age alone: written longer
+         // ago than MAX_OVERLOAD_AGE_MS, it is history rather than something to retry
+         // now.
+         const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
+         if (!overloadTooOld && (apiError || entry.type !== 'user')) {
+             for (const candidate of candidates) {
+-                if (candidate.length > MAX_NOTICE_LENGTH) {
++                if (candidate.text.length > MAX_NOTICE_LENGTH) {
+                     continue;
+                 }
+-                const overload = detectOverload(candidate);
++                const overload = detectOverload(candidate.text);
+                 if (overload) {
+                     return { overload: { detection: overload, cwd, file } };
+                 }
+             }
+         }
+         return { inputNeeded };
+     }
+ 
+     stop(): void {
+         this.watcher?.close();
+@@ -536,37 +551,69 @@ function isApiErrorEntry(entry: Record<string, unknown>): boolean {
+     if (entry.isApiErrorMessage === true) {
+         return true;
+     }
+     const status = entry.apiErrorStatus ?? entry.status;
+     if (typeof status === 'number' && status >= 500 && status < 600) {
+         return true;
+     }
+     return typeof entry.error === 'string' && entry.error.length > 0;
+ }
+ 
++/**
++ * Whether a transcript file lives under a `subagents/` directory (synthesis
++ * A3). A subagent that hits the limit stops its parent, whose own top-level
++ * transcript records the same event via its own entries, so a subagent
++ * file's entries never need to arm a limit timer themselves - see the doc
++ * comment on {@link MAX_OFFSET_IDLE_MS} for how common these files are
++ * (~85% of everything on disk for a typical project).
++ */
++function isSubagentFile(file: string): boolean {
++    return /[\\/]subagents[\\/]/i.test(file);
++}
++
++/** One string pulled out of a transcript entry, tagged with where it came from. */
++interface Candidate {
++    text: string;
++    /**
++     * True inside a `type: "tool_result"` content block, or anywhere under a
++     * top-level `toolUseResult` field - Claude Code's own record of what a
++     * tool returned. Text here is evidence fed back to the model, not a
++     * notice Claude Code is delivering now, so the untrusted limit path in
++     * {@link TranscriptWatcher.inspectLine} skips it outright (synthesis A3).
++     */
++    toolResult: boolean;
++}
++
+ /**
+  * Pull every human-readable string out of a transcript entry. Limit notices
+  * turn up in assistant text blocks, tool results and error fields depending on
+  * where the refusal originated, so the shape is not worth hard-coding.
++ *
++ * `inToolResult` is threaded down from the caller rather than recomputed per
++ * string: once a `tool_result` content block (or the `toolUseResult` field)
++ * is entered, every string anywhere inside it - however deeply nested -
++ * carries the same origin.
+  */
+-function collectStrings(value: unknown, out: string[], depth: number): void {
++function collectStrings(value: unknown, out: Candidate[], depth: number, inToolResult: boolean): void {
+     if (depth > 6 || out.length > 200) {
+         return;
+     }
+     if (typeof value === 'string') {
+         if (value.length > 8) {
+-            out.push(value);
++            out.push({ text: value, toolResult: inToolResult });
+         }
+         return;
+     }
+     if (Array.isArray(value)) {
+         for (const item of value) {
+-            collectStrings(item, out, depth + 1);
++            collectStrings(item, out, depth + 1, inToolResult);
+         }
+         return;
+     }
+     if (value && typeof value === 'object') {
+-        for (const item of Object.values(value)) {
+-            collectStrings(item, out, depth + 1);
++        const obj = value as Record<string, unknown>;
++        const isToolResult = inToolResult || obj.type === 'tool_result';
++        for (const [key, item] of Object.entries(obj)) {
++            collectStrings(item, out, depth + 1, isToolResult || key === 'toolUseResult');
+         }
+     }
+ }
+diff --git a/test/parsers/limitParser.test.ts b/test/parsers/limitParser.test.ts
+index 6d13632..1e141fd 100644
+--- a/test/parsers/limitParser.test.ts
++++ b/test/parsers/limitParser.test.ts
+@@ -1,16 +1,18 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import {
+   detectLimit,
+   looksLikeCode,
+   looksLikeLimitMessage,
++  looksLikePercentageUsage,
++  looksLikeQuotedNotice,
+   normalize,
+   formatDuration,
+   MAX_NOTICE_LENGTH,
+   RESET_GRACE_MS,
+   resolveStructuredReset,
+ } from '../../src/parsers/limitParser';
+ 
+ const NOW = new Date('2026-08-03T12:00:00Z');
+ const MAXW = 24;
+ const epochAt = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
+@@ -359,10 +361,73 @@ test('the clock-reset rollover accepts a today occurrence still inside the grace
+ });
+ 
+ test('the clock-reset rollover still rolls to tomorrow once the grace window has passed', () => {
+   // Same notice, twenty minutes past 1am CST - past RESET_GRACE_MS, so
+   // today's occurrence is history and the next real occurrence is tomorrow.
+   const now = new Date('2026-01-15T07:20:00Z');
+   const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
+   assert.ok(hit, 'a genuinely missed reset still resolves to the next occurrence');
+   assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
+ });
++
++// ---------------------------------------------------------------------------
++// Task 3 (synthesis A3): text that merely LOOKS like a limit banner - a
++// percentage-usage status line, or text someone else is visibly quoting -
++// must not arm a timer on the untrusted path. A flagged entry (Claude Code's
++// own rate-limit marker) is unaffected, exactly like the existing
++// looksLikeCode guard.
++// ---------------------------------------------------------------------------
++
++test('a percentage-usage status line does not arm untrusted, but does trusted (real false positive)', () => {
++  // Captured verbatim, 2026-09-23: "You've used 91% of your session limit ·
++  // resets 12:40pm" armed a timer from an untrusted entry.
++  const text = "You've used 91% of your session limit · resets 12:40pm";
++  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a usage-percentage line must not arm');
++  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
++});
++
++test('a line prefixed with `>` does not arm untrusted, but does trusted', () => {
++  const text = '> Claude AI usage limit reached. Try again in 5 hours';
++  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a blockquoted line must not arm');
++  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
++});
++
++test('a grep-style "file.ext:line:" prefix does not arm untrusted, but does trusted', () => {
++  const text = 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
++  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a grep citation must not arm');
++  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
++});
++
++test('a bare "path:line-" grep prefix (no file extension) is still recognised', () => {
++  const text = 'notes:42-Claude AI usage limit reached. Try again in 5 hours';
++  assert.equal(detectLimit(text, NOW, MAXW), undefined);
++});
++
++test('a real banner with no quoting marks still arms untrusted (positive control)', () => {
++  // The new vetoes must not catch an ordinary, unquoted banner - the whole
++  // point of the guard is to stay narrow.
++  const text = "You've hit your session limit · resets 2am (America/Chicago)";
++  assert.ok(detectLimit(text, NOW, MAXW), 'a genuine unquoted banner must still arm');
++});
++
++test('looksLikePercentageUsage flags a "used N%" status line and nothing else', () => {
++  assert.ok(looksLikePercentageUsage("You've used 91% of your session limit"));
++  assert.equal(looksLikePercentageUsage('Claude AI usage limit reached. Try again in 5 hours'), false);
++});
++
++test('looksLikeQuotedNotice recognises backtick, blockquote and grep-prefix forms', () => {
++  assert.ok(looksLikeQuotedNotice('`Claude AI usage limit reached`'), 'backtick-fenced');
++  assert.ok(looksLikeQuotedNotice('> Claude AI usage limit reached'), 'blockquoted');
++  assert.ok(looksLikeQuotedNotice('src/x.ts:12:Claude AI usage limit reached'), 'grep-prefixed');
++  assert.equal(
++    looksLikeQuotedNotice('Claude AI usage limit reached. Try again in 5 hours'),
++    false,
++    'a plain banner is not quoted',
++  );
++});
++
++test('looksLikeQuotedNotice checks each physical line, since normalize() collapses newlines', () => {
++  // A multi-line grep dump where only the second line carries the citation
++  // prefix - the veto must still catch it even though it is not on line one.
++  const text = 'Found 2 matches:\ndocs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
++  assert.ok(looksLikeQuotedNotice(text));
++});
+diff --git a/test/transcriptWatcher.test.ts b/test/transcriptWatcher.test.ts
+index e3da093..3c079dd 100644
+--- a/test/transcriptWatcher.test.ts
++++ b/test/transcriptWatcher.test.ts
+@@ -444,10 +444,142 @@ const overloadLine = (age: number) =>
+ 
+ test('MAX_OVERLOAD_AGE_MS boundary: still comfortably inside the age limit retries', () => {
+   const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
+   assert.ok(out.overload, 'an overload just inside MAX_OVERLOAD_AGE_MS is not yet too old');
+ });
+ 
+ test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () => {
+   const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
+   assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
+ });
++
++// ---------------------------------------------------------------------------
++// Task 3 (synthesis A3): untrusted text that merely LOOKS like a limit
++// banner must not arm a timer. Three real false positives from 2026-09-23:
++// a subagent note quoting a banner, a usage-percentage status line, and a
++// `grep` result quoting a banner. Each is used here verbatim (or, for the
++// grep case, a realistic reconstruction - the brief gives no exact text) as
++// a negative case, alongside a flagged real banner as a positive case.
++// ---------------------------------------------------------------------------
++
++const SUBAGENT_FILE =
++  '/home/u/.claude/projects/c--projects-example/subagents/9f1e2d3c-4b1a-4c9e-8a1e-2a5d6e8c9999.jsonl';
++
++test('a subagent file never arms a limit timer, even quoting a real banner verbatim (real false positive)', () => {
++  // Captured verbatim, 2026-09-23, from a subagent checkpoint note.
++  const line = entry({
++    type: 'assistant',
++    message: { content: '…You have used up your monthly limit. Try again in 3 hours' },
++  });
++  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
++});
++
++test('a subagent file still reports turn-end and overload - only limit detection is skipped', () => {
++  // The veto is scoped to limits: a subagent that hits the limit stops its
++  // parent, whose own transcript records it, but a subagent's turn ending or
++  // failing over is still real information this watcher already reports.
++  const turnEndLine = entry({ type: 'assistant', message: { stop_reason: 'end_turn', content: 'Done.' } });
++  assert.ok(
++    make().inspectLine(turnEndLine, SUBAGENT_FILE).inputNeeded,
++    'turn-end must still be reported for a subagent file',
++  );
++
++  const overloadLine2 = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
++  });
++  assert.ok(
++    make().inspectLine(overloadLine2, SUBAGENT_FILE).overload,
++    'overload must still be reported for a subagent file',
++  );
++});
++
++test('a percentage-usage status line does not arm a timer (real false positive)', () => {
++  // Captured verbatim, 2026-09-23. Non-flagged, non-user entry: the shape
++  // that reaches the untrusted candidate loop today.
++  const line = entry({
++    type: 'assistant',
++    message: { content: "You've used 91% of your session limit · resets 12:40pm" },
++  });
++  assert.equal(make().inspectLine(line, FILE).limit, undefined);
++});
++
++test('the same percentage text still arms once Claude Code flags the entry (positive control)', () => {
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: "You've used 91% of your session limit · resets 12:40pm" },
++  });
++  assert.ok(make().inspectLine(line, FILE).limit, 'a flagged entry is unaffected by the percentage veto');
++});
++
++test('a grep result quoting a banner, inside a tool_result block, does not arm a timer (real false positive)', () => {
++  // Reconstructed: the brief names this false positive but gives no exact
++  // text. `error` (not isApiErrorMessage/rate_limit) makes the entry an
++  // apiError without flagging it as a rate-limit event, so it still reaches
++  // the untrusted candidate loop, same as a genuine failed-tool-call entry
++  // would.
++  const line = entry({
++    type: 'user',
++    error: 'tool execution failed',
++    message: {
++      role: 'user',
++      content: [
++        {
++          type: 'tool_result',
++          tool_use_id: 'toolu_01',
++          content: 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours',
++        },
++      ],
++    },
++  });
++  assert.equal(make().inspectLine(line, FILE).limit, undefined);
++});
++
++test('plain banner wording inside a tool_result block does not arm a timer, even with no quoting marks', () => {
++  // Isolates the structural tool-result veto from the textual grep-prefix
++  // veto: this text has no `%`, no backtick, no `>`, no "file:line:" prefix
++  // at all - only its position inside a tool_result block should stop it.
++  const line = entry({
++    type: 'user',
++    error: 'tool execution failed',
++    message: {
++      content: [
++        { type: 'tool_result', tool_use_id: 'toolu_02', content: 'Claude AI usage limit reached. Try again in 5 hours' },
++      ],
++    },
++  });
++  assert.equal(make().inspectLine(line, FILE).limit, undefined);
++});
++
++test('a grep-style "file:line:" quote in an ordinary assistant message does not arm a timer', () => {
++  // Isolates the textual grep-prefix veto from the structural tool-result
++  // veto: this text is plain assistant content, not inside a tool_result.
++  const line = entry({
++    type: 'assistant',
++    message: { content: 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours' },
++  });
++  assert.equal(make().inspectLine(line, FILE).limit, undefined);
++});
++
++test('plain banner wording under a top-level toolUseResult field does not arm a timer', () => {
++  // Real transcripts carry the tool's raw output under this sibling field,
++  // separate from the message.content tool_result block - Claude Code's own
++  // record of what happened, not a notice it is delivering now.
++  const line = entry({
++    type: 'user',
++    error: 'tool execution failed',
++    toolUseResult: 'Claude AI usage limit reached. Try again in 5 hours',
++    message: { content: 'ok' },
++  });
++  assert.equal(make().inspectLine(line, FILE).limit, undefined);
++});
++
++test('a flagged real banner still arms a timer (positive case)', () => {
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
++  });
++  assert.ok(make().inspectLine(line, FILE).limit);
++});

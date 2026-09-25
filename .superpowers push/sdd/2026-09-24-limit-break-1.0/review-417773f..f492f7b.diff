@@ -1,0 +1,1054 @@
+# Review package: 417773f..f492f7b
+
+## Commits
+f492f7b test: cover claim release on a failed MANUAL launch too
+250bd58 feat: wire the cross-window claim into scheduler.onFire and Resume Now
+62d857f fix: keep the first schedule on a same-reset re-detection
+62c309e test: strengthen claims.ts tests for mutation coverage of every guard
+af5d44e feat: add src/claims.ts, a filesystem claim for cross-window resume dedupe
+
+## Files changed
+ src/claims.ts          | 210 ++++++++++++++++++++++++++++++++++++++++++
+ src/extension.ts       |  61 ++++++++++++-
+ src/scheduler.ts       |  30 ++++--
+ test/claims.test.ts    | 205 +++++++++++++++++++++++++++++++++++++++++
+ test/extension.test.ts | 243 +++++++++++++++++++++++++++++++++++++++++++++++++
+ test/scheduler.test.ts |  56 ++++++++++++
+ 6 files changed, 795 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/src/claims.ts b/src/claims.ts
+new file mode 100644
+index 0000000..29f4c5f
+--- /dev/null
++++ b/src/claims.ts
+@@ -0,0 +1,210 @@
++import * as os from 'node:os';
++import * as path from 'node:path';
++import type { Logger } from './log';
++
++/**
++ * A machine-wide, filesystem-based claim so that only one VS Code window
++ * launches a resume for a given usage-limit reset.
++ *
++ * Root cause (2026-09-24): every VS Code window runs its own copy of the
++ * extension, and with `watchScope: machine` every copy watches every
++ * transcript. Two windows can detect the same limit within milliseconds of
++ * each other and each schedule their own resume with their own jitter -
++ * Task 2's holder check (holderPolicy.ts) catches a second fire MINUTES
++ * later, once the first child shows up in `claude agents`, but it cannot
++ * catch two windows firing a second or two apart, before that.
++ *
++ * A plain file, not a locking library: `fs.openSync(path, 'wx')` fails
++ * atomically when the file already exists, which is all a "first one wins"
++ * claim needs. No process needs to be told when it is done with the claim
++ * either - a claim just ages out (see the 1h staleness check here, and the
++ * 24h sweep in cleanupStaleClaims), so a window that crashes mid-resume
++ * cannot wedge every future attempt shut.
++ */
++
++export type ClaimResult = 'claimed' | 'taken';
++
++/** The subset of node:fs this module needs, injected so tests use a real temp directory instead of the machine-wide one, and can fake an unexpected error. */
++export interface ClaimFs {
++  mkdirSync(p: string, options: { recursive: true }): string | undefined;
++  openSync(p: string, flags: string): number;
++  writeSync(fd: number, data: string): number;
++  closeSync(fd: number): void;
++  statSync(p: string): { mtimeMs: number };
++  unlinkSync(p: string): void;
++  readdirSync(p: string): string[];
++}
++
++/** A claim younger than this is still good; older counts as abandoned by a window that never released it (crash, force-quit). */
++const STALE_MS = 60 * 60 * 1000;
++
++/** How long a claim file is kept around at all, swept up on activation. Generous next to STALE_MS - this is disk-space hygiene, not a correctness boundary. */
++const CLEANUP_MS = 24 * 60 * 60 * 1000;
++
++const CLAIM_SUFFIX = '.claim';
++
++const noopLog: Logger = { info() {}, warn() {}, error() {} };
++
++/** Where claim files live: machine-wide, shared by every window and profile of the same OS user - deliberately outside any per-window or per-workspace store. */
++export function claimsDir(): string {
++  return path.join(os.tmpdir(), 'claude-limit-break', 'claims');
++}
++
++/**
++ * The key naming the reset a job belongs to - identical across every window
++ * watching the same account, so their independent claim attempts collide on
++ * purpose.
++ *
++ * A limit job's key is its un-jittered deadline (`baseResumeAtMs`): every
++ * window parses the same "Try again in 5 hours" notice into the same
++ * instant, before each window's own random padding is added, so this is
++ * stable no matter how differently each window's jitter rolled.
++ *
++ * An overload job has no stated reset time at all - "the jitter *is* the
++ * backoff" (policy.ts) - so there is no shared instant to key on. Instead the
++ * moment the job actually fires (`resumeAtMs`) is floored to a 10-minute
++ * bucket: two windows that detected the same overload and independently
++ * rolled close-enough backoffs land in the same bucket and collide; windows
++ * whose backoffs happen to diverge by more than that do not, which is the
++ * best this can do without a shared deadline to agree on.
++ */
++export function claimKeyFor(job: {
++  sessionId: string;
++  baseResumeAtMs: number;
++  resumeAtMs: number;
++  reason: 'limit' | 'overload';
++}): string {
++  if (job.reason === 'overload') {
++    return `${job.sessionId}-overload-${Math.floor(job.resumeAtMs / 600_000)}`;
++  }
++  return `${job.sessionId}-${job.baseResumeAtMs}`;
++}
++
++function claimPath(dir: string, key: string): string {
++  return path.join(dir, `${key}${CLAIM_SUFFIX}`);
++}
++
++/**
++ * One attempt at `fs.openSync(file, 'wx')`.
++ *
++ * - Succeeds: the claim is ours. 'claimed'.
++ * - Fails with EEXIST and the existing file is fresh (under 1h old, per
++ *   STALE_MS): someone else already holds it. 'taken'.
++ * - Fails with EEXIST and the existing file is stale: it is unlinked here so
++ *   the caller can retry the open. 'retry'.
++ * - Fails any other way (permissions, a full disk, a bad path): fail open
++ *   (Goal 2 - never block a resume nobody is coming back to answer for),
++ *   logged so the failure is not silent. 'claimed'.
++ */
++function attempt(file: string, key: string, nowMs: number, fs: ClaimFs, log: Logger): ClaimResult | 'retry' {
++  let fd: number;
++  try {
++    fd = fs.openSync(file, 'wx');
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
++      log.warn(`Claim ${key} could not be created (${String(err)}); resuming as if it were ours.`);
++      return 'claimed';
++    }
++    let mtimeMs: number;
++    try {
++      mtimeMs = fs.statSync(file).mtimeMs;
++    } catch (statErr) {
++      log.warn(`Claim ${key} exists but could not be inspected (${String(statErr)}); resuming as if it were ours.`);
++      return 'claimed';
++    }
++    if (nowMs - mtimeMs < STALE_MS) {
++      return 'taken';
++    }
++    try {
++      fs.unlinkSync(file);
++    } catch (unlinkErr) {
++      log.warn(`Stale claim ${key} could not be removed (${String(unlinkErr)}); resuming as if it were ours.`);
++      return 'claimed';
++    }
++    return 'retry';
++  }
++  try {
++    fs.writeSync(fd, `${process.pid} ${nowMs}`);
++  } finally {
++    fs.closeSync(fd);
++  }
++  return 'claimed';
++}
++
++/**
++ * Claim `key` for this process. See the module doc for why this exists and
++ * why a plain file is enough.
++ *
++ * `dir` and `fs` are both parameters rather than fixed to `claimsDir()` and
++ * real `node:fs` - dir so tests use a throwaway temp directory instead of the
++ * real machine-wide one, `fs` so a test can simulate the "any other
++ * filesystem error" branch without actually breaking the filesystem.
++ *
++ * Retries at most once, on a stale takeover: if the retry itself hits
++ * another 'retry' (another process recreated the file between the unlink and
++ * the second open - vanishingly unlikely, but not impossible), this fails
++ * open rather than looping.
++ */
++export function claimResume(dir: string, key: string, nowMs: number, fs: ClaimFs, log: Logger = noopLog): ClaimResult {
++  fs.mkdirSync(dir, { recursive: true });
++  const file = claimPath(dir, key);
++  const first = attempt(file, key, nowMs, fs, log);
++  if (first !== 'retry') {
++    return first;
++  }
++  const second = attempt(file, key, nowMs, fs, log);
++  return second === 'retry' ? 'claimed' : second;
++}
++
++/**
++ * Give up a claim this process took out. Called only when this window did
++ * not end up launching a resume off it - a failed launch, or the Task 2
++ * holder decision declining - so a later attempt (another window, or a
++ * manual retry) is not blocked by a claim nothing is going to act on. A
++ * successful launch never calls this; that claim ages out on its own via
++ * cleanupStaleClaims.
++ *
++ * Missing file is not an error - the claim may already have expired, or
++ * never existed (a manual resume that bypassed the claim check entirely).
++ */
++export function releaseClaim(dir: string, key: string, fs: ClaimFs, log: Logger = noopLog): void {
++  try {
++    fs.unlinkSync(claimPath(dir, key));
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
++      log.warn(`Could not release claim ${key} (${String(err)}).`);
++    }
++  }
++}
++
++/**
++ * Delete claim files older than 24h. Run once on activation - disk hygiene
++ * for a machine-wide directory nothing else ever cleans, not a correctness
++ * mechanism (STALE_MS, an order of magnitude shorter, is what keeps a claim
++ * from blocking anything for long).
++ *
++ * A missing directory (nothing has ever claimed anything on this machine) is
++ * not an error. Only `*.claim` files are touched - anything else in the
++ * directory is left alone, though nothing else is expected to be there.
++ */
++export function cleanupStaleClaims(dir: string, nowMs: number, fs: ClaimFs, log: Logger = noopLog): void {
++  let entries: string[];
++  try {
++    entries = fs.readdirSync(dir);
++  } catch {
++    return;
++  }
++  for (const name of entries) {
++    if (!name.endsWith(CLAIM_SUFFIX)) {
++      continue;
++    }
++    const file = path.join(dir, name);
++    try {
++      if (nowMs - fs.statSync(file).mtimeMs >= CLEANUP_MS) {
++        fs.unlinkSync(file);
++      }
++    } catch (err) {
++      log.warn(`Could not clean up claim file ${name} (${String(err)}).`);
++    }
++  }
++}
+diff --git a/src/extension.ts b/src/extension.ts
+index 89178a3..6cea6b3 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -39,20 +39,21 @@ import {
+   classifyHolder,
+   busyFolderPeers,
+   type HolderRecord,
+ } from './liveSessions';
+ import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
+ import { autoContinueEnabled } from './autoContinue';
+ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
+ import { selectClaudePanelTab, type WebviewTab } from './panelTab';
+ import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
+ import { execFileSync } from 'node:child_process';
++import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
+ 
+ const NS = 'claudeLimitBuster';
+ 
+ /**
+  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
+  * the scheduler's own `claudeLimitBuster.pending`: these have already fired,
+  * and putting them back there would leave the scheduler counting down to a
+  * deadline that has passed.
+  */
+ const READY_KEY = 'claudeLimitBuster.ready';
+@@ -86,20 +87,26 @@ export function isInsideWorkspace(cwd: string | undefined, folders: readonly str
+     const root = key(folder);
+     return target === root || target.startsWith(root + path.sep);
+   });
+ }
+ 
+ export function activate(context: vscode.ExtensionContext): void {
+   const channel = vscode.window.createOutputChannel('Claude Limit Buster');
+   const log = createLogger('limit-buster', (line) => channel.appendLine(line));
+   const settings = () => readSettings(vscode.workspace.getConfiguration(NS));
+ 
++  // Task 10: sweep claim files this window's own crashes or a stale race left
++  // behind. Disk hygiene, not a correctness step - claimResume's own 1h
++  // staleness check is what keeps a claim from blocking anything for long;
++  // this just keeps the machine-wide directory from growing forever.
++  cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
++
+   const scheduler = new ResumeScheduler(context.globalState, log);
+   const status = new CountdownStatusBar();
+   const watcher = new TranscriptWatcher(
+     () => settings().maxWaitHours,
+     () => settings().transcriptPollSeconds,
+     log,
+     // The watcher discards out-of-scope entries before parsing them, rather
+     // than every consumer filtering afterwards (#2). Read per call, so
+     // changing the setting or opening a folder takes effect without a reload.
+     () => ({
+@@ -768,20 +775,36 @@ export function activate(context: vscode.ExtensionContext): void {
+       if (s.alertSound) {
+         playAlertSound({ file: s.alertSoundFile });
+       }
+       void handleStalePanel(hit);
+     }),
+     scheduler.onChange((job) => {
+       refreshTrust(job);
+       status.update(job, scheduler.jobs.length, settings().statusBar);
+     }),
+     scheduler.onFire((job) => {
++      // Task 10: claim this reset before anything else. Every window watching
++      // this account can independently detect and schedule the SAME reset -
++      // watchScope: machine means every copy of the extension watches every
++      // transcript - and two windows have been seen firing within a second or
++      // two of each other, too close for Task 2's holder check (which reads
++      // `claude agents`) to have caught the first window's child yet. A
++      // machine-wide file claim is first-past-the-post across windows in a way
++      // an in-memory guard inside one extension host cannot be. 'taken' means
++      // some other window already won this race: drop entirely, before the
++      // autoResume split below, so the off-autoResume path cannot become a
++      // backdoor around a lost claim either.
++      const claimKey = claimKeyFor(job);
++      if (claimResume(claimsDir(), claimKey, Date.now(), fs, log) === 'taken') {
++        log.info(`Resume for ${job.sessionId.slice(0, 8)} claimed by another window; dropping.`);
++        return;
++      }
+       const s = settings();
+       if (!s.autoResume) {
+         rememberReady(job);
+         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
+         void Promise.resolve(
+           vscode.window.showInformationMessage(
+             `Claude Limit Buster: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
+             'Resume Now',
+           ),
+         ).then(async (choice) => {
+@@ -850,20 +873,24 @@ export function activate(context: vscode.ExtensionContext): void {
+               `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+             );
+             return;
+           }
+           if (!resume(job)) {
+             rememberReady(job);
+           }
+         });
+       }
+       if (!decision.resume) {
++        // This window is not launching anything automatically - the claim it
++        // just took must not sit there blocking another window (or a later
++        // manual retry) for up to an hour over a resume nobody is making.
++        releaseClaim(claimsDir(), claimKey, fs, log);
+         return;
+       }
+       // A second, independent controller ruling: on EVERY resume we are
+       // about to launch here - whether nobody is on this session at all, or
+       // (fix round 1, scope ruling) it is an idle panel we are resuming
+       // anyway - a DIFFERENT session may be busy or waiting in the same
+       // folder. The extension cannot message that session itself
+       // (constraint #3 - never write into a session it did not create), so
+       // instead it tells the session it is ABOUT to create: buildResumePrompt
+       // appends a sentence naming the peer(s) and asking the resumed model to
+@@ -892,54 +919,80 @@ export function activate(context: vscode.ExtensionContext): void {
+         );
+       }
+       // The scheduler already cleared this job before firing (its own
+       // re-entrancy guard, see consume()), so if the launch never started this
+       // is the only place still holding it - without rememberReady it would
+       // simply be gone. The ORIGINAL job (unmodified prompt) is what gets
+       // remembered: a later manual resume should not carry a coordination
+       // sentence tied to a folder-busy snapshot from this particular fire.
+       if (!resume(resumeJob)) {
+         rememberReady(job);
++        // A resume that never launched must not hold the claim: a manual
++        // retry (which bypasses the claim anyway) is not what this protects -
++        // a LATER automatic attempt, from this window's own retry path or
++        // another window's, is.
++        releaseClaim(claimsDir(), claimKey, fs, log);
+       }
+     }),
+     vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
+       // Exactly one job moves, and only its own source is touched. Cancelling
+       // the scheduler while resuming a ready job - or dropping a ready job
+       // while resuming the scheduler's - would throw away work nobody asked to
+       // discard.
+       //
+       // Each branch below removes the job from its source only once resume()
+       // reports the launch actually started. resume() can fail (missing cwd,
+       // no claude executable), and doing the removal first - as this used to -
+       // left a failed resume with no path back to the job.
+       //
+       // confirmManualResume runs first in both branches: a live holder gets a
+       // modal warning naming it before anything is claimed or launched (#2).
++      //
++      // Task 10: this is a MANUAL resume - the user's own explicit click or
++      // command - so it bypasses whatever claimResume reports (another
++      // window's claim, even a fresh one, is not a reason to refuse someone
++      // who is looking right at this). It still calls claimResume, purely for
++      // the write: the original claim from this job's own fire may have gone
++      // stale by now (the user did not answer right away), and refreshing it
++      // here is what stops a different window's own automatic attempt from
++      // also firing while this launch is in flight.
+       const counting = scheduler.current;
+       if (counting) {
+         // Only this session's job: others may still be counting down, and
+         // "Resume Now" moves exactly one.
+-        if ((await confirmManualResume(counting)) && resume(counting)) {
+-          scheduler.cancel(counting.sessionId);
++        if (await confirmManualResume(counting)) {
++          const key = claimKeyFor(counting);
++          claimResume(claimsDir(), key, Date.now(), fs, log);
++          if (resume(counting)) {
++            scheduler.cancel(counting.sessionId);
++          } else {
++            releaseClaim(claimsDir(), key, fs, log);
++          }
+         }
+         return;
+       }
+       // Oldest first: the session that has been waiting longest goes first.
+       // Peeked, not shifted, so a failed resume leaves it exactly where it was
+       // instead of needing to be spliced back in.
+       const ready = readyJobs[0];
+       if (!ready) {
+         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
+         return;
+       }
+-      if ((await confirmManualResume(ready)) && resume(ready)) {
+-        forgetReady(ready.sessionId);
++      if (await confirmManualResume(ready)) {
++        const key = claimKeyFor(ready);
++        claimResume(claimsDir(), key, Date.now(), fs, log);
++        if (resume(ready)) {
++          forgetReady(ready.sessionId);
++        } else {
++          releaseClaim(claimsDir(), key, fs, log);
++        }
+       }
+     }),
+     vscode.commands.registerCommand(`${NS}.cancel`, () => {
+       // "Cancel Pending Resume" means all of it, but say how much it threw
+       // away: a job dropped from readyJobs has no other trace.
+       if (readyJobs.length > 0) {
+         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
+         readyJobs.length = 0;
+         persistReady();
+       }
+diff --git a/src/scheduler.ts b/src/scheduler.ts
+index 00fbc1f..88d3bc2 100644
+--- a/src/scheduler.ts
++++ b/src/scheduler.ts
+@@ -105,29 +105,47 @@ export class ResumeScheduler {
+   get msRemaining(): number {
+     const soonest = this.current;
+     return soonest ? soonest.resumeAtMs - Date.now() : 0;
+   }
+ 
+   /**
+    * Arm a resume for the job's session. A later deadline never replaces an
+    * earlier one still counting down for the same session: repeated limit
+    * notices for one cooldown would otherwise keep pushing that resume further
+    * out. Deadlines belonging to other sessions are never compared at all.
++   *
++   * Task 10 fix (2026-09-24): `baseResumeAtMs` - the un-jittered reset - is
++   * also compared, not just `resumeAtMs`. planResume rolls a fresh random
++   * jitter on every detection, so a REPEAT notice for the identical reset
++   * produces a different `resumeAtMs` each time; a re-detection that happened
++   * to re-roll a SMALLER jitter has an earlier `resumeAtMs` than the job
++   * already scheduled, which slipped past the check above (only a strictly
++   * LATER resumeAtMs was ever blocked) and replaced it - on 2026-09-24 this
++   * moved a window's resume from 2:27:19 to 2:20:11 on a re-detection. Same
++   * `baseResumeAtMs` means the same reset no matter which way the new jitter
++   * roll moved it, so it is dropped either way, keeping the first schedule.
+    */
+   schedule(job: PendingJob): boolean {
+     const existing = this.pending.get(job.sessionId);
+-    if (existing && existing.resumeAtMs >= Date.now() && job.resumeAtMs > existing.resumeAtMs) {
+-      this.log.info(
+-        `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
+-          `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
+-      );
+-      return false;
++    if (existing && existing.resumeAtMs >= Date.now()) {
++      const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
++      if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
++        this.log.info(
++          sameReset
++            ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +
++                `${new Date(job.baseResumeAtMs).toISOString()}); keeping the resume already scheduled for ` +
++                `${new Date(existing.resumeAtMs).toISOString()}.`
++            : `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
++                `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
++        );
++        return false;
++      }
+     }
+     this.pending.set(job.sessionId, job);
+     this.persist();
+     const jitter = job.jitterMs > 0 ? `, +${Math.round(job.jitterMs / 60_000)}m random delay` : '';
+     this.log.info(
+       `Resume scheduled for ${new Date(job.resumeAtMs).toLocaleString()} ` +
+         `(reason=${job.reason}, sessionId=${job.sessionId}${jitter}, cwd=${job.cwd ?? 'n/a'})`,
+     );
+     this.startTicking();
+     this.onChangeEmitter.fire(this.current);
+diff --git a/test/claims.test.ts b/test/claims.test.ts
+new file mode 100644
+index 0000000..726f9d9
+--- /dev/null
++++ b/test/claims.test.ts
+@@ -0,0 +1,205 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import * as fs from 'node:fs';
++import * as os from 'node:os';
++import * as path from 'node:path';
++import { createLogger } from '../src/log';
++import {
++  claimResume,
++  releaseClaim,
++  cleanupStaleClaims,
++  claimKeyFor,
++  claimsDir,
++  type ClaimFs,
++} from '../src/claims';
++
++const HOUR_MS = 60 * 60 * 1000;
++const DAY_MS = 24 * HOUR_MS;
++
++/** A fresh real directory per test, so tests never touch the real machine-wide claims dir. */
++function tempDir(): string {
++  return fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-'));
++}
++
++function logger() {
++  const lines: string[] = [];
++  return { log: createLogger('t', (l) => lines.push(l)), lines };
++}
++
++// --- claimResume -------------------------------------------------------------
++
++test('claiming a free key succeeds and writes the pid and time', () => {
++  const dir = tempDir();
++  const now = Date.now();
++  assert.equal(claimResume(dir, 'sess-1', now, fs), 'claimed');
++  const body = fs.readFileSync(path.join(dir, 'sess-1.claim'), 'utf8');
++  assert.match(body, new RegExp(`^${process.pid} ${now}`));
++});
++
++test('two claimers on one key: exactly one gets claimed', () => {
++  // The whole point of this module: two VS Code windows racing to claim the
++  // same reset must not both win.
++  const dir = tempDir();
++  const now = Date.now();
++  const first = claimResume(dir, 'sess-1', now, fs);
++  const second = claimResume(dir, 'sess-1', now, fs);
++  assert.deepEqual([first, second].sort(), ['claimed', 'taken']);
++});
++
++test('a claim older than 1h is stale: it is unlinked and retried, succeeding', () => {
++  const dir = tempDir();
++  const file = path.join(dir, 'sess-1.claim');
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(file, '999 0');
++  const oldMtime = new Date(Date.now() - HOUR_MS - 1000);
++  fs.utimesSync(file, oldMtime, oldMtime);
++  const now = Date.now();
++  assert.equal(claimResume(dir, 'sess-1', now, fs), 'claimed');
++  const body = fs.readFileSync(file, 'utf8');
++  assert.match(body, new RegExp(`^${process.pid} ${now}`), 'the stale claim was replaced with a fresh one');
++});
++
++test('a claim under 1h old is honoured, not treated as stale', () => {
++  const dir = tempDir();
++  const file = path.join(dir, 'sess-1.claim');
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(file, '999 0');
++  const recentMtime = new Date(Date.now() - HOUR_MS + 60_000);
++  fs.utimesSync(file, recentMtime, recentMtime);
++  assert.equal(claimResume(dir, 'sess-1', Date.now(), fs), 'taken');
++});
++
++test('an unexpected filesystem error fails open: claimed, and logged', () => {
++  const dir = tempDir();
++  const { log, lines } = logger();
++  const brokenFs: ClaimFs = {
++    ...fs,
++    openSync: () => {
++      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
++    },
++  };
++  assert.equal(claimResume(dir, 'sess-1', Date.now(), brokenFs, log), 'claimed');
++  assert.ok(lines.length > 0, 'the fail-open path must log something');
++});
++
++test('claimResume creates the claims directory when it does not exist yet', () => {
++  const dir = path.join(tempDir(), 'nested', 'claims');
++  assert.equal(claimResume(dir, 'sess-1', Date.now(), fs), 'claimed');
++  assert.ok(fs.existsSync(path.join(dir, 'sess-1.claim')));
++});
++
++// --- releaseClaim --------------------------------------------------------
++
++test('releaseClaim removes an existing claim, freeing the key', () => {
++  const dir = tempDir();
++  const now = Date.now();
++  assert.equal(claimResume(dir, 'sess-1', now, fs), 'claimed');
++  releaseClaim(dir, 'sess-1', fs);
++  assert.equal(claimResume(dir, 'sess-1', now, fs), 'claimed', 'released claim must be claimable again');
++});
++
++test('releaseClaim on a claim that does not exist is a silent no-op', () => {
++  const dir = tempDir();
++  const { log, lines } = logger();
++  releaseClaim(dir, 'never-claimed', fs, log);
++  assert.equal(lines.length, 0, 'a missing claim is expected, not a failure worth logging');
++});
++
++test('releaseClaim logs when the underlying error is something other than "missing"', () => {
++  const dir = tempDir();
++  const { log, lines } = logger();
++  const brokenFs: ClaimFs = {
++    ...fs,
++    unlinkSync: () => {
++      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
++    },
++  };
++  assert.doesNotThrow(() => releaseClaim(dir, 'sess-1', brokenFs, log));
++  assert.ok(lines.length > 0, 'an unexpected release failure must be logged');
++});
++
++test('claimResume retries a stale claim exactly once, then fails open rather than looping', () => {
++  // A pathological fs that reports EEXIST + a stale mtime forever, so every
++  // attempt wants to retry. This must still terminate after one retry.
++  const dir = tempDir();
++  let opens = 0;
++  const pathologicalFs: ClaimFs = {
++    ...fs,
++    openSync: () => {
++      opens += 1;
++      throw Object.assign(new Error('exists'), { code: 'EEXIST' });
++    },
++    statSync: () => ({ mtimeMs: 0 }),
++    unlinkSync: () => {},
++  };
++  assert.equal(claimResume(dir, 'sess-1', Date.now(), pathologicalFs), 'claimed');
++  assert.equal(opens, 2, 'exactly one retry: two open attempts total, never more');
++});
++
++// --- cleanupStaleClaims ----------------------------------------------------
++
++test('cleanupStaleClaims removes claim files older than 24h and keeps newer ones', () => {
++  const dir = tempDir();
++  fs.mkdirSync(dir, { recursive: true });
++  const old = path.join(dir, 'old.claim');
++  const fresh = path.join(dir, 'fresh.claim');
++  fs.writeFileSync(old, '1 0');
++  fs.writeFileSync(fresh, '2 0');
++  const oldMtime = new Date(Date.now() - DAY_MS - 60_000);
++  fs.utimesSync(old, oldMtime, oldMtime);
++  cleanupStaleClaims(dir, Date.now(), fs);
++  assert.equal(fs.existsSync(old), false, 'a claim older than 24h must be removed');
++  assert.equal(fs.existsSync(fresh), true, 'a claim under 24h must be kept');
++});
++
++test('cleanupStaleClaims on a directory that does not exist yet does nothing and does not throw', () => {
++  const dir = path.join(tempDir(), 'never-created');
++  assert.doesNotThrow(() => cleanupStaleClaims(dir, Date.now(), fs));
++});
++
++test('cleanupStaleClaims ignores files that are not claim files', () => {
++  const dir = tempDir();
++  fs.mkdirSync(dir, { recursive: true });
++  const other = path.join(dir, 'not-a-claim.txt');
++  fs.writeFileSync(other, 'x');
++  const oldMtime = new Date(Date.now() - DAY_MS - 60_000);
++  fs.utimesSync(other, oldMtime, oldMtime);
++  cleanupStaleClaims(dir, Date.now(), fs);
++  assert.equal(fs.existsSync(other), true, 'a non-.claim file must be left alone');
++});
++
++// --- claimKeyFor -----------------------------------------------------------
++
++test('claimKeyFor for a limit job is sessionId-baseResumeAtMs, the un-jittered reset', () => {
++  const key = claimKeyFor({
++    sessionId: 'abc-123',
++    baseResumeAtMs: 1_000_000,
++    resumeAtMs: 1_500_000,
++    reason: 'limit',
++  });
++  assert.equal(key, 'abc-123-1000000');
++});
++
++test('claimKeyFor for an overload job buckets the fire time into 10-minute windows', () => {
++  const key = claimKeyFor({
++    sessionId: 'abc-123',
++    baseResumeAtMs: 1_000_000,
++    resumeAtMs: 6_000_000,
++    reason: 'overload',
++  });
++  assert.equal(key, `abc-123-overload-${Math.floor(6_000_000 / 600_000)}`);
++});
++
++test('claimKeyFor gives two overload jobs in the same 10-minute bucket the same key', () => {
++  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 600_100, reason: 'overload' });
++  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 609_999, reason: 'overload' });
++  assert.equal(a, b);
++});
++
++// --- claimsDir ---------------------------------------------------------------
++
++test('claimsDir is machine-wide: under the OS temp dir, not per-workspace', () => {
++  const dir = claimsDir();
++  assert.ok(dir.startsWith(os.tmpdir()));
++  assert.match(dir, /claude-limit-break[\\/]claims$/);
++});
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index a56a1be..d6ab0b3 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -191,20 +191,45 @@ stubModule('./trust', {
+   ...(require('../src/trust') as Record<string, unknown>),
+   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
+   readClaudeUserConfig: () => {
+     trustReads.count += 1;
+     return undefined;
+   },
+   defaultClaudeConfigPath: () => trustConfigPath,
+   trustedSpelling: (cwd: string) => trustedSpellingFor.get(cwd),
+ });
+ 
++/**
++ * The cross-window claim (Task 10). `claimResume`/`releaseClaim` are faked so
++ * no test here ever touches the real machine-wide claims directory
++ * (os.tmpdir()/claude-limit-break/claims, from claimsDir()) - the real
++ * filesystem behaviour is covered end to end in claims.test.ts. Defaults to
++ * 'claimed', so every existing test above this section - none of which cares
++ * about cross-window dedupe - sees exactly the behaviour it always had:
++ * nothing is ever "taken".
++ */
++let fakeClaimResult: 'claimed' | 'taken' = 'claimed';
++const claimCalls: { dir: string; key: string }[] = [];
++const releasedKeys: string[] = [];
++
++stubModule('./claims', {
++  ...(require('../src/claims') as Record<string, unknown>),
++  claimResume: (dir: string, key: string) => {
++    claimCalls.push({ dir, key });
++    return fakeClaimResult;
++  },
++  releaseClaim: (_dir: string, key: string) => {
++    releasedKeys.push(key);
++  },
++  cleanupStaleClaims: () => {},
++});
++
+ // Required, not imported: the stubs above must be registered first, and a
+ // compiled `import` would hoist its require() above them.
+ const { activate, isInsideWorkspace } =
+   require('../src/extension') as typeof import('../src/extension');
+ 
+ // A path with a separator and no .cmd/.bat/.ps1 extension resolves as-is on
+ // every platform, so the resume path never touches PATH or the filesystem.
+ const LAUNCHER = '/opt/claude/bin/claude';
+ const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
+ /** The pid the fake terminal reports, i.e. the resume this extension launched. */
+@@ -1964,10 +1989,228 @@ test('the off-autoResume "Resume Now" notification button also warns modally for
+     assert.ok(modal, 'the notification button is just as much a manual resume as the command');
+     assert.equal(vscodeFake.terminals.length, 0, 'must not resume before the modal is answered');
+     modal.answer('Resume Anyway');
+     await flush();
+     assert.equal(vscodeFake.terminals.length, 1);
+   } finally {
+     clearHolders();
+     teardown(ctx);
+   }
+ });
++
++// ---------------------------------------------------------------------------
++// Task 10: cross-window claim. `fakeClaimResult`/`claimCalls`/`releasedKeys`
++// stand in for the real src/claims.ts, stubbed above so nothing here touches
++// the real machine-wide claims directory. Defaults to 'claimed', so every
++// test above this section sees exactly the behaviour it always had.
++// ---------------------------------------------------------------------------
++
++test('scheduler.onFire drops a job whose claim is already taken by another window', async () => {
++  resetVscodeFake();
++  vscodeFake.config = {
++    autoResume: true,
++    claudeCommand: LAUNCHER,
++    randomDelayMinMinutes: 0,
++    randomDelayMaxMinutes: 0,
++  };
++  fakeClaimResult = 'taken';
++  claimCalls.length = 0;
++  const job = pastJob();
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', job]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(
++      vscodeFake.terminals.length,
++      0,
++      'another window already claimed this reset; this window must not launch',
++    );
++    assert.equal(
++      vscodeFake.info.filter((m) => m.items.includes('Resume Now') || m.items.includes('Resume in Terminal Anyway'))
++        .length,
++      0,
++      'a taken claim drops silently - no Resume offer at all, not even the off-autoResume one',
++    );
++    assert.ok(
++      claimCalls.some((c) => c.key === `${SESSION}-${job.baseResumeAtMs}`),
++      `the claim must have been attempted with the reset-scoped key; saw ${JSON.stringify(claimCalls)}`,
++    );
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.ok(
++      vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
++      'a taken claim must not be remembered for manual resume either',
++    );
++  } finally {
++    fakeClaimResult = 'claimed';
++    teardown(ctx);
++  }
++});
++
++test('a fired job whose claim was just taken is not remembered even with autoResume off', async () => {
++  // The claim check runs before the autoResume branch splits, so it applies
++  // uniformly - the off-autoResume "wait for Resume Now" path must not
++  // become a backdoor around a lost claim race either.
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  fakeClaimResult = 'taken';
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(offers().length, 0, 'no Resume Now offer either - this window lost the race entirely');
++  } finally {
++    fakeClaimResult = 'claimed';
++    teardown(ctx);
++  }
++});
++
++test('a failed automatic launch releases its claim, so a later attempt is not blocked', async () => {
++  resetVscodeFake();
++  vscodeFake.config = {
++    autoResume: true,
++    claudeCommand: LAUNCHER,
++    randomDelayMinMinutes: 0,
++    randomDelayMaxMinutes: 0,
++  };
++  fakeClaimResult = 'claimed';
++  releasedKeys.length = 0;
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    const watcher = FakeWatcher.latest;
++    assert.ok(watcher, 'activate must have constructed a watcher');
++    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
++    assert.ok(
++      releasedKeys.length > 0,
++      `a failed launch must release its own claim; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('the Task 2 holder decision declining a resume releases the claim too', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeClaimResult = 'claimed';
++  releasedKeys.length = 0;
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: a busy panel must have declined the resume');
++    assert.ok(
++      releasedKeys.length > 0,
++      `declining to resume must release the claim; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('resumeNow bypasses an existing claim (the user\'s explicit intent) but still writes one', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeClaimResult = 'taken';
++  claimCalls.length = 0;
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
++  start(ctx);
++  try {
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.equal(
++      vscodeFake.terminals.length,
++      1,
++      'a manual resume must launch even though the claim reports taken',
++    );
++    assert.ok(
++      claimCalls.length > 0,
++      'resumeNow must still attempt to write/refresh a claim, so another window does not also fire',
++    );
++  } finally {
++    fakeClaimResult = 'claimed';
++    teardown(ctx);
++  }
++});
++
++test('resumeNow on an already-fired, remembered job also bypasses but rewrites its claim', async () => {
++  resetVscodeFake();
++  vscodeFake.config = manualConfig();
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    const watcher = FakeWatcher.latest;
++    assert.ok(watcher, 'activate must have constructed a watcher');
++    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
++    await oneTick();
++    assert.ok(offers()[0], 'setup: the job must have fired and been offered');
++
++    // Simulate the original claim from firing having gone stale (the user
++    // waited) and another window since taking it, by flipping the fake after
++    // the fire - resumeNow must still proceed.
++    fakeClaimResult = 'taken';
++    claimCalls.length = 0;
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.equal(vscodeFake.terminals.length, 1, 'the ready-list manual resume must also bypass a taken claim');
++    assert.ok(claimCalls.length > 0, 'it must still attempt to refresh the claim');
++  } finally {
++    fakeClaimResult = 'claimed';
++    teardown(ctx);
++  }
++});
++
++test('a failed manual launch on the counting-down job releases the claim it just wrote', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeClaimResult = 'claimed';
++  releasedKeys.length = 0;
++  // futureJob()'s deadline has not arrived, so it stays the scheduler's
++  // `current` job - the counting-down branch of resumeNow - rather than
++  // firing through onFire. Its cwd is pointed at a folder that does not
++  // exist, so resume() itself fails, deterministically.
++  const missingCwdJob = { ...futureJob(), cwd: MISSING_CWD };
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', missingCwdJob]]));
++  start(ctx);
++  try {
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
++    assert.ok(
++      releasedKeys.length > 0,
++      `a failed manual launch on the counting-down job must release its claim; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('a failed manual launch on a ready (already-fired) job releases the claim it just wrote', async () => {
++  resetVscodeFake();
++  vscodeFake.config = manualConfig();
++  fakeClaimResult = 'claimed';
++  releasedKeys.length = 0;
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    const watcher = FakeWatcher.latest;
++    assert.ok(watcher, 'activate must have constructed a watcher');
++    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
++    await oneTick();
++    assert.ok(offers()[0], 'setup: the job must have fired and been offered for manual resume');
++    releasedKeys.length = 0;
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
++    assert.ok(
++      releasedKeys.length > 0,
++      `a failed manual launch on a ready job must release its claim; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
+diff --git a/test/scheduler.test.ts b/test/scheduler.test.ts
+index 7cb16db..a9cde03 100644
+--- a/test/scheduler.test.ts
++++ b/test/scheduler.test.ts
+@@ -220,10 +220,66 @@ test('cancelling one session leaves the others counting down', (t) => {
+ test('cancel with no session named clears every pending job', (t) => {
+   const s = new ResumeScheduler(memento(), silent);
+   t.after(() => s.dispose());
+   const now = Date.now();
+   s.schedule(jobFor(SESSION_A, now + 60_000));
+   s.schedule(jobFor(SESSION_B, now + 120_000));
+   s.cancel();
+   assert.deepEqual(s.jobs, []);
+   assert.equal(s.current, undefined);
+ });
++
++// --- Same-reset re-detection (Task 10) --------------------------------------
++//
++// planResume rolls a fresh random jitter on every detection (randomDelay.ts),
++// so a repeated "usage limit" notice for the SAME un-jittered reset
++// (baseResumeAtMs) produces a DIFFERENT resumeAtMs each time. On 2026-09-24 a
++// re-detection re-rolled a smaller jitter and moved a window's resume from
++// 2:27:19 to 2:20:11 - the old dedupe only blocked a LATER resumeAtMs
++// replacing an earlier one, so a smaller re-roll for the same reset slipped
++// through and replaced it. The fix: once a job is scheduled for a reset,
++// SAME sessionId + SAME baseResumeAtMs must never be replaced by a
++// re-detection, whichever way its re-rolled jitter happens to move.
++
++const jobWithBase = (sessionId: string, baseResumeAtMs: number, resumeAtMs: number): PendingJob => ({
++  ...jobFor(sessionId, resumeAtMs),
++  baseResumeAtMs,
++});
++
++test('a re-detection of the same reset with a smaller re-rolled jitter does not move the resume earlier', (t) => {
++  const s = new ResumeScheduler(memento(), silent);
++  t.after(() => s.dispose());
++  const base = Date.now() + 60_000;
++  const firstResumeAt = base + 20 * 60_000; // first jitter roll: +20m
++  s.schedule(jobWithBase(SESSION_A, base, firstResumeAt));
++  const secondResumeAt = base + 5 * 60_000; // re-detection, smaller re-roll: +5m
++  assert.equal(
++    s.schedule(jobWithBase(SESSION_A, base, secondResumeAt)),
++    false,
++    'a re-detection of the same reset must be dropped, not accepted',
++  );
++  assert.equal(s.current?.resumeAtMs, firstResumeAt, 'the original jitter roll must be kept');
++});
++
++test('a re-detection of the same reset with a larger re-rolled jitter also does not move the resume', (t) => {
++  // The pre-existing guard already caught the "later" direction (a strictly
++  // later resumeAtMs was already ignored) - this pins that it still holds
++  // once the fix is keyed on baseResumeAtMs rather than resumeAtMs alone.
++  const s = new ResumeScheduler(memento(), silent);
++  t.after(() => s.dispose());
++  const base = Date.now() + 60_000;
++  const firstResumeAt = base + 5 * 60_000;
++  s.schedule(jobWithBase(SESSION_A, base, firstResumeAt));
++  const secondResumeAt = base + 20 * 60_000;
++  assert.equal(s.schedule(jobWithBase(SESSION_A, base, secondResumeAt)), false);
++  assert.equal(s.current?.resumeAtMs, firstResumeAt);
++});
++
++test('a genuinely new reset (different baseResumeAtMs) still replaces an earlier one, same as before', (t) => {
++  const s = new ResumeScheduler(memento(), silent);
++  t.after(() => s.dispose());
++  const now = Date.now();
++  s.schedule(jobWithBase(SESSION_A, now + 600_000, now + 600_000));
++  const soonerBase = now + 60_000;
++  assert.equal(s.schedule(jobWithBase(SESSION_A, soonerBase, soonerBase)), true);
++  assert.equal(s.current?.resumeAtMs, soonerBase);
++});

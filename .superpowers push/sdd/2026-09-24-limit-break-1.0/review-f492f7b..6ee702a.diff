@@ -1,0 +1,425 @@
+# Review package: f492f7b..6ee702a
+
+## Commits
+6ee702a test: an end-to-end two-window collision test for the overload claim key
+3ebe73c fix: claim symmetry for the two remaining manual-ish resume buttons
+a5534ac fix: key an overload claim on baseResumeAtMs, not the jittered resumeAtMs
+
+## Files changed
+ src/claims.ts          |  21 ++++--
+ src/extension.ts       |  23 ++++++-
+ test/claims.test.ts    |  29 +++++++--
+ test/extension.test.ts | 174 +++++++++++++++++++++++++++++++++++++++++++++++--
+ 4 files changed, 226 insertions(+), 21 deletions(-)
+
+## Diff
+diff --git a/src/claims.ts b/src/claims.ts
+index 29f4c5f..c0089a1 100644
+--- a/src/claims.ts
++++ b/src/claims.ts
+@@ -54,35 +54,42 @@ export function claimsDir(): string {
+  * The key naming the reset a job belongs to - identical across every window
+  * watching the same account, so their independent claim attempts collide on
+  * purpose.
+  *
+  * A limit job's key is its un-jittered deadline (`baseResumeAtMs`): every
+  * window parses the same "Try again in 5 hours" notice into the same
+  * instant, before each window's own random padding is added, so this is
+  * stable no matter how differently each window's jitter rolled.
+  *
+  * An overload job has no stated reset time at all - "the jitter *is* the
+- * backoff" (policy.ts) - so there is no shared instant to key on. Instead the
+- * moment the job actually fires (`resumeAtMs`) is floored to a 10-minute
+- * bucket: two windows that detected the same overload and independently
+- * rolled close-enough backoffs land in the same bucket and collide; windows
+- * whose backoffs happen to diverge by more than that do not, which is the
+- * best this can do without a shared deadline to agree on.
++ * backoff" (policy.ts) - so `baseResumeAtMs` is not a deadline here the way
++ * it is for a limit job; it is simply the instant planResume read `now` at
++ * DETECTION time, before that job's own random backoff was added. That
++ * instant is near-identical across every window watching the same account
++ * (millisecond-scale apart, per the 2026-09-24 field incident), so it is
++ * floored to a 10-minute bucket and used as the key.
++ *
++ * Fix round 1: this used to floor `resumeAtMs` - the padded fire time -
++ * instead. `resumeAtMs` includes each window's OWN independently-rolled
++ * jitter (`randomDelayMinMinutes`..`randomDelayMaxMinutes`, often 5-30
++ * minutes apart), so two windows that detected the identical overload landed
++ * in different 10-minute buckets far more often than not, and both fired.
++ * Keying on `baseResumeAtMs` instead is what makes them actually collide.
+  */
+ export function claimKeyFor(job: {
+   sessionId: string;
+   baseResumeAtMs: number;
+   resumeAtMs: number;
+   reason: 'limit' | 'overload';
+ }): string {
+   if (job.reason === 'overload') {
+-    return `${job.sessionId}-overload-${Math.floor(job.resumeAtMs / 600_000)}`;
++    return `${job.sessionId}-overload-${Math.floor(job.baseResumeAtMs / 600_000)}`;
+   }
+   return `${job.sessionId}-${job.baseResumeAtMs}`;
+ }
+ 
+ function claimPath(dir: string, key: string): string {
+   return path.join(dir, `${key}${CLAIM_SUFFIX}`);
+ }
+ 
+ /**
+  * One attempt at `fs.openSync(file, 'wx')`.
+diff --git a/src/extension.ts b/src/extension.ts
+index 6cea6b3..83c5faf 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -828,20 +828,24 @@ export function activate(context: vscode.ExtensionContext): void {
+             void vscode.window.showInformationMessage(
+               `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+             );
+             return;
+           }
+           // forgetReady above is how this click claims the job; if the
+           // launch never actually started, the claim must be undone or the
+           // job is gone with no way back.
+           if (!resume(job)) {
+             rememberReady(job);
++            // Task 10, fix round 1: symmetric with every other failed-launch
++            // path - a resume that never started must not hold the
++            // cross-window claim either.
++            releaseClaim(claimsDir(), claimKey, fs, log);
+           }
+         });
+         return;
+       }
+       // Task 2: before ever spawning a second `claude --resume`, find out who
+       // already holds this session - a resume into a session a panel or
+       // another terminal already holds forks the transcript (see the
+       // docs/research/2026-09-20-panel-fork-experiment.md incident this task
+       // is named for). See holderPolicy.ts's decideOnFire for the full branch
+       // table; 'none', a failed listing ('unknown') and an IDLE panel are the
+@@ -858,31 +862,44 @@ export function activate(context: vscode.ExtensionContext): void {
+       }
+       if (decision.remember) {
+         rememberReady(job);
+       }
+       if (decision.notice) {
+         const notice = decision.notice;
+         void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then((choice) => {
+           if (choice !== notice.button) {
+             return;
+           }
+-          // "Resume in Terminal Anyway" claims the job exactly as the
+-          // off-autoResume "Resume Now" button does, then resumes it - no
+-          // second confirmation, because this button IS the confirmation.
++          // "Resume in Terminal Anyway" takes ownership of the job
++          // (forgetReady) exactly as the off-autoResume "Resume Now" button
++          // does, then resumes it - no second confirmation, because this
++          // button IS the confirmation.
+           if (!forgetReady(job.sessionId)) {
+             void vscode.window.showInformationMessage(
+               `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+             );
+             return;
+           }
++          // Task 10, fix round 1: this branch is reached only after
++          // decideOnFire declined to auto-resume, which already released
++          // this job's original claim (see `!decision.resume` above) - by
++          // the time someone clicks this button that claim is long gone. The
++          // click is exactly as much an explicit user action as the
++          // resumeNow command, so - same as resumeNow - it writes/refreshes
++          // its own claim before launching, ignoring whatever claimResume
++          // reports, so another window's own automatic attempt cannot also
++          // fire while this launch is in flight; a failed launch releases it
++          // again.
++          claimResume(claimsDir(), claimKey, Date.now(), fs, log);
+           if (!resume(job)) {
+             rememberReady(job);
++            releaseClaim(claimsDir(), claimKey, fs, log);
+           }
+         });
+       }
+       if (!decision.resume) {
+         // This window is not launching anything automatically - the claim it
+         // just took must not sit there blocking another window (or a later
+         // manual retry) for up to an hour over a resume nobody is making.
+         releaseClaim(claimsDir(), claimKey, fs, log);
+         return;
+       }
+diff --git a/test/claims.test.ts b/test/claims.test.ts
+index 726f9d9..2ff1e9b 100644
+--- a/test/claims.test.ts
++++ b/test/claims.test.ts
+@@ -173,33 +173,48 @@ test('cleanupStaleClaims ignores files that are not claim files', () => {
+ test('claimKeyFor for a limit job is sessionId-baseResumeAtMs, the un-jittered reset', () => {
+   const key = claimKeyFor({
+     sessionId: 'abc-123',
+     baseResumeAtMs: 1_000_000,
+     resumeAtMs: 1_500_000,
+     reason: 'limit',
+   });
+   assert.equal(key, 'abc-123-1000000');
+ });
+ 
+-test('claimKeyFor for an overload job buckets the fire time into 10-minute windows', () => {
++test('claimKeyFor for an overload job buckets the DETECTION instant (baseResumeAtMs), not the padded fire time', () => {
++  // Fix round 1: this used to bucket resumeAtMs. resumeAtMs is padded with
++  // each window's own independently-rolled jitter, so two windows detecting
++  // the identical overload landed in different buckets and both fired.
++  // baseResumeAtMs - the moment planResume read `now` at detection - is
++  // near-identical across windows, which is what this key must use.
+   const key = claimKeyFor({
+     sessionId: 'abc-123',
+-    baseResumeAtMs: 1_000_000,
+-    resumeAtMs: 6_000_000,
++    baseResumeAtMs: 6_000_000,
++    resumeAtMs: 1_000_000, // a different bucket under the old (buggy) logic - must be ignored
+     reason: 'overload',
+   });
+   assert.equal(key, `abc-123-overload-${Math.floor(6_000_000 / 600_000)}`);
+ });
+ 
+-test('claimKeyFor gives two overload jobs in the same 10-minute bucket the same key', () => {
+-  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 600_100, reason: 'overload' });
+-  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 609_999, reason: 'overload' });
+-  assert.equal(a, b);
++test('claimKeyFor gives two overload jobs with the same detection instant the same key, however far apart their jitter rolled', () => {
++  // The core regression this fix closes: two windows detect the SAME
++  // overload (same baseResumeAtMs) but roll very different backoffs
++  // (randomDelayMinMinutes..randomDelayMaxMinutes, e.g. 5m vs 30m) - their
++  // OWN resumeAtMs values land far apart, but the key must still collide.
++  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 1_300_000, reason: 'overload' });
++  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 2_800_000, reason: 'overload' });
++  assert.equal(a, b, 'the same detection instant must collide no matter how far apart the jitter rolls landed');
++});
++
++test('claimKeyFor gives two overload jobs a different key when their detection instants land in different buckets, even with identical resumeAtMs', () => {
++  const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 5_000_000, reason: 'overload' });
++  const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 600_000, resumeAtMs: 5_000_000, reason: 'overload' });
++  assert.notEqual(a, b, 'a genuinely different detection instant must not collide just because resumeAtMs matches');
+ });
+ 
+ // --- claimsDir ---------------------------------------------------------------
+ 
+ test('claimsDir is machine-wide: under the OS temp dir, not per-workspace', () => {
+   const dir = claimsDir();
+   assert.ok(dir.startsWith(os.tmpdir()));
+   assert.match(dir, /claude-limit-break[\\/]claims$/);
+ });
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index d6ab0b3..f792909 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -199,33 +199,50 @@ stubModule('./trust', {
+ });
+ 
+ /**
+  * The cross-window claim (Task 10). `claimResume`/`releaseClaim` are faked so
+  * no test here ever touches the real machine-wide claims directory
+  * (os.tmpdir()/claude-limit-break/claims, from claimsDir()) - the real
+  * filesystem behaviour is covered end to end in claims.test.ts. Defaults to
+  * 'claimed', so every existing test above this section - none of which cares
+  * about cross-window dedupe - sees exactly the behaviour it always had:
+  * nothing is ever "taken".
++ *
++ * Fix round 1: `fakeClaimResult = 'real'` switches claimResume/releaseClaim
++ * to delegate to the REAL src/claims.ts implementation against
++ * `realClaimsDir` (a throwaway temp directory a test creates), instead of
++ * returning the canned `fakeClaimResult`. This is what lets one test drive
++ * `realClaims.claimResume` directly to stand in for a SECOND window - real
++ * `openSync('wx')` collision behaviour, not a scripted answer - while this
++ * window's own onFire runs through the real extension wiring.
+  */
+-let fakeClaimResult: 'claimed' | 'taken' = 'claimed';
++const realClaims = require('../src/claims') as typeof import('../src/claims');
++let fakeClaimResult: 'claimed' | 'taken' | 'real' = 'claimed';
++let realClaimsDir = '';
+ const claimCalls: { dir: string; key: string }[] = [];
+ const releasedKeys: string[] = [];
+ 
+ stubModule('./claims', {
+-  ...(require('../src/claims') as Record<string, unknown>),
+-  claimResume: (dir: string, key: string) => {
++  ...(realClaims as unknown as Record<string, unknown>),
++  claimsDir: () => (fakeClaimResult === 'real' ? realClaimsDir : realClaims.claimsDir()),
++  claimResume: (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown) => {
+     claimCalls.push({ dir, key });
++    if (fakeClaimResult === 'real') {
++      return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never);
++    }
+     return fakeClaimResult;
+   },
+-  releaseClaim: (_dir: string, key: string) => {
++  releaseClaim: (dir: string, key: string, fsArg: unknown, log?: unknown) => {
+     releasedKeys.push(key);
++    if (fakeClaimResult === 'real') {
++      realClaims.releaseClaim(dir, key, fsArg as never, log as never);
++    }
+   },
+   cleanupStaleClaims: () => {},
+ });
+ 
+ // Required, not imported: the stubs above must be registered first, and a
+ // compiled `import` would hoist its require() above them.
+ const { activate, isInsideWorkspace } =
+   require('../src/extension') as typeof import('../src/extension');
+ 
+ // A path with a separator and no .cmd/.bat/.ps1 extension resolves as-is on
+@@ -2207,10 +2224,159 @@ test('a failed manual launch on a ready (already-fired) job releases the claim i
+     await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
+     assert.ok(
+       releasedKeys.length > 0,
+       `a failed manual launch on a ready job must release its claim; saw ${JSON.stringify(releasedKeys)}`,
+     );
+   } finally {
+     teardown(ctx);
+   }
+ });
++
++// --- Fix round 1 -------------------------------------------------------------
++
++test('the off-autoResume "Resume Now" notification button releases its claim when the launch fails', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  fakeClaimResult = 'claimed';
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const offer = offers()[0];
++    assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
++    // Isolate to the button's own release: autoResume is off, so onFire's
++    // top-of-function claim was never released by a holder-decline branch
++    // (decideOnFire is not even called on this path) - it is still sitting
++    // there when the button is clicked, exactly as a real failed manual
++    // resume would find it.
++    releasedKeys.length = 0;
++    offer.answer('Resume Now');
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
++    assert.ok(
++      releasedKeys.length > 0,
++      `a failed launch from the off-autoResume button must release its claim, symmetric with every other failed-launch path; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('"Resume in Terminal Anyway" writes a fresh claim before resuming, exactly as manual Resume Now does', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeClaimResult = 'claimed';
++  claimCalls.length = 0;
++  autoContinueOn = false;
++  holderRow('cli', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
++    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
++    const callsBeforeClick = claimCalls.length;
++    offer.answer('Resume in Terminal Anyway');
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 1, 'setup: the button must have resumed');
++    assert.ok(
++      claimCalls.length > callsBeforeClick,
++      'the click must write/refresh its own claim before launching, exactly as manual Resume Now does',
++    );
++  } finally {
++    autoContinueOn = true;
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('"Resume in Terminal Anyway" releases its own claim if the launch fails', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeClaimResult = 'claimed';
++  autoContinueOn = false;
++  holderRow('cli', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
++    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
++    // decideOnFire's decision.resume is false here (idle terminal,
++    // auto-continue off), so onFire's own top-level release already fired
++    // once by this point - isolate to the button click's own write+release.
++    releasedKeys.length = 0;
++    offer.answer('Resume in Terminal Anyway');
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have failed on the missing cwd');
++    assert.ok(
++      releasedKeys.length > 0,
++      `a failed launch from the button must release the claim it just wrote; saw ${JSON.stringify(releasedKeys)}`,
++    );
++  } finally {
++    autoContinueOn = true;
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire on an overload job collides across two windows sharing one claims dir, despite very different jitter', async () => {
++  // End-to-end proof of the claimKeyFor fix: this uses the REAL claims.ts
++  // implementation (fakeClaimResult = 'real'), not the scripted
++  // 'claimed'/'taken' answer every other test in this file uses, so the
++  // collision comes from actual fs.openSync('wx') behaviour against one
++  // shared temp directory - exactly like two real VS Code windows would
++  // share the real machine-wide claims directory.
++  resetVscodeFake();
++  vscodeFake.config = {
++    autoResume: true,
++    claudeCommand: LAUNCHER,
++    randomDelayMinMinutes: 0,
++    randomDelayMaxMinutes: 0,
++  };
++  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-e2e-'));
++  fakeClaimResult = 'real';
++  realClaimsDir = dir;
++  claimCalls.length = 0;
++  releasedKeys.length = 0;
++
++  // Both "windows" detected the identical overload at the same instant
++  // (baseResumeAtMs) but rolled very different backoffs - window A's own
++  // resumeAtMs is 2 minutes out, window B's is 25 minutes out - landing in
++  // DIFFERENT 10-minute buckets under the pre-fix (resumeAtMs-keyed) logic.
++  const base = Date.now() - 120_000; // "detected" 2 minutes ago
++  const jobA = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: Date.now() - 1000, reason: 'overload' as const };
++  const jobB = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: base + 25 * 60_000, reason: 'overload' as const };
++  assert.notEqual(jobA.resumeAtMs, jobB.resumeAtMs, 'setup: the two windows must have rolled different jitter');
++
++  // Window B "wins the race" first - stands in for a second real VS Code
++  // window whose own onFire already ran and claimed this reset.
++  const keyB = realClaims.claimKeyFor(jobB);
++  assert.equal(
++    realClaims.claimResume(dir, keyB, Date.now(), fs),
++    'claimed',
++    'setup: window B must be the first to claim this reset',
++  );
++
++  // This window's own job (jobA) - the SAME reset, a DIFFERENT jitter roll -
++  // must compute the identical key (the fix) and therefore find it already
++  // taken, dropping rather than also launching.
++  assert.equal(
++    realClaims.claimKeyFor(jobA),
++    keyB,
++    'setup check: both windows must compute the identical key despite their different jitter',
++  );
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', jobA]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(
++      vscodeFake.terminals.length,
++      0,
++      'exactly one window may launch for this reset - window B already claimed it, so window A must not',
++    );
++  } finally {
++    fakeClaimResult = 'claimed';
++    teardown(ctx);
++  }
++});

@@ -1,0 +1,2398 @@
+# Review package: dd4f6d6..HEAD
+
+## Commits
+512d7ad test: cover the remaining Task 2 wiring branches for mutation testing
+468d2d3 test: wire Task 2's holder policy into extension.ts, end to end
+43f8884 feat: apply the controller's two mid-task policy corrections to Task 2
+c1470e4 feat: compose classifyFireHolder/fireHolderDetector; fake modal warnings
+a2311c7 feat: add holderPolicy, the pure decision layer for onFire and manual resume
+84b0ef5 feat: read Claude Code's native auto-continue setting
+db1bb9d feat: add a pure holder classifier to liveSessions.ts
+3b454bd feat: carry bridgeSessionId in session records
+
+## Files changed
+ src/autoContinue.ts          |  78 +++++++++
+ src/extension.ts             | 215 +++++++++++++++++++-----
+ src/holderPolicy.ts          | 192 +++++++++++++++++++++
+ src/liveSessions.ts          | 160 +++++++++++++++++-
+ src/sessionRegistry.ts       |  13 +-
+ test/autoContinue.test.ts    | 178 ++++++++++++++++++++
+ test/extension.test.ts       | 389 +++++++++++++++++++++++++++++++++++++++++--
+ test/helpers/vscode.ts       |  17 +-
+ test/holderPolicy.test.ts    | 187 +++++++++++++++++++++
+ test/liveSessions.test.ts    | 220 +++++++++++++++++++++++-
+ test/sessionRegistry.test.ts |  30 ++++
+ 11 files changed, 1611 insertions(+), 68 deletions(-)
+
+## Diff
+diff --git a/src/autoContinue.ts b/src/autoContinue.ts
+new file mode 100644
+index 0000000..7ea6e66
+--- /dev/null
++++ b/src/autoContinue.ts
+@@ -0,0 +1,78 @@
++import * as os from 'node:os';
++import * as path from 'node:path';
++
++/**
++ * Whether Claude Code's own terminal UI will pick a session back up by
++ * itself once a usage limit resets, without this extension doing anything.
++ *
++ * Verified against claude.exe 2.1.281: the CLI evaluates
++ * `setting ?? (autoContinueKeyPresence === "absent")` - an absent key reads
++ * as on, not off, so a machine that has never touched this setting still
++ * gets native auto-continue. Task 2 needs this so a `terminal` holder with
++ * auto-continue on is left alone rather than getting a second `--resume`
++ * launched against it.
++ *
++ * The four layers below are read highest-precedence first, exactly as the
++ * CLI itself layers `settings.json` files; the first layer that sets the key
++ * as a boolean decides, and a layer that cannot be read at all (missing,
++ * unreadable, malformed JSON) or sets the key to something other than a
++ * boolean is skipped rather than treated as a decision. `readFile` is
++ * injected, the same shape used throughout this codebase (trust.ts,
++ * sessionRegistry.ts), so no test here ever touches the developer's real
++ * settings files.
++ */
++const SETTING_KEY = 'autoContinueAtUsageLimit';
++
++function managedSettingsPath(platform: NodeJS.Platform): string {
++  if (platform === 'win32') {
++    return 'C:\\Program Files\\ClaudeCode\\managed-settings.json';
++  }
++  if (platform === 'darwin') {
++    return '/Library/Application Support/ClaudeCode/managed-settings.json';
++  }
++  return '/etc/claude-code/managed-settings.json';
++}
++
++/** The boolean value of SETTING_KEY in one settings file, or undefined if the
++ * file cannot be read, is not valid JSON, is not an object, or does not set
++ * the key to a boolean. */
++function readLayer(settingsPath: string, readFile: (p: string) => string): boolean | undefined {
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(readFile(settingsPath));
++  } catch {
++    return undefined;
++  }
++  if (typeof parsed !== 'object' || parsed === null) {
++    return undefined;
++  }
++  const value = (parsed as Record<string, unknown>)[SETTING_KEY];
++  return typeof value === 'boolean' ? value : undefined;
++}
++
++export function autoContinueEnabled(
++  cwd: string | undefined,
++  platform: NodeJS.Platform,
++  readFile: (p: string) => string,
++): boolean {
++  const layers: string[] = [managedSettingsPath(platform)];
++  // The two cwd-scoped layers do not exist without a cwd to root them at - a
++  // job can be scheduled with none (see PendingJob) - so they are skipped
++  // rather than resolved against some arbitrary directory.
++  if (cwd) {
++    layers.push(path.join(cwd, '.claude', 'settings.local.json'));
++    layers.push(path.join(cwd, '.claude', 'settings.json'));
++  }
++  // CLAUDE_CONFIG_DIR replaces ~/.claude wholesale here, the same as it does
++  // for ~/.claude.json in trust.ts's defaultClaudeConfigPath - checked against
++  // the CLI's own bundle there, and the same relocation rule applies to every
++  // file normally found under ~/.claude.
++  layers.push(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'));
++  for (const layer of layers) {
++    const value = readLayer(layer, readFile);
++    if (value !== undefined) {
++      return value;
++    }
++  }
++  return true;
++}
+diff --git a/src/extension.ts b/src/extension.ts
+index e6bb9db..97c95fd 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -26,21 +26,29 @@ import {
+   shouldEnableUpdateChecks,
+   DEFAULT_CHECK_INTERVAL_MS,
+   LAST_CHECKED_KEY,
+   LATEST_TAG_KEY,
+   DISMISSED_VERSION_KEY,
+   FIRST_RUN_PROMPT_KEY,
+   RELEASE_TAG_URL,
+   type FirstRunPromptChoice,
+ } from './updateCheck';
+ import { resolveSession } from './sessionResolver';
+-import { livePanelDetector } from './liveSessions';
++import {
++  livePanelDetector,
++  agentRowsDetector,
++  classifyHolder,
++  busyFolderPeers,
++  type HolderRecord,
++} from './liveSessions';
++import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
++import { autoContinueEnabled } from './autoContinue';
+ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
+ import { selectClaudePanelTab, type WebviewTab } from './panelTab';
+ import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
+ import { execFileSync } from 'node:child_process';
+ 
+ const NS = 'claudeLimitBuster';
+ 
+ /**
+  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
+  * the scheduler's own `claudeLimitBuster.pending`: these have already fired,
+@@ -353,41 +361,58 @@ export function activate(context: vscode.ExtensionContext): void {
+    * Sessions THIS extension has resumed, this window, this run, each against
+    * the pid of the terminal it was resumed in.
+    *
+    * onInputNeeded fires for every turn in every session on the machine, and a
+    * panel tab going stale is only this extension's doing for the sessions it
+    * actually put a `--resume` terminal against. The pid is what stops the
+    * detector counting that resume as somebody else holding the session (#7).
+    */
+   const resumedSessions = new Map<string, Promise<number | undefined>>();
+ 
++  /**
++   * `claude agents --json`, run with a timeout so a hung CLI cannot take
++   * whichever handler called this with it. Shared by every reader of the
++   * listing below - detectLivePanel (end-of-turn) and detectAgentRows (a
++   * manual resume, and scheduler.onFire) - so a hang or a missing executable
++   * is one behaviour to reason about, not three.
++   */
++  const runAgentsListing = (): string => {
++    const launcher = findLauncher(settings().claudeCommand);
++    if (!launcher) {
++      throw new Error('no claude executable');
++    }
++    return execFileSync(launcher.file, [...launcher.args, 'agents', '--json'], {
++      encoding: 'utf8',
++      timeout: 10_000,
++    });
++  };
++
++  /** One pid's `~/.claude/sessions/<pid>.json` record, the label half of the liveness/label split (see liveSessions.ts). */
++  const readHolderRecord = (pid: number): HolderRecord | undefined =>
++    readSessionRecord(sessionRegistryDir(), pid, (f) => fs.readFileSync(f, 'utf8'));
++
+   /**
+    * Is a panel tab holding this session open, apart from our own resume?
+    *
+    * `claude agents --json` for liveness, the per-pid record for the
+-   * entrypoint - see liveSessions.ts for why it is split that way. Run with a
+-   * timeout: this is on the path of an end-of-turn event, and a CLI that hangs
+-   * must not take the handler with it.
++   * entrypoint - see liveSessions.ts for why it is split that way.
+    */
+-  const detectLivePanel = livePanelDetector(
+-    () => {
+-      const launcher = findLauncher(settings().claudeCommand);
+-      if (!launcher) {
+-        throw new Error('no claude executable');
+-      }
+-      return execFileSync(launcher.file, [...launcher.args, 'agents', '--json'], {
+-        encoding: 'utf8',
+-        timeout: 10_000,
+-      });
+-    },
+-    (pid) => readSessionRecord(sessionRegistryDir(), pid, (f) => fs.readFileSync(f, 'utf8')),
+-  );
++  const detectLivePanel = livePanelDetector(runAgentsListing, readHolderRecord);
++
++  /**
++   * `claude agents --json`, run once and parsed - or `'unknown'` when the
++   * listing itself could not be run. A manual resume's live-holder check
++   * (confirmManualResume, below) and scheduler.onFire's holder AND
++   * busy-folder-peers checks are all built on this one snapshot function,
++   * via the pure `classifyHolder` / `busyFolderPeers` (liveSessions.ts).
++   */
++  const detectAgentRows = agentRowsDetector(runAgentsListing);
+ 
+   const resume = (job: PendingJob): boolean => {
+     const s = settings();
+     const which = (cmd: string) => {
+       try {
+         const finder = process.platform === 'win32' ? 'where' : 'which';
+         return execFileSync(finder, [cmd], { encoding: 'utf8' }).split(/\r?\n/)[0]?.trim() || undefined;
+       } catch {
+         return undefined;
+       }
+@@ -505,20 +530,46 @@ export function activate(context: vscode.ExtensionContext): void {
+           `${bytesNow ?? 'unreadable'} now.${trustFirst}`,
+       );
+       void vscode.window.showWarningMessage(
+         `Claude Limit Buster: the resume of session ${job.sessionId.slice(0, 8)} does not appear to have started.${trustFirst}`,
+       );
+     }, GRACE_MS);
+     stallChecks.add(check);
+     return true;
+   };
+ 
++  /**
++   * The gate every MANUAL resume goes through before `resume()` is ever
++   * called: the command, and the off-autoResume notification's own button.
++   *
++   * A scheduled fire has its own, separate holder check (see
++   * scheduler.onFire below) that never spawns a second writer at all; this
++   * one is different on purpose - the person clicking Resume Now already
++   * knows which session they mean, so a live holder is a warning to click
++   * through, not a reason to silently redirect them into "remembered for
++   * later" the way the automatic path does. `ourPid` is omitted (undefined):
++   * the job has not been resumed yet, so there is no terminal pid of our own
++   * to exclude.
++   */
++  const confirmManualResume = async (job: PendingJob): Promise<boolean> => {
++    const rows = detectAgentRows();
++    const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
++    const warning = manualResumeWarning(holder, job.sessionId.slice(0, 8));
++    if (!warning) {
++      return true;
++    }
++    const pick = await Promise.resolve(
++      vscode.window.showWarningMessage(warning.message, { modal: true }, warning.button),
++    );
++    return pick === warning.button;
++  };
++
+   /**
+    * Every open webview tab in this window, reduced to what panelTab.ts can
+    * work on, paired with the real Tab so a choice can become a close() call.
+    */
+   const webviewTabs = (): { tab: vscode.Tab; entry: WebviewTab }[] =>
+     vscode.window.tabGroups.all
+       .flatMap((g) => g.tabs)
+       .filter((t): t is vscode.Tab & { input: vscode.TabInputWebview } => t.input instanceof vscode.TabInputWebview)
+       .map((t) => ({ tab: t, entry: { viewType: t.input.viewType, label: t.label } }));
+ 
+@@ -726,87 +777,163 @@ export function activate(context: vscode.ExtensionContext): void {
+     scheduler.onFire((job) => {
+       const s = settings();
+       if (!s.autoResume) {
+         rememberReady(job);
+         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
+         void Promise.resolve(
+           vscode.window.showInformationMessage(
+             `Claude Limit Buster: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
+             'Resume Now',
+           ),
+-        ).then((choice) => {
+-          if (choice === 'Resume Now') {
+-            // This job, closed over here - not "whatever is ready now". Another
+-            // session can come ready while this notification is still on
+-            // screen, and the offer names a session, so it must honour it.
+-            //
+-            // Removing it is also how this click claims it. The notification
+-            // outlives the job: the same session can be resumed from the
+-            // command palette first, and without the claim a later click here
+-            // would launch a second `claude --resume` on it.
+-            if (!forgetReady(job.sessionId)) {
+-              void vscode.window.showInformationMessage(
+-                `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+-              );
+-              return;
+-            }
+-            // forgetReady above is how this click claims the job; if the
+-            // launch never actually started, the claim must be undone or the
+-            // job is gone with no way back.
+-            if (!resume(job)) {
+-              rememberReady(job);
+-            }
++        ).then(async (choice) => {
++          if (choice !== 'Resume Now') {
++            return;
++          }
++          // Same live-holder gate the resumeNow command goes through - this
++          // button is just as much a manual resume as the palette command is.
++          if (!(await confirmManualResume(job))) {
++            return;
++          }
++          // This job, closed over here - not "whatever is ready now". Another
++          // session can come ready while this notification is still on
++          // screen, and the offer names a session, so it must honour it.
++          //
++          // Removing it is also how this click claims it. The notification
++          // outlives the job: the same session can be resumed from the
++          // command palette first, and without the claim a later click here
++          // would launch a second `claude --resume` on it.
++          if (!forgetReady(job.sessionId)) {
++            void vscode.window.showInformationMessage(
++              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
++            );
++            return;
++          }
++          // forgetReady above is how this click claims the job; if the
++          // launch never actually started, the claim must be undone or the
++          // job is gone with no way back.
++          if (!resume(job)) {
++            rememberReady(job);
+           }
+         });
+         return;
+       }
++      // Task 2: before ever spawning a second `claude --resume`, find out who
++      // already holds this session - a resume into a session a panel or
++      // another terminal already holds forks the transcript (see the
++      // docs/research/2026-09-20-panel-fork-experiment.md incident this task
++      // is named for). See holderPolicy.ts's decideOnFire for the full branch
++      // table; 'none', a failed listing ('unknown') and an IDLE panel are the
++      // cases that reach the ordinary resume below.
++      const rows = detectAgentRows();
++      const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
++      const decision = decideOnFire(
++        holder,
++        autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
++        job.sessionId.slice(0, 8),
++      );
++      if (decision.logMessage) {
++        (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);
++      }
++      if (decision.remember) {
++        rememberReady(job);
++      }
++      if (decision.notice) {
++        const notice = decision.notice;
++        void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then((choice) => {
++          if (choice !== notice.button) {
++            return;
++          }
++          // "Resume in Terminal Anyway" claims the job exactly as the
++          // off-autoResume "Resume Now" button does, then resumes it - no
++          // second confirmation, because this button IS the confirmation.
++          if (!forgetReady(job.sessionId)) {
++            void vscode.window.showInformationMessage(
++              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
++            );
++            return;
++          }
++          if (!resume(job)) {
++            rememberReady(job);
++          }
++        });
++      }
++      if (!decision.resume) {
++        return;
++      }
++      // A second, independent controller ruling: nobody is on THIS session
++      // (holder.kind === 'none'), but a DIFFERENT session may be busy or
++      // waiting in the same folder. The extension cannot message that
++      // session itself (constraint #3 - never write into a session it did
++      // not create), so instead it tells the session it is ABOUT to create:
++      // buildResumePrompt appends a sentence naming the peer(s) and asking
++      // the resumed model to coordinate with them via SendMessage before
++      // editing anything. This never blocks the resume - only the prompt
++      // passed to it changes.
++      let resumeJob = job;
++      if (rows !== 'unknown' && holder !== 'unknown' && holder.kind === 'none' && job.cwd) {
++        const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
++        if (peers.length > 0) {
++          const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
++          log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
++          void vscode.window.showInformationMessage(
++            `Claude Limit Buster: another Claude session (${names}) is working in this folder. ` +
++              `The resumed session has been told to coordinate with it.`,
++          );
++          resumeJob = { ...job, prompt: buildResumePrompt(job.prompt, peers) };
++        }
++      }
+       if (s.notify) {
+         void vscode.window.showInformationMessage(
+           `Claude Limit Buster: resuming session ${job.sessionId.slice(0, 8)}.`,
+         );
+       }
+       // The scheduler already cleared this job before firing (its own
+       // re-entrancy guard, see consume()), so if the launch never started this
+       // is the only place still holding it - without rememberReady it would
+-      // simply be gone.
+-      if (!resume(job)) {
++      // simply be gone. The ORIGINAL job (unmodified prompt) is what gets
++      // remembered: a later manual resume should not carry a coordination
++      // sentence tied to a folder-busy snapshot from this particular fire.
++      if (!resume(resumeJob)) {
+         rememberReady(job);
+       }
+     }),
+-    vscode.commands.registerCommand(`${NS}.resumeNow`, () => {
++    vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
+       // Exactly one job moves, and only its own source is touched. Cancelling
+       // the scheduler while resuming a ready job - or dropping a ready job
+       // while resuming the scheduler's - would throw away work nobody asked to
+       // discard.
+       //
+       // Each branch below removes the job from its source only once resume()
+       // reports the launch actually started. resume() can fail (missing cwd,
+       // no claude executable), and doing the removal first - as this used to -
+       // left a failed resume with no path back to the job.
++      //
++      // confirmManualResume runs first in both branches: a live holder gets a
++      // modal warning naming it before anything is claimed or launched (#2).
+       const counting = scheduler.current;
+       if (counting) {
+         // Only this session's job: others may still be counting down, and
+         // "Resume Now" moves exactly one.
+-        if (resume(counting)) {
++        if ((await confirmManualResume(counting)) && resume(counting)) {
+           scheduler.cancel(counting.sessionId);
+         }
+         return;
+       }
+       // Oldest first: the session that has been waiting longest goes first.
+       // Peeked, not shifted, so a failed resume leaves it exactly where it was
+       // instead of needing to be spliced back in.
+       const ready = readyJobs[0];
+       if (!ready) {
+         void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
+         return;
+       }
+-      if (resume(ready)) {
++      if ((await confirmManualResume(ready)) && resume(ready)) {
+         forgetReady(ready.sessionId);
+       }
+     }),
+     vscode.commands.registerCommand(`${NS}.cancel`, () => {
+       // "Cancel Pending Resume" means all of it, but say how much it threw
+       // away: a job dropped from readyJobs has no other trace.
+       if (readyJobs.length > 0) {
+         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
+         readyJobs.length = 0;
+         persistReady();
+diff --git a/src/holderPolicy.ts b/src/holderPolicy.ts
+new file mode 100644
+index 0000000..7cf5115
+--- /dev/null
++++ b/src/holderPolicy.ts
+@@ -0,0 +1,192 @@
++import type { AgentRow, SessionHolder } from './liveSessions';
++
++export interface OnFireDecision {
++  /** Whether `resume(job)` should be called. */
++  resume: boolean;
++  /** Whether the job should go to `rememberReady` so "Resume Now" can still start it. */
++  remember: boolean;
++  /** Present whenever there is something worth writing to the output channel. */
++  logMessage?: string;
++  /** Defaults to 'info' when omitted; 'warn' marks a listing failure. */
++  logLevel?: 'info' | 'warn';
++  /** Present only when the user should be told, with exactly one button. */
++  notice?: { message: string; button: string };
++}
++
++const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
++
++/**
++ * Decide what `scheduler.onFire` does with a fired job, given who (if anyone)
++ * already holds the session.
++ *
++ * This exists because of the 2026-09-23 field incident this task is named
++ * for: a scheduled resume spawned a second `claude --resume` terminal while a
++ * panel tab was still open on the same session, forking the conversation
++ * (docs/research/2026-09-20-panel-fork-experiment.md, #6).
++ *
++ * The controller corrected this policy mid-implementation (see
++ * task-2-report.md): `status` ("idle" | "busy" | "waiting", carried on
++ * `holder` by classifyHolder) now decides the outcome, not just which KIND of
++ * process holds the session -
++ *   - an IDLE panel resumes as normal. This is the product's main use case:
++ *     someone leaves a panel idle at a limit and walks away. The existing #7
++ *     stale-tab handling (handleStalePanel / onStale) runs after the resume
++ *     exactly as it already does; nothing here needs to notify instead of
++ *     spawning.
++ *   - a panel or terminal that is busy or waiting means the session is
++ *     already being continued - by the person, or by Remote Control's own
++ *     auto-continue on a bridged panel - so this silently drops the job:
++ *     no spawn, no rememberReady, no notification, just a log line (naming
++ *     Remote Control when the panel is bridged).
++ *   - an idle terminal defers to autoContinueOn: Claude Code's own
++ *     auto-continue already covers it when that setting is on (see
++ *     autoContinue.ts), so this stays silent there too; only when it is OFF
++ *     does this remember the job and offer "Resume in Terminal Anyway".
++ *
++ * `resume: true` is reserved for 'none' (nobody found), a listing failure
++ * ('unknown', which must still resume rather than fail closed and silently
++ * stop every future resume on a machine where `claude agents` misbehaves),
++ * and now an idle panel.
++ *
++ * Any status other than the exact string 'idle' - including 'busy',
++ * 'waiting', or an absent/unreported status - is treated as NOT idle: Task 2
++ * exists to avoid a second writer, so an unknown status errs toward the
++ * cautious reading rather than assuming it is safe to spawn.
++ *
++ * A DIFFERENT session busy or waiting in the same folder is no longer this
++ * function's concern - a second controller ruling replaced "block and
++ * notify" with "resume anyway, and tell the resumed model to coordinate";
++ * see {@link buildResumePrompt} and `scheduler.onFire` in extension.ts, which
++ * calls it directly off the same listing, independently of this decision.
++ */
++export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: boolean, shortId: string): OnFireDecision {
++  if (holder === 'unknown') {
++    return {
++      resume: true,
++      remember: false,
++      logMessage: `Could not list live Claude sessions; resuming ${shortId} as usual.`,
++      logLevel: 'warn',
++    };
++  }
++  if (holder.kind === 'none') {
++    return { resume: true, remember: false };
++  }
++  if (holder.kind === 'panel' && holder.status === 'idle') {
++    return {
++      resume: true,
++      remember: false,
++      logMessage: `Session ${shortId} is open in an idle Claude panel (pid ${holder.pid}); resuming anyway.`,
++    };
++  }
++  if (holder.kind === 'panel') {
++    const bridgeNote = holder.bridged ? ' Remote Control may have continued it.' : '';
++    return {
++      resume: false,
++      remember: false,
++      logMessage:
++        `Session ${shortId} is open in a Claude panel (pid ${holder.pid}) and is already ` +
++        `${holder.status ?? 'active'}; not starting a second writer.${bridgeNote}`,
++    };
++  }
++  // terminal, busy or waiting (or an unreported status, treated the same
++  // way): the session is already being worked, so this drops silently.
++  if (holder.status !== 'idle') {
++    return {
++      resume: false,
++      remember: false,
++      logMessage:
++        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and is already ` +
++        `${holder.status ?? 'active'}; not starting a second writer.`,
++    };
++  }
++  // terminal, idle.
++  if (autoContinueOn) {
++    return {
++      resume: false,
++      remember: false,
++      logMessage:
++        `Session ${shortId} is open in a terminal (pid ${holder.pid}); ` +
++        `Claude Code's own auto-continue will pick it back up, so nothing was started here.`,
++    };
++  }
++  return {
++    resume: false,
++    remember: true,
++    logMessage:
++      `Session ${shortId} is open in a terminal (pid ${holder.pid}) and auto-continue is off; ` +
++      `not starting a second writer.`,
++    notice: {
++      message:
++        `Claude Limit Buster: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
++        `Continue it there.`,
++      button: RESUME_IN_TERMINAL_BUTTON,
++    },
++  };
++}
++
++/**
++ * The modal warning a MANUAL resume (the resumeNow command, or the
++ * off-autoResume "Resume Now" notification's own button) shows before
++ * launching into a session someone already holds.
++ *
++ * Per the same controller correction {@link decideOnFire} documents: an IDLE
++ * panel needs no modal - that is the ordinary "come back and continue in the
++ * panel, or resume by hand instead" case, not a live conflict. Every other
++ * live holder still warns: a busy or waiting holder of either kind, or a
++ * terminal of any status (an idle terminal still has someone who might type
++ * into it, and unlike an idle panel there is no #7 auto-resync for it).
++ *
++ * 'none' and 'unknown' both return undefined - nothing to warn about, and (for
++ * 'unknown') not knowing is not a reason to block a resume asked for by hand.
++ */
++export function manualResumeWarning(
++  holder: SessionHolder | 'unknown',
++  shortId: string,
++): { message: string; button: string } | undefined {
++  if (holder === 'unknown' || holder.kind === 'none') {
++    return undefined;
++  }
++  if (holder.kind === 'panel' && holder.status === 'idle') {
++    return undefined;
++  }
++  const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
++  return {
++    message:
++      `Claude Limit Buster: session ${shortId} is already open in ${where}. ` +
++      `Resuming here will fork the conversation.`,
++    button: 'Resume Anyway',
++  };
++}
++
++/** The one field {@link buildResumePrompt} needs from a busy peer's `claude agents --json` row. */
++export type BusyPeer = Pick<AgentRow, 'pid' | 'name'>;
++
++/**
++ * Append a coordination sentence to the user's resume prompt when one or
++ * more DIFFERENT Claude sessions are busy or waiting in the same folder
++ * (see liveSessions.ts's `busyFolderPeers`).
++ *
++ * A second controller ruling replaced Task 2's original "block and notify"
++ * treatment of this case: the extension cannot message another session
++ * itself (global constraint #3 - never write into a session this extension
++ * did not create), so instead it tells the RESUMED model to, by naming the
++ * peer(s) in its own opening prompt and asking it to use SendMessage before
++ * editing anything. `resume(job)` still launches the same way either way;
++ * the prompt travels as a single argv element to `claude --resume` (see
++ * resumer.ts's buildResumeArgs), never shell-quoted by hand, so nothing here
++ * needs to escape the names it inserts.
++ *
++ * Exactly the user's own prompt, unchanged, when there are no peers - this
++ * must never add stray text to the common case, which is every resume with
++ * nobody else in the folder.
++ */
++export function buildResumePrompt(userPrompt: string, busyPeers: readonly BusyPeer[]): string {
++  if (busyPeers.length === 0) {
++    return userPrompt;
++  }
++  const names = busyPeers.map((p) => p.name ?? String(p.pid)).join(', ');
++  return (
++    `${userPrompt} Another Claude session is working in this folder: ${names}. ` +
++    `Before editing anything, message it with SendMessage to coordinate who does what.`
++  );
++}
+diff --git a/src/liveSessions.ts b/src/liveSessions.ts
+index cd59ba5..9646887 100644
+--- a/src/liveSessions.ts
++++ b/src/liveSessions.ts
+@@ -13,24 +13,32 @@
+  * `claude agents --json` is the CLI's own consumer of that store and already
+  * does the staleness work, including a procStart comparison that guards
+  * against pid reuse. It requires --json when stdout is not a TTY.
+  *
+  * The listing does not carry `entrypoint`, which is the field that separates
+  * a panel from a terminal, so that one field is read per pid from the store -
+  * but only for a pid the listing has already vouched for. Liveness from the
+  * oracle, label from the file.
+  */
+ 
++import { normalizeProjectPath } from './trust';
++
+ export interface AgentRow {
+   pid: number;
+   kind: string;
+   sessionId: string;
++  /** Absent when the listing did not report it. Needed for the busy-folder check. */
++  cwd?: string;
++  /** "busy" | "idle" | "waiting" as `claude agents --json` prints it. Absent when not reported. */
++  status?: string;
++  /** How `claude agents --json` names the session. Absent when not reported; the coordination prompt (holderPolicy.ts's buildResumePrompt) falls back to the pid then. */
++  name?: string;
+ }
+ 
+ /** The entrypoint a Claude Code panel writes into its own session record. */
+ const PANEL_ENTRYPOINT = 'claude-vscode';
+ 
+ /**
+  * Parse `claude agents --json`.
+  *
+  * Anything unexpected is treated as "no information", never as an error: this
+  * runs right after a resume, and a listing that cannot be read is not a reason
+@@ -46,25 +54,37 @@ export function parseAgentRows(stdout: string): AgentRow[] {
+     return [];
+   }
+   if (!Array.isArray(parsed)) {
+     return [];
+   }
+   const rows: AgentRow[] = [];
+   for (const row of parsed) {
+     if (typeof row !== 'object' || row === null) {
+       continue;
+     }
+-    const { pid, kind, sessionId } = row as Record<string, unknown>;
++    const { pid, kind, sessionId, cwd, status, name } = row as Record<string, unknown>;
+     if (typeof pid !== 'number' || typeof sessionId !== 'string') {
+       continue;
+     }
+-    rows.push({ pid, kind: typeof kind === 'string' ? kind : '', sessionId });
++    const parsedRow: AgentRow = { pid, kind: typeof kind === 'string' ? kind : '', sessionId };
++    // Added only when present and a string: an explicit `undefined` key would
++    // fail the exact-shape deepEqual assertions every existing caller uses.
++    if (typeof cwd === 'string') {
++      parsedRow.cwd = cwd;
++    }
++    if (typeof status === 'string') {
++      parsedRow.status = status;
++    }
++    if (typeof name === 'string') {
++      parsedRow.name = name;
++    }
++    rows.push(parsedRow);
+   }
+   return rows;
+ }
+ 
+ /**
+  * Live interactive processes on `sessionId` other than `ourPid`.
+  *
+  * `ourPid` is the resume this extension just launched, which is itself a live
+  * process on that session - without excluding it every resume would report a
+  * second process against itself. It is optional because VS Code resolves
+@@ -124,10 +144,146 @@ export function livePanelDetector(
+       stdout = runAgents();
+     } catch {
+       return false;
+     }
+     return hasLivePanel(parseAgentRows(stdout), sessionId, ourPid, (pid) => {
+       const record = readRecord(pid);
+       return record && record.sessionId === sessionId ? record.entrypoint : undefined;
+     });
+   };
+ }
++
++/** The per-pid record fields the holder classifier needs. */
++export interface HolderRecord {
++  sessionId: string;
++  entrypoint: string | undefined;
++  bridgeSessionId?: string;
++}
++
++export type SessionHolder =
++  | { kind: 'none' }
++  | { kind: 'panel'; pid: number; bridged: boolean; status: string | undefined }
++  | { kind: 'terminal'; pid: number; status: string | undefined };
++
++/**
++ * Who else is holding this session open right now, if anyone.
++ *
++ * Task 2's reason for existing: resuming into a session a panel or a terminal
++ * already holds forks the transcript (see the module doc above). This is the
++ * pure decision `scheduler.onFire` asks before it spawns anything - liveness
++ * from `rows` (already `claude agents --json`, via `parseAgentRows`), the
++ * panel/terminal label from `readRecord`, exactly the same split
++ * `livePanelDetector` uses and for the same reason (issue #6: the per-pid
++ * file cannot answer "is it alive").
++ *
++ * A panel wins over a terminal when both are present: the whole list of other
++ * live pids is scanned rather than stopping at the first one, so a terminal
++ * seen before a panel in the listing's own order cannot pre-empt it. Only one
++ * terminal pid is remembered - which one does not matter, since every branch
++ * that consumes a 'terminal' result treats any terminal the same way.
++ *
++ * A live pid whose record cannot be read, or names a different session (pid
++ * reuse, or a record left behind by an earlier process, per #6), contributes
++ * nothing - it is liveness with no readable label, and cannot be called
++ * either a panel or a terminal.
++ *
++ * Which terminal pid is reported when more than one is live does not matter -
++ * every caller that consumes a 'terminal' result treats any terminal the same
++ * way - so the loop simply keeps the last one seen rather than guarding for
++ * "only the first", which would be a branch nothing distinguishes.
++ *
++ * `status` ("idle" | "busy" | "waiting", as `claude agents --json` reports
++ * it) is carried on both the panel and terminal results: the controller
++ * corrected Task 2's policy mid-implementation so an IDLE panel resumes as
++ * normal - someone leaving a panel idle at a limit and walking away is the
++ * product's main use case - and only a busy or waiting holder blocks the
++ * spawn. `readRecord` vouches for the pid's entrypoint but not its status, so
++ * status is read from the matching row in `rows` instead, the same source
++ * `otherLivePids` already filtered from.
++ */
++export function classifyHolder(
++  rows: readonly AgentRow[],
++  sessionId: string,
++  ourPid: number | undefined,
++  readRecord: (pid: number) => HolderRecord | undefined,
++): SessionHolder {
++  let terminalPid: number | undefined;
++  let terminalStatus: string | undefined;
++  for (const pid of otherLivePids(rows, sessionId, ourPid)) {
++    const record = readRecord(pid);
++    if (!record || record.sessionId !== sessionId) {
++      continue;
++    }
++    // Exactly one row per live pid (one process, one line in the listing),
++    // so this lookup is exact, not a best guess among several candidates.
++    const status = rows.find((r) => r.pid === pid)?.status;
++    if (record.entrypoint === PANEL_ENTRYPOINT) {
++      return { kind: 'panel', pid, bridged: Boolean(record.bridgeSessionId), status };
++    }
++    terminalPid = pid;
++    terminalStatus = status;
++  }
++  return terminalPid !== undefined ? { kind: 'terminal', pid: terminalPid, status: terminalStatus } : { kind: 'none' };
++}
++
++/**
++ * Every DIFFERENT session already busy or waiting in the same folder as
++ * `cwd`.
++ *
++ * classifyHolder answers "is anyone else on THIS session"; this answers the
++ * other case Task 2 asks for: nobody else is on this session, but one or more
++ * unrelated Claude sessions in the same folder are actively working. The
++ * controller's second ruling on this task changed what that finding does -
++ * it no longer blocks the resume, it feeds holderPolicy.ts's
++ * buildResumePrompt, which tells the resumed model to coordinate with them -
++ * but the finding itself is unchanged: every match, not just one, since the
++ * coordination sentence names all of them. Folders are compared with
++ * `normalizeProjectPath`, the same folding `trust.ts` uses for the CLI's own
++ * project keys, so a Windows drive-letter or slash-direction difference does
++ * not hide a real collision.
++ *
++ * `status: 'busy' | 'waiting'` - an idle session in the same folder is not
++ * actively doing anything right now, so it is not a peer to coordinate with.
++ */
++export function busyFolderPeers(
++  rows: readonly AgentRow[],
++  sessionId: string,
++  cwd: string,
++  platform: NodeJS.Platform,
++): AgentRow[] {
++  const target = normalizeProjectPath(cwd, platform);
++  return rows.filter(
++    (r) =>
++      r.sessionId !== sessionId &&
++      (r.status === 'busy' || r.status === 'waiting') &&
++      r.cwd !== undefined &&
++      normalizeProjectPath(r.cwd, platform) === target,
++  );
++}
++
++/**
++ * `claude agents --json`, run and parsed - or `'unknown'` when the listing
++ * itself could not be run.
++ *
++ * The single impure step both `scheduler.onFire` (holder classification AND
++ * the busy-folder-peers coordination check, off one snapshot rather than two
++ * separate listings) and a manual resume's live-holder check are built on;
++ * `classifyHolder` and `busyFolderPeers` are pure and take these same rows.
++ *
++ * `'unknown'`, not an empty list: a plain "nobody found" and "the listing
++ * itself could not be trusted" call for different handling upstream -
++ * callers here still resume as usual on 'unknown', but log it as a listing
++ * failure rather than silently agreeing nobody is there. Failing closed
++ * would silently stop every resume on a machine where `claude agents`
++ * misbehaves.
++ */
++export function agentRowsDetector(runAgents: () => string): () => AgentRow[] | 'unknown' {
++  return () => {
++    let stdout: string;
++    try {
++      stdout = runAgents();
++    } catch {
++      return 'unknown';
++    }
++    return parseAgentRows(stdout);
++  };
++}
+diff --git a/src/sessionRegistry.ts b/src/sessionRegistry.ts
+index 36379dc..8e98970 100644
+--- a/src/sessionRegistry.ts
++++ b/src/sessionRegistry.ts
+@@ -16,20 +16,27 @@ import * as path from 'node:path';
+  * resolveClaudeLauncher uses for `which`/`readShim` in resumer.ts: this reads
+  * something the extension does not own, so a test hands it fabricated records
+  * instead of depending on whichever Claude Code processes happen to be
+  * running on the machine at the time.
+  */
+ 
+ export interface SessionRecord {
+   sessionId: string;
+   /** Absent in records written by a version that did not record it. */
+   entrypoint: string | undefined;
++  /**
++   * Present only when Remote Control has bridged this session, i.e. Claude
++   * Code web can drive it too. The key is omitted rather than set to
++   * `undefined` when absent, so a record with no bridge looks exactly like it
++   * did before this field existed.
++   */
++  bridgeSessionId?: string;
+ }
+ 
+ export function sessionRegistryDir(): string {
+   return path.join(os.homedir(), '.claude', 'sessions');
+ }
+ 
+ export function readSessionRecord(
+   dir: string,
+   pid: number,
+   readFile: (p: string) => string,
+@@ -38,15 +45,19 @@ export function readSessionRecord(
+   try {
+     parsed = JSON.parse(readFile(path.join(dir, `${pid}.json`))) as Record<string, unknown>;
+   } catch {
+     return undefined;
+   }
+   // The filename is the only thing tying a record to a process, so a record
+   // that names a different pid is not describing the process asked about.
+   if (parsed.pid !== pid || typeof parsed.sessionId !== 'string') {
+     return undefined;
+   }
+-  return {
++  const record: SessionRecord = {
+     sessionId: parsed.sessionId,
+     entrypoint: typeof parsed.entrypoint === 'string' ? parsed.entrypoint : undefined,
+   };
++  if (typeof parsed.bridgeSessionId === 'string' && parsed.bridgeSessionId.length > 0) {
++    record.bridgeSessionId = parsed.bridgeSessionId;
++  }
++  return record;
+ }
+diff --git a/test/autoContinue.test.ts b/test/autoContinue.test.ts
+new file mode 100644
+index 0000000..5c41006
+--- /dev/null
++++ b/test/autoContinue.test.ts
+@@ -0,0 +1,178 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import * as os from 'node:os';
++import * as path from 'node:path';
++import { autoContinueEnabled } from '../src/autoContinue';
++
++const CWD = '/work/app';
++
++/** A reader over an in-memory map, keyed by the exact path asked for, folded
++ * to forward slashes so a test does not need to know which separator
++ * `path.join` chose on the host platform running the suite. Throws for
++ * anything else, the same as a real fs.readFileSync on a missing file. */
++const reader = (files: Record<string, string>) => (p: string) => {
++  const key = p.replace(/\\/g, '/');
++  if (!(key in files)) {
++    throw new Error(`ENOENT: ${p}`);
++  }
++  return files[key]!;
++};
++
++const managedPath = (platform: NodeJS.Platform): string =>
++  (platform === 'win32'
++    ? 'C:\\Program Files\\ClaudeCode\\managed-settings.json'
++    : platform === 'darwin'
++      ? '/Library/Application Support/ClaudeCode/managed-settings.json'
++      : '/etc/claude-code/managed-settings.json'
++  ).replace(/\\/g, '/');
++
++/** Run `fn` with CLAUDE_CONFIG_DIR unset, restoring whatever the suite had after. */
++function withoutConfigDir(fn: () => void): void {
++  const saved = process.env.CLAUDE_CONFIG_DIR;
++  delete process.env.CLAUDE_CONFIG_DIR;
++  try {
++    fn();
++  } finally {
++    if (saved !== undefined) {
++      process.env.CLAUDE_CONFIG_DIR = saved;
++    }
++  }
++}
++
++test('autoContinueEnabled defaults to on when no layer sets the key', () => {
++  // claude.exe 2.1.281: `setting ?? (autoContinueKeyPresence === "absent")` -
++  // absent reads as present-and-true, not as false.
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader({})), true);
++});
++
++test('autoContinueEnabled reads false from the user settings file, the lowest layer', () => {
++  withoutConfigDir(() => {
++    const files = {
++      [path.posix.join(os.homedir().replace(/\\/g, '/'), '.claude', 'settings.json')]: JSON.stringify({
++        autoContinueAtUsageLimit: false,
++      }),
++    };
++    assert.equal(autoContinueEnabled(undefined, 'linux', reader(files)), false);
++  });
++});
++
++test('autoContinueEnabled reads a boolean from CLAUDE_CONFIG_DIR when set, in place of ~/.claude', () => {
++  const saved = process.env.CLAUDE_CONFIG_DIR;
++  process.env.CLAUDE_CONFIG_DIR = '/custom/claude-home';
++  try {
++    const files = {
++      '/custom/claude-home/settings.json': JSON.stringify({ autoContinueAtUsageLimit: false }),
++    };
++    assert.equal(autoContinueEnabled(undefined, 'linux', reader(files)), false);
++  } finally {
++    if (saved === undefined) {
++      delete process.env.CLAUDE_CONFIG_DIR;
++    } else {
++      process.env.CLAUDE_CONFIG_DIR = saved;
++    }
++  }
++});
++
++test('autoContinueEnabled prefers <cwd>/.claude/settings.json over the user settings file', () => {
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++    '/custom/claude-home/settings.json': JSON.stringify({ autoContinueAtUsageLimit: true }),
++  };
++  const saved = process.env.CLAUDE_CONFIG_DIR;
++  process.env.CLAUDE_CONFIG_DIR = '/custom/claude-home';
++  try {
++    assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++  } finally {
++    if (saved === undefined) {
++      delete process.env.CLAUDE_CONFIG_DIR;
++    } else {
++      process.env.CLAUDE_CONFIG_DIR = saved;
++    }
++  }
++});
++
++test('autoContinueEnabled prefers <cwd>/.claude/settings.local.json over <cwd>/.claude/settings.json', () => {
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.local.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: true }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled skips a layer whose JSON parses but is not an object', () => {
++  // JSON.parse('null') and JSON.parse('42') both succeed; neither can be
++  // indexed for the setting key without throwing, so this must be skipped
++  // exactly like a missing or malformed file, not crash the whole read.
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.local.json')]: 'null',
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled prefers managed settings over every other layer', () => {
++  const files = {
++    [managedPath('linux')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++    [path.posix.join(CWD, '.claude', 'settings.local.json')]: JSON.stringify({ autoContinueAtUsageLimit: true }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled reads managed settings from the win32 path', () => {
++  const files = {
++    [managedPath('win32')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'win32', reader(files)), false);
++});
++
++test('autoContinueEnabled reads managed settings from the darwin path', () => {
++  const files = {
++    [managedPath('darwin')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'darwin', reader(files)), false);
++});
++
++test('autoContinueEnabled skips a layer whose key is present but not a boolean', () => {
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.local.json')]: JSON.stringify({ autoContinueAtUsageLimit: 'no' }),
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled skips a layer that cannot be read at all', () => {
++  // No file at settings.local.json (a real fs.readFileSync throws ENOENT);
++  // the next layer down still decides.
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled skips a layer with malformed JSON rather than throwing', () => {
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.local.json')]: '{ not json',
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), false);
++});
++
++test('autoContinueEnabled skips the two cwd-scoped layers entirely when there is no cwd', () => {
++  // A job can be scheduled with no cwd (see PendingJob). Only the managed and
++  // user-level layers can possibly apply.
++  withoutConfigDir(() => {
++    const files = {
++      [path.posix.join(os.homedir().replace(/\\/g, '/'), '.claude', 'settings.json')]: JSON.stringify({
++        autoContinueAtUsageLimit: false,
++      }),
++    };
++    assert.equal(autoContinueEnabled(undefined, 'linux', reader(files)), false);
++  });
++});
++
++test('an explicit true is read the same as an absent key', () => {
++  const files = {
++    [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: true }),
++  };
++  assert.equal(autoContinueEnabled(CWD, 'linux', reader(files)), true);
++});
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index d73c952..fd03e96 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -6,20 +6,21 @@ import * as os from 'node:os';
+ import * as path from 'node:path';
+ import {
+   FakeEventEmitter,
+   FakeTabInputWebview,
+   installVscodeStub,
+   resetVscodeFake,
+   stubModule,
+   vscodeFake,
+   type FakeTab,
+ } from './helpers/vscode';
++import type { AgentRow, HolderRecord } from '../src/liveSessions';
+ 
+ installVscodeStub();
+ 
+ const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+ const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
+ 
+ /**
+  * Stands in for the real transcript watcher, which would otherwise walk
+  * ~/.claude/projects and leave an fs.watch and a poll timer running for the
+  * length of the suite. The extension only ever consumes its events, so a fake
+@@ -121,39 +122,80 @@ let latestReleaseTag: string | undefined;
+ const fetchCalls: string[] = [];
+ 
+ stubModule('./updateCheck', {
+   ...(require('../src/updateCheck') as Record<string, unknown>),
+   fetchLatestReleaseTag: (url?: string) => {
+     fetchCalls.push(url ?? 'default');
+     return Promise.resolve(latestReleaseTag);
+   },
+ });
+ 
++/**
++ * What `claude agents --json` reports for the duration of one test, consumed
++ * by `agentRowsDetector`'s fake below - Task 2's onFire holder check and its
++ * busy-folder-peers coordination check, and a manual resume's live-holder
++ * check, all read this. Default: no other processes, so every existing test
++ * that never sets this (nearly all of them) sees the same "nobody else is
++ * running" world it always has - classifyHolder/busyFolderPeers on an empty
++ * list is 'none' / no peers either way.
++ */
++let fakeAgentRows: AgentRow[] | 'unknown' = [];
++
++/**
++ * What `readSessionRecord` reports for a pid, for the duration of one test -
++ * the entrypoint/bridge label half of classifyHolder's liveness/label split
++ * (see liveSessions.ts). Keyed by pid. classifyHolder only ever asks for a
++ * pid `fakeAgentRows` already vouched for as live, so an unset pid (the
++ * default) correctly reads as "no record", same as a real machine with no
++ * file for that pid.
++ */
++const sessionRecordFor = new Map<number, HolderRecord>();
++
+ stubModule('./liveSessions', {
++  ...(require('../src/liveSessions') as Record<string, unknown>),
+   livePanelDetector: () => (sessionId: string, ourPid: number | undefined) => {
+     detectorCalls.push({ sessionId, ourPid });
+     return livePanelSessions.has(sessionId);
+   },
++  agentRowsDetector: () => () => fakeAgentRows,
++});
++
++stubModule('./sessionRegistry', {
++  ...(require('../src/sessionRegistry') as Record<string, unknown>),
++  readSessionRecord: (_dir: string, pid: number) => sessionRecordFor.get(pid),
++});
++
++/** Whether Claude Code's own auto-continue is on, for the duration of one test. Default true, matching the real default (see autoContinue.ts). */
++let autoContinueOn = true;
++
++stubModule('./autoContinue', {
++  autoContinueEnabled: () => autoContinueOn,
+ });
+ 
+ /**
+  * Where the fake trust module says the CLI's config lives, and how many times
+  * it has actually been read. A test that cares about the mtime cache points
+  * this at a real temp file: the re-check is skipped on an unchanged mtime, and
+  * the only way to see that skip is to count the reads.
+  */
+ let trustConfigPath = '/fake/.claude.json';
+ /** Which spelling the fake trust module reports as the one on record, per cwd. */
+ const trustedSpellingFor = new Map<string, string>();
+ const trustReads = { count: 0 };
+ 
+ stubModule('./trust', {
++  // Spread first so the real (pure) normalizeProjectPath is available too -
++  // liveSessions.ts's busyFolderPeers imports it from this same './trust'
++  // specifier, and a fully-replaced stub would leave it undefined. Every
++  // property below is still faked exactly as before, since object spread
++  // order means these overrides win.
++  ...(require('../src/trust') as Record<string, unknown>),
+   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
+   readClaudeUserConfig: () => {
+     trustReads.count += 1;
+     return undefined;
+   },
+   defaultClaudeConfigPath: () => trustConfigPath,
+   trustedSpelling: (cwd: string) => trustedSpellingFor.get(cwd),
+ });
+ 
+ // Required, not imported: the stubs above must be registered first, and a
+@@ -251,34 +293,34 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing',
+     // the job only survives if extension.ts holds on to it.
+     await oneTick();
+     assert.equal(store.get('claudeLimitBuster.pending'), undefined, 'the scheduler must have consumed it');
+     assert.equal(vscodeFake.terminals.length, 0, 'autoResume is off; nothing may launch on its own');
+ 
+     const offer = offers()[0];
+     assert.ok(offer, `no Resume Now offer was made; saw ${JSON.stringify(vscodeFake.info)}`);
+ 
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+-    resumeNow();
++    await resumeNow();
+ 
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'the job the scheduler dropped must not be reported as gone',
+     );
+     assert.equal(vscodeFake.terminals.length, 1, 'resumeNow must have resumed it');
+     const opts = vscodeFake.terminals[0]?.options as { shellPath: string; shellArgs: string[] };
+     assert.equal(opts.shellPath, LAUNCHER, 'never a shell');
+     assert.deepEqual(opts.shellArgs, ['--resume', SESSION, PROMPT]);
+ 
+     // And it is consumed exactly once.
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 1, 'a consumed job must not resume twice');
+     assert.ok(
+       vscodeFake.info.some((m) => m.message.includes('nothing pending')),
+       'the second call has nothing left to resume',
+     );
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+@@ -313,21 +355,21 @@ test('a notification resumes the session it names, not whichever came ready last
+     assert.equal(vscodeFake.terminals.length, 1, 'accepting one offer resumes one session');
+     assert.deepEqual(
+       argsOf(0),
+       ['--resume', SESSION, PROMPT],
+       'the first offer must resume the session it named, not the one that fired last',
+     );
+ 
+     // The second is untouched, and still reachable from the command.
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 2, 'the second session must still be recoverable');
+     assert.deepEqual(argsOf(1), ['--resume', SESSION_B, PROMPT]);
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+ test('resumeNow takes the counting-down job first and keeps the ready one', async () => {
+   resetVscodeFake();
+   vscodeFake.config = manualConfig();
+@@ -341,34 +383,34 @@ test('resumeNow takes the counting-down job first and keeps the ready one', asyn
+     watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+     await oneTick();
+     assert.equal(offers().length, 1, 'the first session must be waiting to be resumed by hand');
+ 
+     // A second job still counting down.
+     watcher.limitFor(SESSION_B, new Date(Date.now() + 600_000));
+ 
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 1);
+     assert.deepEqual(
+       argsOf(0),
+       ['--resume', SESSION_B, PROMPT],
+       'the job still counting down is the one "Resume Now" means',
+     );
+ 
+     // Resuming the scheduler's job must not have discarded the ready one.
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 2, 'the ready job must survive the first resume');
+     assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 2, 'both sources are empty now');
+     assert.ok(vscodeFake.info.some((m) => m.message.includes('nothing pending')));
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+ test('the chime fires only for a turn in this window, and only while enabled', () => {
+   resetVscodeFake();
+   sounds.length = 0;
+@@ -428,21 +470,21 @@ test('a stale offer cannot resume a session the command already resumed', async
+     assert.ok(watcher, 'activate must have constructed a watcher');
+ 
+     watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+     await oneTick();
+     const offer = offers()[0];
+     assert.ok(offer, 'the session must have offered a manual resume');
+ 
+     // Resume it from the command palette, leaving the notification on screen.
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 1, 'the command resumes it once');
+     assert.deepEqual(argsOf(0), ['--resume', SESSION, PROMPT]);
+ 
+     // Now answer the offer that is still sitting there. The job is gone, so
+     // this must not start a second Claude on the same session.
+     offer.answer('Resume Now');
+     await flush();
+     assert.equal(
+       vscodeFake.terminals.length,
+       1,
+@@ -487,21 +529,21 @@ test('an autoResume that lands on a deleted folder is refused, blames the right
+     );
+     assert.ok(
+       vscodeFake.outputLines.some((l) => l.includes(MISSING_CWD) && l.includes(TRANSCRIPT)),
+       'the log must name both the missing path and the transcript it came from',
+     );
+ 
+     // The job must have been kept, not dropped: it is reachable from Resume
+     // Now instead of vanishing with the scheduler's own pre-fire cleanup.
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+-    resumeNow();
++    await resumeNow();
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'a resume that never launched must not make the job disappear',
+     );
+     assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+     assert.equal(vscodeFake.terminals.length, 0, 'still no terminal');
+   } finally {
+     teardown(ctx);
+   }
+@@ -564,21 +606,21 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
+     assert.ok(
+       vscodeFake.errors.some((m) => m.includes(MISSING_CWD)),
+       `no error named the missing folder; saw ${JSON.stringify(vscodeFake.errors)}`,
+     );
+ 
+     // Answering the offer claims the job by removing it from readyJobs before
+     // resume() runs; since the launch never started, that claim must be
+     // undone rather than left to quietly lose the job.
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+-    resumeNow();
++    await resumeNow();
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'the offer failing must not have discarded the job it claimed',
+     );
+     assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+   } finally {
+     teardown(ctx);
+   }
+ });
+@@ -593,27 +635,27 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
+     assert.ok(watcher, 'activate must have constructed a watcher');
+ 
+     // Still counting down: resumeNow must reach it via scheduler.current, the
+     // same branch that used to call scheduler.cancel() before knowing whether
+     // resume() would even start.
+     watcher.limitFor(SESSION, new Date(Date.now() + 600_000), MISSING_CWD);
+ 
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
+     assert.equal(vscodeFake.errors.length, 1);
+ 
+     // If cancel() had already run, the job would be gone and this second call
+     // would report "nothing pending" instead of failing the same way again.
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'the counting-down job must not have been cancelled out from under a failed resume',
+     );
+     assert.equal(vscodeFake.terminals.length, 0);
+   } finally {
+     teardown(ctx);
+   }
+@@ -808,24 +850,24 @@ test('resumeNow on one counting-down session leaves the other one counting down'
+   try {
+     const watcher = FakeWatcher.latest;
+     assert.ok(watcher, 'activate must have constructed a watcher');
+ 
+     watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
+     watcher.limitFor(SESSION_B, new Date(Date.now() + 300_000));
+ 
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.deepEqual(argsOf(0), ['--resume', SESSION_B, PROMPT], 'the soonest session goes first');
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 2, 'the other session must still have been counting down');
+     assert.deepEqual(argsOf(1), ['--resume', SESSION, PROMPT]);
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+ test('Resume Now from the palette into a deleted folder keeps a job that was waiting to be started by hand', async () => {
+   // The fourth resume() call site. The other three - autoResume, the offer
+   // button, and a job still counting down - already keep their job when the
+@@ -839,25 +881,25 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
+     const watcher = FakeWatcher.latest;
+     assert.ok(watcher, 'activate must have constructed a watcher');
+ 
+     watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+     await oneTick();
+     assert.ok(offers()[0], 'the job must be waiting to be started by hand');
+ 
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow, 'resumeNow must be registered');
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.terminals.length, 0, 'a missing cwd must not launch a terminal');
+     assert.equal(vscodeFake.errors.length, 1);
+ 
+-    resumeNow();
++    await resumeNow();
+     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'a failed launch from the palette must not have discarded the ready job',
+     );
+   } finally {
+     teardown(ctx);
+   }
+ });
+@@ -1108,21 +1150,21 @@ test('a job waiting for Resume Now survives a reload', async () => {
+   assert.equal(vscodeFake.terminals.length, 0, 'setup: autoResume is off');
+   // A reload is exactly this: every subscription disposed, then activate again
+   // over the same globalState.
+   teardown(first);
+ 
+   const second = contextOver(store);
+   start(second);
+   try {
+     const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+     assert.ok(resumeNow);
+-    resumeNow();
++    await resumeNow();
+     await flush();
+     assert.equal(
+       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
+       0,
+       'the job was waiting before the reload and must still be there after it',
+     );
+     assert.equal(vscodeFake.terminals.length, 1, 'Resume Now must launch the restored job');
+   } finally {
+     teardown(second);
+   }
+@@ -1600,10 +1642,325 @@ test('with no trusted spelling on record, the recorded cwd is used as it was', a
+   const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+   start(ctx);
+   try {
+     await oneTick();
+     const opts = vscodeFake.terminals[0]?.options as { cwd?: string } | undefined;
+     assert.equal(opts?.cwd, REAL_CWD);
+   } finally {
+     teardown(ctx);
+   }
+ });
++
++// ---------------------------------------------------------------------------
++// Task 2: never start a second writer on a live session.
++//
++// `fakeAgentRows` stands in for `claude agents --json`; `sessionRecordFor`
++// stands in for the per-pid `~/.claude/sessions/<pid>.json` record. Both
++// default to "nobody else is running anything", so every test above this
++// section runs exactly as it did before this task existed.
++// ---------------------------------------------------------------------------
++
++/** SESSION's row, live via the fake listing, holding the session with the given entrypoint and status. */
++const holderRow = (entrypoint: string, status: string, over: Partial<AgentRow> = {}): void => {
++  fakeAgentRows = [{ pid: 111, kind: 'interactive', sessionId: SESSION, status, ...over }];
++  sessionRecordFor.set(111, { sessionId: SESSION, entrypoint });
++};
++
++const clearHolders = () => {
++  fakeAgentRows = [];
++  sessionRecordFor.clear();
++};
++
++test('scheduler.onFire resumes as normal when the only other process is an IDLE panel', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('claude-vscode', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 1, 'an idle panel is the main use case - it must not block the resume');
++    assert.equal(
++      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
++      0,
++      'must not notify instead of spawning',
++    );
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire silently drops the job when the only other process is a BUSY panel', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'a busy panel already holds the session');
++    // Not the raw message count: a fresh activation also offers the
++    // first-run "check for updates?" prompt, which is unrelated noise here.
++    // The thing under test is that nothing NAMES this job at all.
++    assert.equal(
++      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
++      0,
++      'a busy holder drops silently - no notification naming this job',
++    );
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    assert.ok(
++      vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
++      'the dropped job must not have been remembered for manual resume',
++    );
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire silently drops the job when the only other process is a WAITING terminal', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('cli', 'waiting');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0);
++    assert.equal(
++      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
++      0,
++      'a waiting terminal drops silently too',
++    );
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-continue is on', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  autoContinueOn = true;
++  holderRow('cli', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'auto-continue is already going to pick this session back up');
++    assert.equal(
++      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
++      0,
++      'auto-continue being on means there is nothing to offer',
++    );
++  } finally {
++    autoContinueOn = true;
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  autoContinueOn = false;
++  holderRow('cli', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'not yet - the button has not been clicked');
++    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
++    assert.ok(offer, `no offer was made; saw ${JSON.stringify(vscodeFake.info)}`);
++    offer.answer('Resume in Terminal Anyway');
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 1, 'the button claims the job and resumes it');
++  } finally {
++    autoContinueOn = true;
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFFERENT session is busy in the same folder', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  // A different sessionId, busy, in the same folder as the job (REAL_CWD,
++  // pastJob()'s default cwd) - nobody is on THIS session, so classifyHolder
++  // alone would say 'none' and resume unmodified; busyFolderPeers is what
++  // finds this row and feeds the coordination prompt.
++  fakeAgentRows = [
++    { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
++  ];
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 1, 'this is "resume anyway", not a block');
++    const prompt = argsOf(0)?.[2];
++    assert.match(prompt ?? '', /other-session/, 'the peer must be named in the resumed prompt');
++    assert.match(prompt ?? '', /SendMessage/, 'the resumed model must be told how to coordinate');
++    assert.ok(prompt?.startsWith(PROMPT), `the user's own prompt must still lead: ${prompt}`);
++    assert.ok(
++      vscodeFake.info.some((m) => m.message.includes('other-session')),
++      'the person is told too, non-blockingly',
++    );
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire does not touch the prompt when the folder is quiet', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(argsOf(0)?.[2], PROMPT, 'no busy peers - the prompt must be exactly the user\'s own');
++    assert.equal(
++      vscodeFake.info.filter((m) => m.message.includes('another Claude session')).length,
++      0,
++      'nothing to coordinate about - no coordination notice either',
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('scheduler.onFire does not run the folder-busy check for an idle-panel resume', async () => {
++  // The busy-folder-peers check is specifically for "nobody is on THIS
++  // session" (holder.kind === 'none'); an idle panel is a different, already
++  //-decided case and must not also be run through it.
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  fakeAgentRows = [
++    { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
++    { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
++  ];
++  sessionRecordFor.set(111, { sessionId: SESSION, entrypoint: 'claude-vscode' });
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 1);
++    assert.equal(argsOf(0)?.[2], PROMPT, 'an idle-panel resume must not be touched by the folder-busy check');
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('resumeNow shows a modal fork warning for a busy holder; declining leaves it unresumed', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
++  start(ctx);
++  try {
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    const pending = resumeNow();
++    await flush();
++    const modal = vscodeFake.warningOffers.find((w) => w.modal);
++    assert.ok(modal, 'a busy panel must warn modally before a manual resume');
++    assert.equal(modal.items[0], 'Resume Anyway');
++    assert.match(modal.message, /fork/i);
++    assert.equal(vscodeFake.terminals.length, 0, 'must not resume before the modal is answered');
++    modal.answer(undefined);
++    await pending;
++    assert.equal(vscodeFake.terminals.length, 0, 'declining the modal must not launch anything');
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('resumeNow proceeds after Resume Anyway is clicked on the modal', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
++  start(ctx);
++  try {
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    const pending = resumeNow();
++    await flush();
++    const modal = vscodeFake.warningOffers.find((w) => w.modal);
++    assert.ok(modal);
++    modal.answer('Resume Anyway');
++    await pending;
++    assert.equal(vscodeFake.terminals.length, 1, 'Resume Anyway must still launch the resume');
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('resumeNow shows no modal for an idle panel - it is not a live conflict', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  holderRow('claude-vscode', 'idle');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
++  start(ctx);
++  try {
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    await resumeNow();
++    await flush();
++    assert.equal(vscodeFake.warningOffers.length, 0, 'an idle panel needs no modal');
++    assert.equal(vscodeFake.terminals.length, 1, 'and the resume proceeds directly');
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('resumeNow also warns modally for a busy holder on a job waiting in the ready list, not just a counting-down one', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    // autoResume off: firing moves the job into the ready list, not
++    // scheduler.current, so this exercises resumeNow's OTHER branch.
++    await oneTick();
++    assert.equal(vscodeFake.terminals.length, 0, 'setup: not auto-resumed');
++    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
++    const pending = resumeNow();
++    await flush();
++    const modal = vscodeFake.warningOffers.find((w) => w.modal);
++    assert.ok(modal, 'the ready-list path must also warn modally for a busy holder');
++    modal.answer('Resume Anyway');
++    await pending;
++    assert.equal(vscodeFake.terminals.length, 1);
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
++
++test('the off-autoResume "Resume Now" notification button also warns modally for a busy holder', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  holderRow('claude-vscode', 'busy');
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const offer = offers()[0];
++    assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
++    offer.answer('Resume Now');
++    await flush();
++    const modal = vscodeFake.warningOffers.find((w) => w.modal);
++    assert.ok(modal, 'the notification button is just as much a manual resume as the command');
++    assert.equal(vscodeFake.terminals.length, 0, 'must not resume before the modal is answered');
++    modal.answer('Resume Anyway');
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 1);
++  } finally {
++    clearHolders();
++    teardown(ctx);
++  }
++});
+diff --git a/test/helpers/vscode.ts b/test/helpers/vscode.ts
+index 9392bdb..c9f2415 100644
+--- a/test/helpers/vscode.ts
++++ b/test/helpers/vscode.ts
+@@ -37,20 +37,22 @@ export interface FakeTerminal {
+ /**
+  * One recorded information message. `answer` settles the promise the extension
+  * is awaiting, so a test can leave an offer open - firing other events while it
+  * hangs - and accept it later, which is the only way to reproduce a second
+  * session coming ready before the first notification is clicked.
+  */
+ export interface FakeInfoMessage {
+   message: string;
+   items: string[];
+   answer(item?: string): void;
++  /** True when shown with `{ modal: true }`, as the live-holder fork warning is. */
++  modal?: boolean;
+ }
+ 
+ export interface FakeStatusBarItem {
+   alignment: number;
+   priority: number;
+   command?: string;
+   name?: string;
+   text: string;
+   tooltip?: unknown;
+   backgroundColor?: unknown;
+@@ -224,27 +226,38 @@ const fakeVscode = {
+       let settle: (item: string | undefined) => void = () => {};
+       const answered = new Promise<string | undefined>((r) => {
+         settle = r;
+       });
+       vscodeFake.info.push({ message, items, answer: (item?: string) => settle(item) });
+       return answered;
+     },
+     // Mirrors showInformationMessage: a warning can carry action buttons
+     // too, and the budget refusal offers one. `warnings` stays a string
+     // array so the tests that only read messages keep working.
+-    showWarningMessage: (message: string, ...items: string[]) => {
++    //
++    // Real VS Code overloads this with an optional MessageOptions object
++    // ({modal?: boolean}) ahead of the button labels - the live-holder fork
++    // warning uses it. Accepted here as `...args` rather than a fixed
++    // `options?` parameter so a plain string-only call (every other existing
++    // caller) is not forced to pass one.
++    showWarningMessage: (message: string, ...args: unknown[]) => {
++      const modal =
++        args.length > 0 && typeof args[0] === 'object' && args[0] !== null
++          ? Boolean((args[0] as { modal?: boolean }).modal)
++          : undefined;
++      const items = (modal === undefined ? args : args.slice(1)) as string[];
+       vscodeFake.warnings.push(message);
+       let settle: (item: string | undefined) => void = () => {};
+       const answered = new Promise<string | undefined>((r) => {
+         settle = r;
+       });
+-      vscodeFake.warningOffers.push({ message, items, answer: (item?: string) => settle(item) });
++      vscodeFake.warningOffers.push({ message, items, modal, answer: (item?: string) => settle(item) });
+       return answered;
+     },
+     showErrorMessage: (message: string) => {
+       vscodeFake.errors.push(message);
+       return Promise.resolve(undefined);
+     },
+   },
+   commands: {
+     registerCommand: (id: string, handler: (...args: unknown[]) => unknown) => {
+       vscodeFake.commands.set(id, handler);
+diff --git a/test/holderPolicy.test.ts b/test/holderPolicy.test.ts
+new file mode 100644
+index 0000000..8a3dd65
+--- /dev/null
++++ b/test/holderPolicy.test.ts
+@@ -0,0 +1,187 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { decideOnFire, manualResumeWarning, buildResumePrompt } from '../src/holderPolicy';
++
++const SHORT = '0b3d1f66';
++
++// ---------------------------------------------------------------------------
++// decideOnFire: scheduler.onFire's decision, before it ever calls resume().
++//
++// Status-driven per the controller's mid-task correction: an IDLE panel
++// resumes as normal (the product's main use case - someone leaves a panel
++// idle at a limit and walks away); a panel or terminal that is busy or
++// waiting drops the job silently (no spawn, no remember, no notice); an idle
++// terminal defers to autoContinueOn.
++// ---------------------------------------------------------------------------
++
++test('decideOnFire resumes as today when nobody holds the session', () => {
++  const decision = decideOnFire({ kind: 'none' }, true, SHORT);
++  assert.equal(decision.resume, true);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++});
++
++test('decideOnFire resumes as today when the listing failed, but logs a warning about it', () => {
++  // Failing closed here would silently stop every resume on a machine where
++  // `claude agents` misbehaves - 'unknown' must still resume, just be logged
++  // as a listing failure.
++  const decision = decideOnFire('unknown', true, SHORT);
++  assert.equal(decision.resume, true);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++  assert.equal(decision.logLevel, 'warn');
++  assert.match(decision.logMessage ?? '', /could not list/i);
++});
++
++test('decideOnFire resumes an IDLE panel as normal - the product\'s main use case', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'idle' }, true, SHORT);
++  assert.equal(decision.resume, true);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined, 'must not notify instead of spawning');
++});
++
++test('decideOnFire drops the job silently for a BUSY panel - no spawn, no remember, no notice', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++  assert.match(decision.logMessage ?? '', /busy/i);
++});
++
++test('decideOnFire drops the job silently for a WAITING panel too', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'waiting' }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++  assert.match(decision.logMessage ?? '', /waiting/i);
++});
++
++test('decideOnFire mentions Remote Control in the log line for a bridged, busy panel', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true, status: 'busy' }, true, SHORT);
++  assert.match(decision.logMessage ?? '', /remote control/i);
++});
++
++test('decideOnFire does not mention Remote Control when the busy panel is not bridged', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
++  assert.doesNotMatch(decision.logMessage ?? '', /remote control/i);
++});
++
++test('decideOnFire treats an unreported panel status as not-idle (conservative default)', () => {
++  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++});
++
++test('decideOnFire drops the job silently for a BUSY terminal, regardless of auto-continue', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++});
++
++test('decideOnFire drops the job silently for a WAITING terminal, regardless of auto-continue', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'waiting' }, false, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++});
++
++test('decideOnFire leaves an IDLE terminal alone, unremembered, when auto-continue is on', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, false);
++  assert.equal(decision.notice, undefined);
++  assert.match(decision.logMessage ?? '', /auto-continue/i);
++});
++
++test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT);
++  assert.equal(decision.resume, false);
++  assert.equal(decision.remember, true);
++  assert.ok(decision.notice);
++  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
++  assert.match(decision.notice?.message ?? '', /terminal/i);
++});
++
++test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
++  const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
++  assert.match(decision.notice?.message ?? '', /^Claude Limit Buster:/);
++});
++
++// ---------------------------------------------------------------------------
++// manualResumeWarning: the modal shown by the resumeNow command and the
++// off-autoResume "Resume Now" notification button.
++//
++// Per the same correction: an idle panel needs no modal. Every other live
++// holder still warns - busy/waiting of either kind, or any terminal.
++// ---------------------------------------------------------------------------
++
++test('manualResumeWarning is silent when nobody holds the session', () => {
++  assert.equal(manualResumeWarning({ kind: 'none' }, SHORT), undefined);
++});
++
++test('manualResumeWarning is silent when the listing failed', () => {
++  // Consistent with decideOnFire: not knowing is not a reason to block a
++  // resume the user explicitly asked for by hand.
++  assert.equal(manualResumeWarning('unknown', SHORT), undefined);
++});
++
++test('manualResumeWarning is silent for an idle panel', () => {
++  assert.equal(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'idle' }, SHORT), undefined);
++});
++
++test('manualResumeWarning names a panel and offers Resume Anyway when the panel is busy', () => {
++  const warning = manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'busy' }, SHORT);
++  assert.ok(warning);
++  assert.equal(warning?.button, 'Resume Anyway');
++  assert.match(warning?.message ?? '', /claude panel/i);
++  assert.match(warning?.message ?? '', /fork/i);
++});
++
++test('manualResumeWarning warns for a waiting panel too', () => {
++  assert.ok(manualResumeWarning({ kind: 'panel', pid: 1, bridged: false, status: 'waiting' }, SHORT));
++});
++
++test('manualResumeWarning warns for an IDLE terminal - unlike an idle panel, there is no auto-resync for it', () => {
++  const warning = manualResumeWarning({ kind: 'terminal', pid: 1, status: 'idle' }, SHORT);
++  assert.ok(warning);
++  assert.match(warning?.message ?? '', /terminal/i);
++  assert.doesNotMatch(warning?.message ?? '', /panel/i);
++});
++
++test('manualResumeWarning warns for a busy terminal', () => {
++  assert.ok(manualResumeWarning({ kind: 'terminal', pid: 1, status: 'busy' }, SHORT));
++});
++
++// ---------------------------------------------------------------------------
++// buildResumePrompt: appends a coordination sentence when a DIFFERENT
++// session is busy or waiting in the same folder (liveSessions.ts's
++// busyFolderPeers). Replaces the original "block and notify" treatment of
++// that case per the controller's second ruling: resume anyway, and tell the
++// resumed model to coordinate, since this extension cannot message another
++// session itself.
++// ---------------------------------------------------------------------------
++
++test('buildResumePrompt returns exactly the user prompt when there are no busy peers', () => {
++  assert.equal(buildResumePrompt('Continue where you left off.', []), 'Continue where you left off.');
++});
++
++test('buildResumePrompt appends a sentence naming one busy peer by its name', () => {
++  const prompt = buildResumePrompt('Continue where you left off.', [{ pid: 42, name: 'refactor-auth' }]);
++  assert.match(prompt, /^Continue where you left off\./);
++  assert.match(prompt, /Another Claude session is working in this folder: refactor-auth\./);
++  assert.match(prompt, /message it with SendMessage to coordinate who does what/);
++});
++
++test('buildResumePrompt falls back to the pid when a peer has no name', () => {
++  const prompt = buildResumePrompt('Continue.', [{ pid: 42, name: undefined }]);
++  assert.match(prompt, /working in this folder: 42\./);
++});
++
++test('buildResumePrompt names every peer, not just the first', () => {
++  const prompt = buildResumePrompt('Continue.', [
++    { pid: 1, name: 'alpha' },
++    { pid: 2, name: 'beta' },
++  ]);
++  assert.match(prompt, /working in this folder: alpha, beta\./);
++});
+diff --git a/test/liveSessions.test.ts b/test/liveSessions.test.ts
+index 10367c1..f91c287 100644
+--- a/test/liveSessions.test.ts
++++ b/test/liveSessions.test.ts
+@@ -1,23 +1,31 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { parseAgentRows, otherLivePids, hasLivePanel, livePanelDetector } from '../src/liveSessions';
++import {
++  parseAgentRows,
++  otherLivePids,
++  hasLivePanel,
++  livePanelDetector,
++  classifyHolder,
++  busyFolderPeers,
++  agentRowsDetector,
++} from '../src/liveSessions';
+ 
+ const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+ const OTHER = '9a1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e';
+ 
+ /** The shape `claude agents --json` prints, trimmed to the fields used here. */
+ const rowsJson = (...rows: unknown[]) => JSON.stringify(rows);
+ 
+-test('parseAgentRows reads pid, kind and sessionId off the listing', () => {
++test('parseAgentRows reads pid, kind and sessionId off the listing, ignoring fields it does not know', () => {
+   const rows = parseAgentRows(
+-    rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION, status: 'idle' }),
++    rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION, startedAt: 1790216331148 }),
+   );
+   assert.deepEqual(rows, [{ pid: 9624, kind: 'interactive', sessionId: SESSION }]);
+ });
+ 
+ test('parseAgentRows returns nothing rather than throwing on output that is not JSON', () => {
+   // The CLI prints a human-readable table when --json is missing, and an
+   // error to stdout when the command is unavailable. Neither is a crash here.
+   assert.deepEqual(parseAgentRows('No agents running.'), []);
+   assert.deepEqual(parseAgentRows(''), []);
+ });
+@@ -131,20 +139,226 @@ test('livePanelDetector says no when the listing cannot be run', () => {
+   // reason to interrupt someone right after a resume.
+   const detect = livePanelDetector(
+     () => {
+       throw new Error('ENOENT');
+     },
+     () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }),
+   );
+   assert.equal(detect(SESSION, 222), false);
+ });
+ 
++// ---------------------------------------------------------------------------
++// AgentRow carries cwd and status too (Task 2), for the busy-folder check.
++// The existing tests above assert exact-shape rows with deepEqual, so these
++// two fields must be omitted from a row entirely when the listing did not
++// report them - present as `undefined` would fail those deepEqual checks.
++// ---------------------------------------------------------------------------
++
++test('parseAgentRows carries cwd and status when the listing reports them', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION, cwd: '/work/app', status: 'busy' }),
++  );
++  assert.deepEqual(rows, [{ pid: 9624, kind: 'interactive', sessionId: SESSION, cwd: '/work/app', status: 'busy' }]);
++});
++
++test('parseAgentRows omits cwd and status rather than reporting them as undefined', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION }));
++  assert.deepEqual(rows, [{ pid: 9624, kind: 'interactive', sessionId: SESSION }]);
++  assert.equal('cwd' in rows[0]!, false);
++  assert.equal('status' in rows[0]!, false);
++});
++
++test('parseAgentRows carries name when the listing reports it, for the coordination prompt', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION, name: 'refactor-auth' }));
++  assert.deepEqual(rows, [{ pid: 9624, kind: 'interactive', sessionId: SESSION, name: 'refactor-auth' }]);
++});
++
++test('parseAgentRows omits name rather than reporting it as undefined', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 9624, kind: 'interactive', sessionId: SESSION }));
++  assert.equal('name' in rows[0]!, false);
++});
++
++// ---------------------------------------------------------------------------
++// classifyHolder: the pure classifier scheduler.onFire uses to decide whether
++// somebody already holds the session before spawning a second writer.
++// ---------------------------------------------------------------------------
++
++test('classifyHolder reports none when nothing else is live on the session', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 222, kind: 'interactive', sessionId: SESSION }));
++  assert.deepEqual(classifyHolder(rows, SESSION, 222, () => undefined), { kind: 'none' });
++});
++
++test('classifyHolder reports a panel, not bridged, when the vouched record has no bridgeSessionId', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }));
++  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false, status: 'idle' });
++});
++
++test('classifyHolder reports a bridged panel when Remote Control is connected', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'busy' }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({
++    sessionId: SESSION,
++    entrypoint: 'claude-vscode',
++    bridgeSessionId: 'bridge-1',
++  }));
++  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: true, status: 'busy' });
++});
++
++test('classifyHolder reports a terminal for a cli entrypoint', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'cli' }));
++  assert.deepEqual(holder, { kind: 'terminal', pid: 111, status: 'idle' });
++});
++
++test('classifyHolder reports a terminal for any non-panel entrypoint, not only cli', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION, status: 'waiting' }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'sdk' }));
++  assert.deepEqual(holder, { kind: 'terminal', pid: 111, status: 'waiting' });
++});
++
++test('classifyHolder carries status undefined when the listing did not report it', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: SESSION, entrypoint: 'claude-vscode' }));
++  assert.deepEqual(holder, { kind: 'panel', pid: 111, bridged: false, status: undefined });
++});
++
++test('classifyHolder reads status off the matching row, not some other one in the listing', () => {
++  // Two other live pids on this session, with different statuses - proves the
++  // status attached to the result is actually looked up per pid, not, say,
++  // always the first row's or a constant.
++  const rows = parseAgentRows(
++    rowsJson(
++      { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
++      { pid: 222, kind: 'interactive', sessionId: SESSION, status: 'busy' },
++    ),
++  );
++  const holder = classifyHolder(rows, SESSION, 333, () => ({ sessionId: SESSION, entrypoint: 'cli' }));
++  assert.equal((holder as { status?: string }).status, 'busy', 'the last (only reported) terminal pid is 222, status busy');
++});
++
++test('classifyHolder prefers a panel over a terminal when both are present, regardless of row order', () => {
++  const rows = parseAgentRows(
++    rowsJson(
++      { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
++      { pid: 222, kind: 'interactive', sessionId: SESSION, status: 'busy' },
++    ),
++  );
++  const holder = classifyHolder(rows, SESSION, 333, (pid) =>
++    pid === 111 ? { sessionId: SESSION, entrypoint: 'cli' } : { sessionId: SESSION, entrypoint: 'claude-vscode' },
++  );
++  assert.deepEqual(holder, { kind: 'panel', pid: 222, bridged: false, status: 'busy' });
++});
++
++test('classifyHolder ignores a live pid whose record names a different session', () => {
++  // Same guard livePanelDetector already applies: the listing vouches the pid
++  // is alive, but a record for a different session is not describing it.
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
++  const holder = classifyHolder(rows, SESSION, 222, () => ({ sessionId: OTHER, entrypoint: 'claude-vscode' }));
++  assert.deepEqual(holder, { kind: 'none' });
++});
++
++test('classifyHolder ignores a live pid with no record to read', () => {
++  const rows = parseAgentRows(rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
++  assert.deepEqual(classifyHolder(rows, SESSION, 222, () => undefined), { kind: 'none' });
++});
++
++// ---------------------------------------------------------------------------
++// busyFolderPeers: every DIFFERENT session busy or waiting in the same
++// folder. Feeds holderPolicy.ts's buildResumePrompt, which tells the
++// resumed model to coordinate with each one by name.
++// ---------------------------------------------------------------------------
++
++test('busyFolderPeers finds a different session busy in the same folder', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'busy' }),
++  );
++  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
++  assert.deepEqual(found.map((r) => r.pid), [555]);
++});
++
++test('busyFolderPeers also finds a different session that is waiting, not only busy', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'waiting' }),
++  );
++  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
++  assert.deepEqual(found.map((r) => r.pid), [555]);
++});
++
++test('busyFolderPeers returns every match, not just one', () => {
++  const rows = parseAgentRows(
++    rowsJson(
++      { pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'busy', name: 'a' },
++      { pid: 556, kind: 'interactive', sessionId: '11111111-1111-1111-1111-111111111111', cwd: '/work/app', status: 'waiting', name: 'b' },
++    ),
++  );
++  const found = busyFolderPeers(rows, SESSION, '/work/app', 'linux');
++  assert.deepEqual(found.map((r) => r.pid).sort(), [555, 556]);
++});
++
++test('busyFolderPeers ignores the same session, even if it is somehow reported busy', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: SESSION, cwd: '/work/app', status: 'busy' }),
++  );
++  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
++});
++
++test('busyFolderPeers ignores a different session that is only idle', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/app', status: 'idle' }),
++  );
++  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
++});
++
++test('busyFolderPeers ignores a busy different session in a different folder', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: '/work/other', status: 'busy' }),
++  );
++  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
++});
++
++test('busyFolderPeers skips a busy row with no cwd rather than throwing', () => {
++  // `claude agents --json` can vouch a pid is alive and busy without ever
++  // reporting its cwd; that row cannot be compared for folder equality and
++  // must not crash the search for ones that can be.
++  const rows = parseAgentRows(rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, status: 'busy' }));
++  assert.deepEqual(busyFolderPeers(rows, SESSION, '/work/app', 'linux'), []);
++});
++
++test('busyFolderPeers normalizes drive-letter casing and slash direction (win32)', () => {
++  const rows = parseAgentRows(
++    rowsJson({ pid: 555, kind: 'interactive', sessionId: OTHER, cwd: 'c:/work/app', status: 'busy' }),
++  );
++  const found = busyFolderPeers(rows, SESSION, 'C:\\work\\app', 'win32');
++  assert.deepEqual(found.map((r) => r.pid), [555]);
++});
++
++// ---------------------------------------------------------------------------
++// agentRowsDetector: the one impure listing fetch scheduler.onFire and a
++// manual resume both build their holder/peer checks on.
++// ---------------------------------------------------------------------------
++
++test('agentRowsDetector parses the real listing', () => {
++  const detect = agentRowsDetector(() => rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
++  assert.deepEqual(detect(), [{ pid: 111, kind: 'interactive', sessionId: SESSION }]);
++});
++
++test('agentRowsDetector reports unknown, not an empty list, when the listing cannot be run', () => {
++  // An empty list and "could not find out" must stay distinguishable: an
++  // empty list is a fact (nobody is running anything), 'unknown' is the
++  // absence of one, and a caller that logs a listing failure needs to tell
++  // them apart.
++  const detect = agentRowsDetector(() => {
++    throw new Error('ENOENT');
++  });
++  assert.equal(detect(), 'unknown');
++});
++
+ test('livePanelDetector reads a record only for pids the listing vouched for', () => {
+   const asked: number[] = [];
+   const detect = livePanelDetector(
+     () =>
+       rowsJson(
+         { pid: 111, kind: 'interactive', sessionId: SESSION },
+         { pid: 222, kind: 'interactive', sessionId: SESSION },
+         { pid: 333, kind: 'interactive', sessionId: OTHER },
+       ),
+     (pid) => {
+diff --git a/test/sessionRegistry.test.ts b/test/sessionRegistry.test.ts
+index 1edc44e..a582146 100644
+--- a/test/sessionRegistry.test.ts
++++ b/test/sessionRegistry.test.ts
+@@ -83,10 +83,40 @@ test('readSessionRecord returns undefined when the record names no session', ()
+ test('readSessionRecord reports a missing entrypoint as undefined, not as a panel', () => {
+   const record = readSessionRecord(
+     DIR,
+     9624,
+     reader({
+       '/fake/.claude/sessions/9624.json': JSON.stringify({ pid: 9624, sessionId: SESSION }),
+     }),
+   );
+   assert.deepEqual(record, { sessionId: SESSION, entrypoint: undefined });
+ });
++
++test('readSessionRecord carries bridgeSessionId when Remote Control is connected', () => {
++  // The classifier's `panel` result needs to say whether the session is
++  // bridged, so Remote Control's own auto-continue can be mentioned instead
++  // of assuming nothing will pick the session back up.
++  const record = readSessionRecord(
++    DIR,
++    9624,
++    reader({
++      '/fake/.claude/sessions/9624.json': JSON.stringify({
++        pid: 9624,
++        sessionId: SESSION,
++        entrypoint: 'claude-vscode',
++        bridgeSessionId: 'bridge-abc',
++      }),
++    }),
++  );
++  assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'claude-vscode', bridgeSessionId: 'bridge-abc' });
++});
++
++test('readSessionRecord omits bridgeSessionId when the record has none, rather than reporting it as an empty string', () => {
++  const record = readSessionRecord(
++    DIR,
++    9624,
++    reader({
++      '/fake/.claude/sessions/9624.json': JSON.stringify({ pid: 9624, sessionId: SESSION, entrypoint: 'cli' }),
++    }),
++  );
++  assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'cli' });
++});
