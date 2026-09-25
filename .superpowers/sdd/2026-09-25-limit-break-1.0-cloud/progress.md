@@ -169,3 +169,5 @@ Task 8: complete (commits 5392b80..32a1515, review clean)
   - Task 9b: minor (deferred): test/readmeSettings.test.ts rejects column-padded table rows with a misleading "missing" message.
   - Task 9b: minor (deferred): README "What you will see" quotes the tooltip link as "Open Claude to Trust"; the tooltip says "Trust this folder" (the notification button says "Open Claude to Trust").
 - Task 9b: fix round 1/5 (2 claimed addressed + 62d857f added from a sweep; commit cb13d7e); 610/610 unit, check-vsix green. Scoped re-review dispatched (sonnet).
+- Task 9b re-review 1: all ADDRESSED; each new CHANGELOG bullet verified against its commit.
+Task 9b (docs): complete (commits 4f87eb9..cb13d7e, 1 fix round; 2 minors deferred). The version bump + release/1.0.0 follow the final review.
