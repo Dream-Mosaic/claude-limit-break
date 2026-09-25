@@ -140,3 +140,6 @@ Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3
   - Task 4b: minor (deferred): a stall check armed before Cancel can record/notify just after Cancel.
   - Task 4b: minor (→ 9b): package.json description for statusBar "pending" is stale (gave-up now shows in that mode).
 - Task 4b: fix round 1/5 (2 claimed addressed, awaiting re-review; commits 06dd962..f1ce3df); 577/577 unit, 9/9 integration; 15/15 mutations caught. Scoped re-review dispatched (sonnet).
+- Task 4b re-review 1: both ADDRESSED; resolveSession on turn-end does no I/O (statBytes stub); no claim line touched; tsc clean.
+Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 4 minors deferred)
+- Task 5b: dispatched (sonnet) at base 0ba5d0d
