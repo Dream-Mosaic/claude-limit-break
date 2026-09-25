@@ -1462,6 +1462,27 @@ test('the untrusted-folder notice offers "Open Claude to Trust", and clicking it
   }
 });
 
+test('dismissing the untrusted-folder notice opens no terminal', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+  trustedCwds = new Set(); // nothing trusted
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
+    await flush();
+    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+    assert.ok(notice, 'setup: expected the schedule notice');
+    // Dismissed, same as closing the notification without picking a button.
+    notice.answer(undefined);
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'dismissing the notice must not open a terminal');
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
 test('a trusted folder\'s notice never offers the trust button', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
