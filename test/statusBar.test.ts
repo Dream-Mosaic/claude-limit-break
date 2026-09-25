@@ -84,6 +84,26 @@ test('trustCommandUri encodes a Windows path with a backslash, a space and a #',
   assert.deepEqual(JSON.parse(decodeURIComponent(query)), [cwd], 'must decode back to the exact cwd');
 });
 
+// Review 1, Important 1: encodeURIComponent leaves `( ) ! ' *` raw (they are
+// "unreserved" per RFC 3986's own definition, which encodeURIComponent
+// follows). A cwd containing any of them - an unbalanced ")" is enough -
+// otherwise sits raw inside the Markdown link's `(...)` target, and a
+// Markdown renderer reads a link target only up to the first unescaped ")":
+// the rest of the encoded JSON (and the folder name after it) spills out as
+// literal tooltip text, and the truncated command runs with no arguments.
+test('trustCommandUri also percent-encodes the characters encodeURIComponent leaves raw: ( ) ! \' *', () => {
+  for (const cwd of ['/home/me/foo)', '/home/me/project (copy)', "/home/me/it's-mine", '/home/me/*star*', '/home/me/a!b']) {
+    const uri = trustCommandUri(cwd);
+    const query = uri.slice(uri.indexOf('?') + 1);
+    assert.ok(!/[()!'*]/.test(query), `raw special character leaked into the query for ${JSON.stringify(cwd)}: ${query}`);
+    assert.deepEqual(
+      JSON.parse(decodeURIComponent(query)),
+      [cwd],
+      `must still decode back to exactly [cwd] for ${JSON.stringify(cwd)}`,
+    );
+  }
+});
+
 // ---------------------------------------------------------------------------
 // buildSessionLines - the pure line-builder behind the tooltip. One line per
 // session: pending/ready first (soonest first), gave-up-only sessions after.
@@ -174,6 +194,30 @@ test('an untrusted job gets a warning marker and a trust link, and reports hasTr
   assert.ok(lines[0]!.includes('command:claudeLimitBuster.openClaudeToTrust'), lines[0]);
   assert.ok(hasTrustLink);
 });
+
+/**
+ * Extracts a Markdown inline link's target the way a renderer does: up to
+ * the first UNESCAPED ")" after the opening "(" - the exact mechanism
+ * review 1's Important 1 exploited (an unbalanced ")" in the cwd, left raw
+ * by `encodeURIComponent`, closed the link target early).
+ */
+const linkTarget = (line: string): string | undefined => line.match(/\[Trust this folder\]\(([^)]*)\)/)?.[1];
+
+const UNBALANCED_PAREN_CWDS = ['/home/me/foo)', '/home/me/project (copy)'];
+for (const cwd of UNBALANCED_PAREN_CWDS) {
+  test(`the trust link target is not truncated by an unbalanced paren in the cwd (${JSON.stringify(cwd)}) (review 1, Important 1)`, () => {
+    const { lines } = buildSessionLines([job({ folderTrusted: false, cwd })], [], []);
+    const href = linkTarget(lines[0]!);
+    assert.ok(href, lines[0]);
+    assert.ok(href!.startsWith('command:claudeLimitBuster.openClaudeToTrust?'), href);
+    const query = href!.slice(href!.indexOf('?') + 1);
+    assert.deepEqual(
+      JSON.parse(decodeURIComponent(query)),
+      [cwd],
+      `a naive link-target extraction must still decode back to exactly [cwd]; got line: ${lines[0]}`,
+    );
+  });
+}
 
 test('a trusted or unknown-trust job gets no marker, and hasTrustLink stays false', () => {
   const trusted = buildSessionLines([job({ folderTrusted: true })], [], []);

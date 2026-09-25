@@ -350,9 +350,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // mtime a different session's check already recorded - and then its trust is
   // never re-read at all, which is the bug this function exists to fix.
   const trustStamps = new Map<string, number>();
-  const refreshTrust = (job: PendingJob | undefined): void => {
+  /** Returns whether this call actually flipped `job.folderTrusted` to true. */
+  const refreshTrust = (job: PendingJob | undefined): boolean => {
     if (!job || job.folderTrusted !== false || !job.cwd) {
-      return;
+      return false;
     }
     const configPath = defaultClaudeConfigPath();
     let stamp: number | undefined;
@@ -362,7 +363,7 @@ export function activate(context: vscode.ExtensionContext): void {
       stamp = undefined;
     }
     if (stamp !== undefined && stamp === trustStamps.get(job.sessionId)) {
-      return;
+      return false;
     }
     if (stamp !== undefined) {
       trustStamps.set(job.sessionId, stamp);
@@ -375,6 +376,38 @@ export function activate(context: vscode.ExtensionContext): void {
     if (trusted) {
       job.folderTrusted = true;
       log.info(`Folder ${job.cwd} is now trusted by the Claude CLI; the resume will not stall at its prompt.`);
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * Re-check trust for every session the tooltip can currently show a
+   * marker for: every counting-down job AND every job waiting for
+   * "Resume Now" (review 1, Important 2 - the tooltip lists both since Task
+   * 5b, but this used to refresh only `scheduler.current`, or only
+   * `scheduler.jobs`). Each check is `refreshTrust`'s own cheap mtime-cached
+   * stat - no config parse unless the file actually changed - so looping
+   * the whole set on a scheduler change or a trust-terminal close costs at
+   * most one stat per listed job, not a re-parse.
+   *
+   * A ready job's flip is written back to `readyJobs`' own persistence:
+   * without this, a ready job trusted right before a reload would come back
+   * with the stale `folderTrusted: false` it was persisted with, and the
+   * tooltip would call it untrusted again despite nothing having changed.
+   */
+  const refreshAllTrust = (): void => {
+    for (const job of scheduler.jobs) {
+      refreshTrust(job);
+    }
+    let readyChanged = false;
+    for (const job of readyJobs) {
+      if (refreshTrust(job)) {
+        readyChanged = true;
+      }
+    }
+    if (readyChanged) {
+      persistReady();
     }
   };
 
@@ -893,8 +926,12 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
-    scheduler.onChange((job) => {
-      refreshTrust(job);
+    scheduler.onChange(() => {
+      // Every listed job/ready session, not just the soonest (review 1,
+      // Important 2) - this fires every countdown tick too, which is fine:
+      // refreshTrust's own mtime cache keeps a no-op tick to a bare stat
+      // per listed job.
+      refreshAllTrust();
       render();
     }),
     scheduler.onFire((job) => {
@@ -1278,15 +1315,15 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!trustTerminals.delete(terminal)) {
         return;
       }
-      // Ruling 2: re-check EVERY pending job, not just the one the terminal
-      // was opened for - refreshTrust is mtime-cached per session, so this is
-      // cheap, and it is what catches a job whose cwd is a different spelling
-      // of the same folder the user just trusted. Then force the same render
-      // call scheduler.onChange uses (above), so the tooltip's marker clears
-      // now instead of waiting for the next countdown tick.
-      for (const job of scheduler.jobs) {
-        refreshTrust(job);
-      }
+      // Ruling 2: re-check EVERY pending job AND ready job (review 1,
+      // Important 2 - a ready job's marker used to never clear at all), not
+      // just the one the terminal was opened for - refreshTrust is
+      // mtime-cached per session, so this is cheap, and it is what catches a
+      // job whose cwd is a different spelling of the same folder the user
+      // just trusted. Then force the same render call scheduler.onChange
+      // uses (above), so the tooltip's marker clears now instead of waiting
+      // for the next countdown tick.
+      refreshAllTrust();
       render();
     }),
   );

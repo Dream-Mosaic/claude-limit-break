@@ -1658,6 +1658,100 @@ test('closing the trust terminal re-reads trust for every pending job, not just 
   }
 });
 
+// ---------------------------------------------------------------------------
+// Review 1, Important 2. Now that EVERY listed session shows the untrusted
+// marker (Task 5b), a marker that never re-checks for a ready job - or for
+// a counting-down job that was never `scheduler.current` - stays wrong
+// forever, including across a reload (a ready job's folderTrusted is
+// persisted).
+// ---------------------------------------------------------------------------
+
+test('closing the trust terminal re-reads trust for a ready job too, and persists the flip', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig(); // autoResume off, so the fired job becomes "ready"
+  trustedCwds = new Set(); // nothing trusted yet
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000)); // already past -> fires on the first tick
+    await oneTick();
+    const readyStored = () =>
+      (store.get(READY_KEY) as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+    assert.equal(readyStored()[0]?.folderTrusted, false, 'setup: the ready job must start out untrusted');
+    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip(), /not trusted/i, 'setup: the tooltip warns about the ready session too');
+
+    // The fake globalState never serialises - a stored array's ELEMENTS are
+    // the exact same live objects refreshTrust mutates in place, so they
+    // would read as trusted here even if the flip were never written back.
+    // The array reference itself is the only thing that tells the two apart:
+    // persistReady() always stores a fresh `[...readyJobs]` array, so a
+    // second persistReady() call after the flip is the only way this
+    // reference can change.
+    const storedBeforeClose = store.get(READY_KEY);
+
+    await trustCommand()!(REAL_CWD);
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the trust terminal must have opened');
+    trustedCwds = 'all';
+    fireTerminalClose(vscodeFake.terminals[0]!);
+    await flush();
+
+    assert.ok(!/not trusted/i.test(tooltip()), `the ready session's marker must clear too: ${tooltip()}`);
+    assert.equal(
+      readyStored()[0]?.folderTrusted,
+      true,
+      'the flip must be written back to the persisted ready list, or a reload shows "not trusted" again',
+    );
+    assert.notEqual(
+      store.get(READY_KEY),
+      storedBeforeClose,
+      'the ready list must actually be re-persisted (a new array written), not just mutated in memory',
+    );
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('a non-soonest counting job trusted externally clears on the next scheduler change, not just the soonest', async () => {
+  // "Externally" here means without ever using this extension's own trust
+  // hotlink or closing a terminal it opened - e.g. trusted from an ordinary
+  // terminal, or the CLI's own trust prompt answered directly. Nothing here
+  // fires onDidCloseTerminal at all: only an ordinary scheduler tick, which
+  // fires scheduler.onChange with `current` still SESSION, never SESSION_B.
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  trustedCwds = new Set(); // nothing trusted yet
+  const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-nonsoonest-'));
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000), REAL_CWD); // sooner: stays scheduler.current
+    FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_200_000), dirB); // later: never current
+    await flush();
+
+    const pendingJobs = () =>
+      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+    const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
+    assert.equal(jobB()?.folderTrusted, false, 'setup: the non-soonest job starts out untrusted');
+
+    trustedCwds = new Set([dirB]);
+    await oneTick(); // an ordinary countdown tick - no detection, no terminal close
+
+    assert.equal(
+      jobB()?.folderTrusted,
+      true,
+      'an ordinary scheduler.onChange must re-check every job, not just scheduler.current',
+    );
+  } finally {
+    trustedCwds = 'all';
+    fs.rmSync(dirB, { recursive: true, force: true });
+    teardown(ctx);
+  }
+});
+
 test('closing an unrelated terminal does not re-read trust', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };

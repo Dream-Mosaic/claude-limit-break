@@ -38,13 +38,32 @@ function folderBasename(cwd: string): string {
 }
 
 /**
+ * `encodeURIComponent` leaves `( ) ! ' *` raw - RFC 3986 calls them
+ * "unreserved", which is exactly wrong here: the query sits inside a
+ * Markdown inline link's `(...)` target, and a renderer reads that target
+ * only up to the first UNESCAPED ")". A cwd containing any of these -
+ * an unbalanced ")" is enough (`/home/me/foo)`, or an ordinary
+ * "(copy)" folder) - closed the link target early: `openClaudeToTrust` ran
+ * with no arguments and silently no-opped (review 1, Important 1). Percent-
+ * encoded by hand, after `encodeURIComponent`, since that is the only gap
+ * it leaves for a Markdown link target specifically.
+ */
+const LEFT_RAW_BY_ENCODE_URI_COMPONENT = /[()!'*]/g;
+
+/**
  * The command-URI for the trust hotlink (Task 5a's `openClaudeToTrust`),
- * exactly the VS Code command-URI convention: `command:<id>?<args>`, args
- * being `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
- * array, since that command takes the cwd as its sole parameter.
+ * the VS Code command-URI convention: `command:<id>?<args>`, args being
+ * `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
+ * array, since that command takes the cwd as its sole parameter - with the
+ * characters above additionally escaped so the result is safe as a Markdown
+ * link target, not just as a URI.
  */
 export function trustCommandUri(cwd: string): string {
-  return `command:${TRUST_COMMAND}?${encodeURIComponent(JSON.stringify([cwd]))}`;
+  const args = encodeURIComponent(JSON.stringify([cwd])).replace(
+    LEFT_RAW_BY_ENCODE_URI_COMPONENT,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `command:${TRUST_COMMAND}?${args}`;
 }
 
 /** One session's line, and whether it carries the trust hotlink. */
