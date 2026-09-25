@@ -140,8 +140,11 @@ test('each cause describes itself differently in the tooltip line', () => {
 });
 
 test('a tooltip line for a session with no folder says so rather than printing undefined', () => {
-  const line = describeGaveUp(rec(A, 'stall', 1000, undefined));
+  // Built directly: rec()'s default parameter would turn an explicit
+  // undefined back into '/work/app'.
+  const line = describeGaveUp({ sessionId: A, cause: 'stall', atMs: 1000 });
   assert.doesNotMatch(line, /undefined/);
+  assert.match(line, /no folder/);
 });
 
 test('each failure notice names its cause and what to do about it', () => {

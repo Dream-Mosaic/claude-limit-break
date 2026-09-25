@@ -3146,3 +3146,47 @@ test('gave up: the untrusted-folder notice is not a failure notice (Task 5a), so
     teardown(ctx);
   }
 });
+
+test('gave up: a detection that is refused on budget still clears the earlier record for that session', async () => {
+  // The refused branch never touches the scheduler, so nothing else would
+  // re-render the status bar for it.
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const transcript = overBudgetTranscript();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.ok(showsGaveUp(), 'setup: gave up on the missing folder');
+
+    vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+    watcher.limitFor(SESSION, new Date(Date.now() + 3_600_000), REAL_CWD, transcript);
+    await flush();
+    assert.ok(vscodeFake.warningOffers.some((w) => w.message.includes('estimated')), 'setup: refused');
+    assert.ok(!showsGaveUp(), `the new detection must clear it; got ${JSON.stringify(bar()?.text)}`);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: a stall in a folder the CLI does not trust blames the trust prompt', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  trustedCwds = new Set();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    await new Promise((r) => setTimeout(r, 600));
+    const stall = vscodeFake.warnings.find((m) => /stalled/.test(m));
+    assert.ok(stall, JSON.stringify(vscodeFake.warnings));
+    assert.match(stall, /not trusted/);
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
