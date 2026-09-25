@@ -45,6 +45,16 @@ test('a session too expensive to resume is refused with the numbers', () => {
   assert.match(p.reason, /token/i);
 });
 
+test('a refusal names the session and folder it refused, so a dismissal can be recorded against them', () => {
+  // Task 4b: a dismissed refusal puts that session into the gave-up state,
+  // which is per session - the refusal has to say which one.
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);
+  assert.equal(p.kind, 'refuse');
+  if (p.kind !== 'refuse') return;
+  assert.equal(p.sessionId, ID);
+  assert.equal(p.cwd, '/projects/example');
+});
+
 test('the budget check can be disabled', () => {
   const p = planResume(
     hit(new Date('2026-08-03T17:00:00Z')), 'limit',

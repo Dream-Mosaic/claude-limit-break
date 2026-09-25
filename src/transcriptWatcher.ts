@@ -605,7 +605,7 @@ function isApiErrorEntry(entry: Record<string, unknown>): boolean {
  * comment on {@link MAX_OFFSET_IDLE_MS} for how common these files are
  * (~85% of everything on disk for a typical project).
  */
-function isSubagentFile(file: string): boolean {
+export function isSubagentFile(file: string): boolean {
     return /[\\/]subagents[\\/]/i.test(file);
 }
 

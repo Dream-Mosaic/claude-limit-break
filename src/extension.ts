@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from './log';
 import { readSettings, type Settings } from './config';
-import { TranscriptWatcher } from './transcriptWatcher';
+import { TranscriptWatcher, isSubagentFile } from './transcriptWatcher';
 import { ResumeScheduler, type PendingJob } from './scheduler';
 import { CountdownStatusBar } from './statusBar';
 import { planResume } from './policy';
@@ -48,6 +48,7 @@ import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
 import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
+import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
 const NS = 'claudeLimitBuster';
 
@@ -106,6 +107,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const scheduler = new ResumeScheduler(context.globalState, log);
   const status = new CountdownStatusBar();
+
+  /**
+   * Sessions this window has stopped trying to resume, and why (Task 4b -
+   * see gaveUp.ts). In memory only: a reload starts clean, which the brief
+   * allows, and the ready-job persistence (#11) is a separate mechanism.
+   */
+  const gaveUp = new GaveUpState();
+
+  /**
+   * The one place the status bar is drawn from. `job` defaults to the
+   * scheduler's soonest; scheduler.onChange passes the one it was fired
+   * with. The gave-up records ride along on every render, so a countdown
+   * tick cannot drop them from the tooltip.
+   */
+  const render = (job: PendingJob | undefined = scheduler.current): void => {
+    status.update(job, scheduler.jobs.length, settings().statusBar, gaveUp.list());
+  };
   const watcher = new TranscriptWatcher(
     () => settings().maxWaitHours,
     () => settings().transcriptPollSeconds,
@@ -256,6 +274,13 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(plan.reason);
       return;
     }
+    // A new detection for a session - refused or scheduled, limit or
+    // overload - means it is live again: whatever it last gave up on is
+    // history, and the next failure is news (Task 4b ruling 2). 'ignore'
+    // never names a session, so it cannot clear one.
+    if (gaveUp.detected(plan.kind === 'refuse' ? plan.sessionId : plan.job.sessionId)) {
+      render();
+    }
     if (plan.kind === 'refuse') {
       log.warn(plan.reason);
       // Offered, not just announced. The estimate can be several times too
@@ -264,9 +289,17 @@ export function activate(context: vscode.ExtensionContext): void {
       // decision away from the person whose session it is. Saying yes plans
       // the same resume with the cap lifted for this one incident.
       void Promise.resolve(
-        vscode.window.showWarningMessage(`Claude Limit Buster: ${plan.reason}`, 'Resume anyway'),
+        vscode.window.showWarningMessage(budgetRefusalNotice(plan.sessionId, plan.reason), 'Resume anyway'),
       ).then((choice) => {
         if (choice !== 'Resume anyway') {
+          // Closed without going ahead (the promise resolves undefined when
+          // the notification is dismissed): this session will not be resumed,
+          // so it gives up - visibly, in the status bar. No second popup: the
+          // refusal just closed WAS the notice for this cause, naming it and
+          // both ways through (budgetRefusalNotice).
+          log.warn(`Budget refusal for ${plan.sessionId} dismissed; not resuming it.`);
+          gaveUp.record({ sessionId: plan.sessionId, cwd: plan.cwd, cause: 'budget', atMs: Date.now() });
+          render();
           return;
         }
         const forced = planResume(
@@ -429,7 +462,45 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const detectAgentRows = agentRowsDetector(runAgentsListing);
 
-  const resume = (job: PendingJob): boolean => {
+  /**
+   * Record that a resume of `job` failed for `cause`, and notify - through
+   * `show`, so each site keeps its own severity - the first time that cause
+   * is seen for that session since its last detection (Task 4b ruling 1),
+   * and every time when `manual`: a failure answering a user's click is
+   * always shown (ruling on concern 1; see GaveUpState.record). The caller
+   * logs; this only decides about the popup and the status bar. Never
+   * touches claims: every caller's claim release happens after resume()
+   * returns, exactly as before (Task 10).
+   */
+  const giveUp = (
+    job: PendingJob,
+    cause: 'stall' | 'launcher' | 'cwd',
+    show: (message: string) => Thenable<unknown>,
+    manual = false,
+  ): void => {
+    const warn = gaveUp.record({ sessionId: job.sessionId, cwd: job.cwd, cause, atMs: Date.now() }, manual);
+    render();
+    if (warn) {
+      void show(
+        cause === 'stall'
+          ? gaveUpNotice({ cause, sessionId: job.sessionId, cwd: job.cwd, folderTrusted: job.folderTrusted })
+          : gaveUpNotice({ cause, sessionId: job.sessionId, cwd: job.cwd }),
+      );
+    } else {
+      log.info(`Already warned about this for ${job.sessionId}; not notifying again until its next detection.`);
+    }
+  };
+
+  /**
+   * `manual` is true for every call that runs because the user clicked
+   * something (the resumeNow command, the Resume Now notification button,
+   * "Resume in Terminal Anyway"): its launch failures are always notified.
+   * Only scheduler.onFire's own automatic resume leaves it false. The stall
+   * check below takes it too: one session can hold a ready job AND a
+   * counting-down job, so two manual launches - and two stalls - can happen
+   * with no detection in between (fix round 1, finding 1).
+   */
+  const resume = (job: PendingJob, manual = false): boolean => {
     const s = settings();
     const which = (cmd: string) => {
       try {
@@ -448,9 +519,10 @@ export function activate(context: vscode.ExtensionContext): void {
     };
     const launcher = resolveClaudeLauncher(s.claudeCommand, process.platform, which, readShim);
     if (!launcher) {
-      void vscode.window.showErrorMessage(
-        'Claude Limit Buster: could not find the claude executable. Set claudeLimitBuster.claudeCommand.',
-      );
+      // Logged every time, notified once per session (Task 4b ruling 1): a
+      // repeat must still leave a trace somewhere.
+      log.error(`Cannot resume ${job.sessionId}: no claude executable found for "${s.claudeCommand || 'claude'}".`);
+      giveUp(job, 'launcher', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
     // vscode.window.createTerminal does not throw on a bad cwd - VS Code
@@ -479,10 +551,7 @@ export function activate(context: vscode.ExtensionContext): void {
     };
     if (!cwdExists(job.cwd, cwdIsDirectory)) {
       log.error(`Cannot resume ${job.sessionId}: cwd "${job.cwd}" no longer exists (recorded in ${job.transcript}).`);
-      void vscode.window.showErrorMessage(
-        `Claude Limit Buster: the folder for session ${job.sessionId.slice(0, 8)} no longer exists: ${job.cwd}. ` +
-          'The resume was not started. Use "Resume Now" again once the folder is back, or check the transcript.',
-      );
+      giveUp(job, 'cwd', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
     // Headless is opt-in and machine-scoped, and does NOT inherit the
@@ -525,6 +594,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // later be warned about on this extension's behalf.
     resumedSessions.set(job.sessionId, Promise.resolve(terminal.processId).catch(() => undefined));
     log.info(`Resumed ${job.sessionId} in a new terminal.`);
+    // A resume that launched is no longer given up (ruling 2); if it stalls,
+    // the check below records it again.
+    if (gaveUp.launched(job.sessionId)) {
+      render();
+    }
 
     // A terminal existing is not a resume happening. Two observed failures
     // leave one sitting there looking healthy: an untrusted folder parks
@@ -551,9 +625,7 @@ export function activate(context: vscode.ExtensionContext): void {
         `Resume of ${job.sessionId} did not produce any work: ${job.transcript} was ${bytesAtLaunch} bytes at launch and ` +
           `${bytesNow ?? 'unreadable'} now.${trustFirst}`,
       );
-      void vscode.window.showWarningMessage(
-        `Claude Limit Buster: the resume of session ${job.sessionId.slice(0, 8)} does not appear to have started.${trustFirst}`,
-      );
+      giveUp(job, 'stall', (m) => vscode.window.showWarningMessage(m), manual);
     }, GRACE_MS);
     stallChecks.add(check);
     return true;
@@ -780,6 +852,19 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
     watcher.onInputNeeded((hit) => {
+      // A finished turn is evidence the session works again, so a gave-up
+      // record for it is stale (fix round 1, ruling 2a). Ahead of both
+      // filters below: gave-up records belong to any watched session, not
+      // just this window's folders, and clearing one is safe while disabled -
+      // it launches and notifies nothing, it only stops the status bar
+      // showing a problem that is over. A subagent's transcript finishing a
+      // turn says nothing about its parent session, so it never clears one.
+      // resolveSession's statBytes is stubbed: only the id is wanted here.
+      const ended = isSubagentFile(hit.file) ? undefined : resolveSession(hit.file, hit.cwd, () => 0);
+      if (ended && gaveUp.turnEnded(ended.sessionId)) {
+        log.info(`Session ${ended.sessionId} finished a turn; clearing its gave-up state.`);
+        render();
+      }
       const s = settings();
       if (!s.enabled) {
         return;
@@ -802,7 +887,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     scheduler.onChange((job) => {
       refreshTrust(job);
-      status.update(job, scheduler.jobs.length, settings().statusBar);
+      render(job);
     }),
     scheduler.onFire((job) => {
       // Task 10: claim this reset before anything else. Every window watching
@@ -871,7 +956,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // won the claim itself ('claimed', including a stale takeover it
           // just performed) - never a claim 'taken' by someone else.
           const notifyClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
-          if (!resume(job)) {
+          if (!resume(job, true)) {
             rememberReady(job);
             if (notifyClaim === 'claimed') {
               releaseClaim(claimsDir(), claimKey, fs, log);
@@ -934,7 +1019,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // won the claim itself ('claimed', which includes a stale
           // takeover it just performed).
           const buttonClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
-          if (!resume(job)) {
+          if (!resume(job, true)) {
             rememberReady(job);
             if (buttonClaim === 'claimed') {
               releaseClaim(claimsDir(), claimKey, fs, log);
@@ -1031,7 +1116,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
           const countingClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
-          if (resume(counting)) {
+          if (resume(counting, true)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {
             releaseClaim(claimsDir(), key, fs, log);
@@ -1050,7 +1135,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
         const readyClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
-        if (resume(ready)) {
+        if (resume(ready, true)) {
           forgetReady(ready.sessionId);
         } else if (readyClaim === 'claimed') {
           releaseClaim(claimsDir(), key, fs, log);
@@ -1066,6 +1151,13 @@ export function activate(context: vscode.ExtensionContext): void {
         persistReady();
       }
       scheduler.cancel();
+      // Ruling 3: Cancel clears the gave-up state along with the jobs.
+      // Rendered here, not left to scheduler.onChange: with nothing pending
+      // the scheduler has nothing to cancel and does not fire it.
+      if (gaveUp.clearAll()) {
+        log.info('Cleared the gave-up state.');
+        render();
+      }
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
     /**
@@ -1080,6 +1172,7 @@ export function activate(context: vscode.ExtensionContext): void {
      */
     vscode.commands.registerCommand(`${NS}.statusBarMenu`, async () => {
       const waiting = scheduler.jobs.length + readyJobs.length;
+      const gaveUpCount = gaveUp.list().length;
       const items = [
         {
           label: 'Resume Now',
@@ -1088,16 +1181,42 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         {
           label: 'Cancel Pending Resume',
-          description: waiting > 0 ? `Discard ${waiting} waiting resume(s)` : 'Nothing to cancel',
+          // Cancel also clears the gave-up state (ruling 3), so with nothing
+          // waiting it still has something to do - say so, rather than
+          // "Nothing to cancel" next to a status bar saying otherwise.
+          description:
+            waiting > 0
+              ? `Discard ${waiting} waiting resume(s)${gaveUpCount > 0 ? ' and clear what gave up' : ''}`
+              : gaveUpCount > 0
+                ? `Clear ${gaveUpCount} session(s) that gave up`
+                : 'Nothing to cancel',
           command: `${NS}.cancel`,
         },
         { label: 'Show Log', description: 'Open the Claude Limit Buster output channel', command: `${NS}.showLog` },
       ];
+      // Fix round 1, ruling 2b: a way to clear the gave-up state that does
+      // not also discard every other session's waiting jobs, as Cancel does.
+      // Only offered when there is something to dismiss.
+      const DISMISS = 'Dismiss gave-up notices';
+      if (gaveUpCount > 0) {
+        items.push({
+          label: DISMISS,
+          description: `Clear ${gaveUpCount} gave-up notice(s); waiting resumes are kept`,
+          command: '',
+        });
+      }
       const picked = await vscode.window.showQuickPick(items, {
         title: 'Claude Limit Buster',
         placeHolder: waiting > 0 ? `${waiting} resume(s) waiting` : 'Watching for usage limits',
       });
       if (!picked) {
+        return;
+      }
+      if (picked.label === DISMISS) {
+        if (gaveUp.dismissRecords()) {
+          log.info('Dismissed the gave-up notices; waiting resumes are untouched.');
+          render();
+        }
         return;
       }
       await vscode.commands.executeCommand(picked.command);
@@ -1157,7 +1276,7 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const job of scheduler.jobs) {
         refreshTrust(job);
       }
-      status.update(scheduler.current, scheduler.jobs.length, settings().statusBar);
+      render();
     }),
   );
 
