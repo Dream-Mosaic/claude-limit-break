@@ -1,220 +1,173 @@
 # Next steps
 
-State as of 2026-09-15, after the pre-release audit. Read
-[design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
+State as of 2026-09-25, after the Limit Break 1.0 plan (both lanes) landed on
+`claude/limit-break-1.0-cloud`. Read
+[design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first;
+both predate the rename and still say "Claude Limit Buster" — that is a
+historical record, not a live reference.
 
-## Settled
+## Settled (unlikely to need revisiting)
 
-- **Copyright holder:** Dream Mosaic LLC.
-- **Attribution:** root `LICENSE` for this project, `THIRDPARTY.md` for
-  upstream's verbatim notice. No per-file headers.
-- **Packaging gate:** both files must ship inside the `.vsix`, not merely in
-  the repo — keep them out of `.vscodeignore`. `scripts/check-vsix.sh` asserts
-  it in CI, along with `CHANGELOG.md` shipping and `.superpowers` not. This is
-  the one attribution detail that can silently break at release time.
+- **Copyright holder:** Dream Mosaic LLC. **Attribution:** root `LICENSE`,
+  `THIRDPARTY.md` for upstream's verbatim notice, no per-file headers.
+- **Packaging gate:** `LICENSE`, `THIRDPARTY.md` and `CHANGELOG.md` must ship
+  inside the `.vsix`; `.superpowers` must not; only `media/icon.png` ships of
+  the brand assets. `scripts/check-vsix.sh` asserts all of it in CI.
 - **Public repo, no Marketplace listing**, `.vsix` attached to releases.
+  `claudeLimitBreak.checkForUpdates` (off by default) is how someone finds
+  out a newer one exists.
+- **Extension identity:** package id `claude-limit-break`, extension id
+  `dream-mosaic.claude-limit-break`, setting/command namespace
+  `claudeLimitBreak.*`. Renamed from Claude Limit Buster in Task 8
+  (`32a1515`); README's Install section carries the uninstall note.
 
 ## Known limitations
 
-**Two open windows can resume the same session twice.** Every VS Code window
-runs its own `TranscriptWatcher`, and that watcher's root is the global
-`~/.claude/projects` rather than the workspace, so both windows see the same
-limit notice. Each window also runs its own `ResumeScheduler`, which reads
-`globalState` once when it is constructed and then keeps the pending job in
-memory. Nothing coordinates them: both schedule the cooldown, both fire it, and
-one limit can launch two concurrent `claude --resume` runs against the same
-session ID. The cost is a doubled resume — two terminals, two cold prompt
-caches, roughly twice the tokens the budget check estimated for one.
+**Two open windows resuming the same session twice — now mostly covered, not
+fully.** The original 2026-09-24 field incident (both windows detect an
+identical limit within ~1-2s and each fires its own `claude --resume`, see
+the Windows-lane ledger's "Root cause" note) is closed: a machine-wide
+filesystem claim (`src/claims.ts`, `fs.openSync(path, 'wx')`, first one wins)
+runs before every automatic fire and every manual bypass path (Resume Now in
+both `autoResume` states, "Resume Anyway", "Resume in Terminal Anyway") —
+Task 10, 3 review rounds, all four manual paths verified symmetric
+(`.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`, Task 10
+re-review 3). The slower case Task 2's holder check already covered
+(one window sees the other's resume alive in `claude agents`, minutes later)
+is unaffected by any of this and still works as before.
 
-This is not fixed in code, deliberately. Both candidate fixes turn on how VS
-Code propagates a `Memento` write between windows, and that cannot be
-established without a running Extension Development Host — the same thing
-blocking the manual verification below. Shipping an unverifiable concurrency fix
-is worse than stating the limitation. The candidates, for whoever can run one:
+What is not covered:
+- The claim's atomicity guarantee is `O_EXCL`, which is real, but Task 10's
+  own two-claimer test only exercises it sequentially in one process, not
+  with two real concurrent processes racing the syscall (Task 10 review 1
+  note, ledger). Nothing has actually broken this; it is simply unverified
+  the way the original bug could only be measured live.
+- A claim is scoped to `os.tmpdir()` for the current OS user
+  (`src/claims.ts` module doc). Two different OS user accounts on the same
+  machine, or two different machines, do not share a claims directory and so
+  are not deduped — not believed to be a real deployment shape for this
+  extension, but worth knowing if it ever is one.
 
-- **Re-read and stand down.** Have `tick()` read `globalState` again before
-  firing, and abandon the job when the stored value is gone or no longer
-  matches — so the window that did not clear the key does not also resume.
-- **Claim the fire.** Write a claim (a window id and a timestamp) with a
-  compare-and-set against the stored job, and resume only from the window whose
-  claim stuck.
+## Deferred review findings
 
-Either way the mechanism has to be measured first: whether a `Memento.update`
-in one window is visible in another at all, and how soon.
+Grouped by area; each was accepted as a deferred Minor rather than a required
+fix, with the reviewer's stated cost of being wrong. Checked against current
+`HEAD` on 2026-09-25 — none of these has since been fixed by a later task.
 
-## Verified
+**Detection / parsing** (Task 1 and 4a reviews)
+- A flagged rate-limit entry whose `quotaLimits.resetsAt` fails the
+  grace/horizon check returns early and never falls through to the overload
+  check below it (`src/transcriptWatcher.ts` ~478-480, the
+  `return resumeAt ? {...} : { inputNeeded }` branch). Cost if wrong: one
+  missed overload retry on a doubly-flagged entry.
+- `MAX_OVERLOAD_AGE_MS`'s boundary is tested with a 5s margin
+  (`GRACE_TEST_MARGIN_MS`, `test/transcriptWatcher.test.ts`), not pinned at
+  the exact millisecond. Cost if wrong: an off-by-ms edge.
+- DST spring-forward resolution east of UTC (e.g. London 01:30 → 03:30 BST)
+  overshoots by an extra hour; only Chicago is under test
+  (`src/parsers/limitParser.ts`, Task 4a report). Safe direction (later, not
+  earlier), so low urgency.
+- The in-flight-retry regex's narrowness is unpinned — no test asserts a
+  terminal case containing the literal word "attempt" that should NOT match
+  (`src/parsers/overloadParser.ts`).
+- Pre-existing: the old api-error-status overload rule fires on mid-sentence
+  prose containing e.g. "API Error: 529", not just a line-start render
+  (`src/parsers/overloadParser.ts`; the newer transient-429/sleep-interrupt
+  rules were anchored to line-start in the 4a fix, this older one was not, to
+  keep the fix scoped).
 
-**Does the panel render a CLI-advanced session on reload? Yes — on a fresh
-reopen.** Confirmed 2026-09-09 in an Extension Development Host. A panel-created
-session was advanced by an interactive CLI resume; the new turn did not appear in
-the tab that was open at the time, and did appear as soon as that tab was closed
-and reopened from Session history.
+**Trust hotlink** (Task 5a review)
+- `claudeLimitBreak.openClaudeToTrust` opens a terminal with no `cwdExists`
+  check first, unlike the resume path (`src/extension.ts`, the command
+  handler around `openClaudeToTrust`).
+- "could not find the claude executable" is a duplicated literal string
+  (the resume-launch failure and the trust-terminal failure in
+  `src/extension.ts`, and again as `REASON.launcher` in `src/gaveUp.ts`).
+- A `void executeCommand(...)` inside a notification's `.then()` has no
+  `.catch()`.
+- The `trustTerminals` `Set` in `src/extension.ts` is never cleared on
+  `deactivate()` (currently a no-op; not a leak that outlives the process,
+  but not tidy either).
 
-The mechanism explains both halves. The extension opens a session by spawning the
-CLI with `--resume=<id>` (visible in `extension.js` of Claude Code 2.1.267), so
-the panel is not a separate store — it reads the same transcript from disk. An
-already-open tab is a live process holding its own state and does not re-read;
-a reopen starts a new `--resume`, which replays the file.
+**Gave-up state** (Task 4b review)
+- The trust sentence is duplicated between the stall log's `trustFirst`
+  branch and `gaveUpNotice`'s `stall` case (`src/extension.ts`,
+  `src/gaveUp.ts`).
+- A repeated limit notice the scheduler drops as an exact-tie duplicate still
+  calls `gaveUp.detected()`, resetting that session's warn-once memory even
+  though nothing new actually happened (ruling 2 read literally;
+  `src/gaveUp.ts` / `src/extension.ts`).
+- A stall check armed just before "Cancel Pending Resume" can still
+  record/notify a gave-up state right after Cancel runs (a narrow timing
+  window, not reproduced).
 
-Two flags in the same argv builder, `--resume-session-at` and
-`--resume-drops-turn`, were not investigated. Their defaults could in principle
-affect what a reopen replays.
+**Tooltip / status bar** (Task 5b review)
+- A newline embedded in a folder name breaks the tooltip's one-line-per-
+  session layout; the text is still escaped (no injection), just not
+  single-line (`src/statusBar.ts`, `buildSessionLine`).
+- VS Code's `$(...)` theme-icon syntax and Markdown `~~strikethrough~~` are
+  not neutralised in folder names — cosmetic, since `supportThemeIcons` is
+  on for the tooltip regardless.
+- A harmless double render on `rememberReady` (the tooltip re-renders twice
+  for one state change).
+- One negative assertion in the escape tests is locale-fragile; there is no
+  dedicated escape test for a gave-up-only tooltip line specifically.
 
-**What this means for the design.** The panel and this extension resume through
-the identical code path, so there is nothing panel-specific to replicate. The
-follow-up is a notification after a resume — "this session advanced in a
-terminal; reopen the tab to see it" — not a reload mechanism. There is no
-supported way to push that reload: Claude Code 2.1.267 contributes 26 commands,
-none of which take a session id and none of which refresh a panel. See
-`claude-vscode.reopenClosedSession` for the closest thing, and
-https://github.com/anthropics/claude-code/issues/55959 for the upstream request.
+**Same-folder coordination** (Task 2 re-review, Windows lane)
+- No dedicated test for a failed launch with busy same-folder peers present:
+  `rememberReady` gets the original (uncoordinated) prompt back, read and
+  confirmed correct by inspection but not pinned by a test
+  (`src/holderPolicy.ts` / `src/extension.ts`). Cost if wrong: a stale
+  coordination sentence shown on a manual retry.
 
-A first attempt at this test used `--fork-session` to protect the live
-transcript, which guaranteed failure: forks lack the `bridge-session` entries the
-panel's session list keys on, so the fork was never listed. The valid test needs
-an **in-place** resume of a **panel-created** session, and a **reopen** rather
-than a look at the tab that is already open.
+## Open questions
 
-### Manual smoke test — run 2026-09-09
+- **Does Claude Code actually write a transient-429 entry with the literal
+  "API Error:" head into the JSONL, and does such an entry carry
+  `quotaLimits`?** Task 4a's evidence covers the TUI render and the upstream
+  CHANGELOG only, not an observed transcript line. If it turns out that
+  entries never combine both, the Important-1 ruling from that review
+  (skip the `quotaLimits` branch when text matches the transient-429 render)
+  is dead code but harmless; if they combine differently than assumed, worth
+  re-checking against a live transcript.
+- **Is the cross-window claim's `O_EXCL` guarantee sound under real
+  concurrency**, not just the sequential two-claimer test Task 10 shipped
+  with? See "Known limitations" above.
 
-Run in a real Extension Development Host (`F5`; `.vscode/launch.json` compiles
-and opens the second window with the extension loaded from `out/`). Nothing is
-installed; closing the window is the cleanup. All five steps pass. It found four
-bugs, filed as issues.
+## v1.1 ideas
 
-| Step | Result |
-|---|---|
-| 1. Output shows `Claude Limit Buster active.` | Pass. Watcher started on 177 transcripts |
-| 2. `Claude Limit Buster: Show Log` | Pass |
-| 3. Synthetic limit line → notification + countdown | Pass. Correct session, folder and reason in the tooltip |
-| 4. `Resume Now` opens a **new** terminal running `claude` | Pass. Nothing typed into any existing terminal |
-| 5. Panel renders the CLI-advanced turn | Pass **on reopen** — see "Verified" above |
+- **A Limit Break sidebar.** An activity-bar view container with a view
+  listing pending, ready and gave-up sessions — the tooltip's
+  `buildSessionLines` model already has the data shape for this
+  (`src/statusBar.ts`). Icon: `media/logo-mono.svg` (the user's "no square"
+  redraw — frame, "Limit", gauge in `currentColor` on transparent, without
+  the solid tile the square variant read as at 24px next to the codicons;
+  ruling and Chromium-mock validation in
+  `.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`, Task 7
+  section). The activity bar takes an SVG directly as a CSS mask
+  (`paneCompositeBar.ts`), no icon font needed. Open question carried from
+  that ruling: legibility at 24px with ~2px margin — consider a gauge-only
+  crop if the full mark reads too busy that small; a redraw is a one-file
+  cost either way.
 
-Found while running it:
-
-- [#2] the watcher root is the whole `~/.claude/projects` tree, not the workspace.
-- [#3] clicking the status bar cancels the pending resume with no confirmation.
-- [#4] a resume into a missing `cwd` fails silently, logs success, and loses the
-  job. The log is unambiguous — `Pending resume cancelled.` at 01:54:38.393,
-  `Resumed <id> in a new terminal.` at 01:54:38.431, for a terminal that never
-  launched.
-- [#5] an untrusted folder stops `claude` at its trust prompt, so an unattended
-  resume stalls. On this machine 14 of 20 tracked projects were untrusted,
-  including this repo — panel-created sessions do not appear to set the flag,
-  and those are exactly the sessions this extension resumes.
-
-To re-run step 3, append a synthetic limit line to a transcript. Use a
-**panel-created** session other than the one you are working in, and take the
-`cwd` from the file rather than typing it — a Windows path typed through a shell
-loses its backslashes, and `	` becomes a tab:
-
-```powershell
-$t = Get-ChildItem "$env:USERPROFILE\.claude\projects\*\*.jsonl" |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 20 |
-  Where-Object { Select-String -Path $_.FullName -Pattern '"type":"bridge-session"' -Quiet } |
-  Select-Object -First 1
-$cwd = (Get-Content $t.FullName | ForEach-Object { try { (ConvertFrom-Json $_).cwd } catch {} } |
-        Where-Object { $_ } | Select-Object -First 1)
-$line = @{ type='assistant'; isApiErrorMessage=$true; cwd=$cwd
-           message=@{ content='Claude AI usage limit reached. Try again in 5 minutes' } } |
-        ConvertTo-Json -Compress -Depth 5
-[System.IO.File]::AppendAllText($t.FullName, $line + "`n")
-```
-
-```bash
-# bash equivalent
-f=$(ls -t ~/.claude/projects/*/*.jsonl | head -20 | xargs grep -l '"type":"bridge-session"' | head -1)
-node -e 'const fs=require("fs"),f=process.argv[1];
-  const cwd=fs.readFileSync(f,"utf8").split("
-").filter(Boolean)
-    .map(l=>{try{return JSON.parse(l).cwd}catch{}}).find(Boolean);
-  fs.appendFileSync(f,JSON.stringify({type:"assistant",isApiErrorMessage:true,cwd,
-    message:{content:"Claude AI usage limit reached. Try again in 5 minutes"}})+"
-")' "$f"
-```
-
-[#2]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/2
-[#3]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/3
-[#4]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/4
-[#5]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/5
-
-## Spike results worth not re-deriving
-
-Verified during design. Commands assume `CLAUDE_CODE_*` env vars are cleared —
-a nested `claude` inherits `CLAUDE_CODE_SESSION_ID`, `CLAUDECODE`, and IPC socket
-vars that will skew results:
-
-```bash
-UNSET=$(env | grep -o '^CLAUDE[^=]*' | sed 's/^/-u /' | tr '\n' ' ')
-env $UNSET claude -p --resume <id> "prompt" --output-format json
-```
-
-| Question | Answer |
-|---|---|
-| Session ID discoverable? | **Yes** — transcript filename *is* the `sessionId` |
-| Headless resume carries context? | **Yes** — verified across a panel-created session |
-| Does a sequential resume fork? | **No** — same ID, appends to the same `.jsonl`. A resume into a session still open in a panel does: see [#6] and [the experiment](research/2026-09-20-panel-fork-experiment.md) |
-| Does headless inherit permission mode? | **No** — an `acceptEdits` session resumed with `-p` was denied `Write` |
-| Does `--permission-mode acceptEdits` work? | **Yes** |
-| Does interactive terminal resume do tool work? | **Yes** — at the user's normal autonomy, no flag needed |
-| Does headless hang on denial? | **No** — clean exit, structured `permission_denials` |
-
-Cost of a cold resume: **1,618,394 bytes → 288,574 cache-creation tokens**
-(~$2.89 list equivalent). This is the basis for the `bytes / 5.6` estimate and
-needs more data points.
-
-## Spike sessions left on disk
-
-Not cleaned up. Delete when done:
-
-- `8dd2b36d-cc84-4b0b-9a77-15955eef9698` — headless baseline
-- `a9c386a5-3d6e-4728-a5a3-f4f3f92b98a8` — permission-inheritance test
-- `bed357a1-5197-4e8b-9866-85f31ecf6340` — fork of the design conversation
-- `0974ef20-b626-4aa3-9fe2-c35aaae9c9d4` — the 2026-09-20 panel-fork
-  experiment, under
-  `~/.claude/projects/c--Users-thegr-AppData-Local-Temp-clb6-20260919-2208/`.
-  **Keep until [#7] ships**: it is the evidence behind
-  [the write-up](research/2026-09-20-panel-fork-experiment.md), and
-  `scripts/fork6.js` can be re-run against it.
-
-First two under
-`~/.claude/projects/<temp-scratch-project>/`,
-the third under the design conversation's project directory.
-
-## Then
-
-The implementation plan is done, the smoke test passes, and a pre-release audit
-(2026-09-13) has been worked through. Fixed as a result: [#4] (a resume into a
-missing folder), [#5] (the trust prompt), [#9] (an inherited session identity),
-and a scheduler that held one pending resume for the whole machine, so that
-when several sessions hit the account's limit together only one was resumed.
-
-Open, roughly in priority order:
-
-- [#7] offer to reopen the stale panel tab after a resume. No longer gated:
-  the 2026-09-20 experiment showed that typing into a tab left open across a
-  resume forks the transcript and abandons the resumed turn, so this is loss
-  prevention rather than polish. Its branch needs a rebase, and its liveness
-  check should move off `~/.claude/sessions/<pid>.json` and onto
-  `claude agents --json`.
-- [#11] a job waiting for Resume Now is lost on reload. Bundled with [#7]:
-  reopening is the remedy [#7] recommends, so it must not cost a pending job.
-- [#6] stays open as the record of the behaviour until [#7] ships. Its last
-  open question - whether `claude agents --json` can be believed when it says a
-  panel tab is live - was measured on 2026-09-22 and it can: no dead row
-  lingered after a closed tab or a closed window, and a reopened session comes
-  back as a new pid.
-- [#8] four small findings from reviewing the #4 and #5 fixes.
-- [#10] a reset time with no zone resolves an hour off across a DST change.
-- [#12] test gaps found by mutation testing, mostly in the limit parser.
-- [#2], [#3], [#13], [#1].
-
-[#6]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/6
-[#7]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/7
-[#8]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/8
-[#9]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/9
-[#10]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/10
-[#11]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/11
-[#12]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/12
-[#13]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/13
-[#1]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/1
+From the 2026-09-23 prior-art synthesis
+(`docs/research/2026-09-23-prior-art-auto-retry-preheat.md`), "Consider" list
+— re-checked against current `HEAD`, none of these has landed:
+- A fallback wait for a message that is clearly a limit notice but has no
+  parseable time. Mostly moot now that `quotaLimits.resetsAt` (Task 1) closes
+  most of the parser gaps this was a backstop for.
+- Persistent logs that survive a reload. Still a plain
+  `vscode.window.createOutputChannel` (`src/extension.ts`), not a
+  `LogOutputChannel` or a file — confirmed still true, `src/log.ts` has no
+  persistence of its own.
+- Warn when a resume is likely to land while the machine is asleep (preheat
+  checks whether wake timers are enabled).
+- Preheat as an opt-in feature: a cheap (~$0.04) periodic ping to keep a
+  session's cache warm. Would reuse the minimal probe recipe from the
+  synthesis: `-p "hi" --model haiku --no-session-persistence
+  --strict-mcp-config --mcp-config <empty> --output-format json`.
+- The near-limit wrap-up notice ("Approaching your 5-hour usage limit —
+  Claude will wrap up the current step.") isn't an error and nothing resumes
+  after it; currently ignored entirely.
+- Separate retry state per failure family, if more families get added beyond
+  today's `limit` / `overload` split.
