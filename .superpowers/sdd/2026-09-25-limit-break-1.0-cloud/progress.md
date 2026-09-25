@@ -61,3 +61,7 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
 Task 6: complete (commits 3fef8ce..385beb7, review clean)
 - Task 7: dispatched (sonnet) at base 54eea64
 - Task 7: implementer DONE (1ed70df 58b3c3a); 483/483 unit; check-vsix.sh extended test-first, break check caught. No integration tests affected. Review dispatched (sonnet).
+- Task 7 review: spec ✅, quality Approved, no findings (reviewer re-ran cmp on all five assets and `vsce ls`: media/icon.png is the only media file shipped).
+Task 7: complete (commits 54eea64..58b3c3a, review clean)
+- Ruling (T5a dispatch): the trust terminal reuses the resume path's launcher lookup and its launcher-missing handling; on its close, refreshTrust runs for EVERY pending job, not only those matching the folder — refreshTrust is mtime-cached per session, so this is cheap and cannot miss a spelling variant of the same folder — cost if wrong: a few stat calls.
+- Ruling (T5a dispatch): invoked without a string cwd (e.g. from the palette) the command logs and does nothing, and it is hidden from the palette — it only makes sense with a folder — cost if wrong: one menu entry.
