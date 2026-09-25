@@ -100,3 +100,6 @@ Pre-flight scan (added tasks)
 - Ruling: Task 9 split into 9a (merge main, early) and 9b (docs + release branch, last) — cost if wrong: none.
 - Ruling: prior-art slices copied to ref/prior-art/ (from 5b4d91a) so 4a's implementer has the verbatim renders — cost if wrong: 270 KB of markdown in the workspace.
 - Task 5a: fix round 1/5 (1 addressed per implementer, awaiting re-review — every-pending-job test; commits 9b44133..18fad58); 497/497 unit, 9/9 integration; named mutation now CAUGHT. Scoped re-review dispatched (sonnet).
+- Task 5a re-review 1: ADDRESSED (the asserted job never becomes current; reference identity through the memento traced); no new breakage.
+Task 5a: complete (commits f1cb859..18fad58, review clean after 1 fix round; 4 minors deferred)
+- Task 9a: dispatched (sonnet) at base cd53868
