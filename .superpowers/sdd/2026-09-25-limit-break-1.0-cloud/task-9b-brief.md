@@ -33,3 +33,9 @@ Cloud-lane notes (rulings in the ledger):
   package-lock.json (`npm version 1.0.0 --no-git-tag-version`), run the unit + integration suites and
   `bash scripts/check-vsix.sh`, commit `chore(release): 1.0.0`, and switch back to
   `claude/limit-break-1.0-cloud`. Do not push; the controller pushes and opens the draft PR.
+
+Addenda from the cloud ledger (carried into this task):
+- `package.json`: the `statusBar` setting's `"pending"` description ("Show the countdown only; nothing while idle.") is stale — Task 4b made the gave-up state (and Task 5b the ready state) show in that mode. Reword it.
+- README "What you will see" is stale (Task 5b concern): it still describes the old single-session tooltip / jitter padding. Rewrite it for the one-line-per-session tooltip, the ready pill, the gave-up icon and "Dismiss gave-up notices", and the "Open Claude to Trust" link/button.
+- NEXT.md open items: collect every `minor (deferred)`, `parked`, and `⚠️ open` line from `.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md` and the Windows lane's parked items in `ref/windows-lane-progress.md` that are still open; group them; drop any that a later task fixed (check the code).
+- Tags: the last release tag is shown by `git tag` (use it for `git log <tag>..HEAD`).

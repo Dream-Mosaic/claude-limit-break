@@ -158,3 +158,5 @@ Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 
 Task 5b: complete (commits dfa5461..836371a, 1 fix round; 4 minors deferred)
 - Task 8: dispatched (sonnet) at base 8b00568
 - Task 8: implementer DONE (32a1515); 609/609 unit, 9/9 integration, check-vsix clean; grep gate 227 → 18 hits (README x9 → 9b, CHANGELOG history x7, a dated test comment x2). Review dispatched (sonnet).
+- Task 8 review: spec ✅, quality Approved, no findings (id cross-check registered ⇄ contributed ⇄ referenced; 209/209 line swap; prompt untouched).
+Task 8: complete (commits 5392b80..32a1515, review clean)
