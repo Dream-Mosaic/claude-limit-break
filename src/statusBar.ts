@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { formatDuration } from './parsers/limitParser';
 import type { PendingJob } from './scheduler';
+import { GAVE_UP_ICON, describeGaveUp, type GaveUpRecord } from './gaveUp';
 
 /** What the item shows when no resume is counting down. */
 export type StatusBarMode = 'always' | 'pending' | 'never';
@@ -33,9 +34,29 @@ export class CountdownStatusBar {
    * soonest; without the count, a second session's resume would be invisible,
    * which reads exactly like it had been dropped.
    */
-  update(job: PendingJob | undefined, waiting = 1, mode: StatusBarMode = 'always'): void {
+  update(
+    job: PendingJob | undefined,
+    waiting = 1,
+    mode: StatusBarMode = 'always',
+    gaveUp: readonly GaveUpRecord[] = [],
+  ): void {
     if (mode === 'never') {
       this.item.hide();
+      return;
+    }
+    if (!job && gaveUp.length > 0) {
+      // Shown under 'pending' too: that mode hides the idle marker, and a
+      // session this extension has stopped retrying is not idle - hiding it
+      // would be the silent failure the gave-up state exists to end (A8).
+      const count = gaveUp.length > 1 ? ` (${gaveUp.length} sessions)` : '';
+      this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
+      const tip = new vscode.MarkdownString(undefined, true);
+      tip.appendMarkdown(`**Claude Limit Buster**\n\n`);
+      appendGaveUp(tip, gaveUp);
+      tip.appendMarkdown(`_Click for actions._`);
+      this.item.tooltip = tip;
+      this.item.backgroundColor = undefined;
+      this.item.show();
       return;
     }
     if (!job) {
@@ -83,6 +104,7 @@ export class CountdownStatusBar {
           `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
       );
     }
+    appendGaveUp(tooltip, gaveUp);
     tooltip.appendMarkdown(`_Click for actions._`);
     this.item.tooltip = tooltip;
 
@@ -95,4 +117,20 @@ export class CountdownStatusBar {
   dispose(): void {
     this.item.dispose();
   }
+}
+
+/**
+ * The gave-up section of a tooltip: one line per session and its cause.
+ * Deliberately a separate block rather than woven into the countdown text -
+ * Task 5b folds it and the pending jobs into one list.
+ */
+function appendGaveUp(tip: vscode.MarkdownString, gaveUp: readonly GaveUpRecord[]): void {
+  if (gaveUp.length === 0) {
+    return;
+  }
+  tip.appendMarkdown(`**Gave up** on ${gaveUp.length === 1 ? 'this session' : 'these sessions'}:\n\n`);
+  for (const r of gaveUp) {
+    tip.appendMarkdown(`- ${describeGaveUp(r)}\n`);
+  }
+  tip.appendMarkdown(`\nA new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
 }
