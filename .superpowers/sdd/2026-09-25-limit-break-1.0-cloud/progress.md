@@ -59,3 +59,5 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
   - Task 6: minor (deferred): the commit trailer names Claude Sonnet 5, not the constraint's Opus 5.5.
   - Ruling: a commit's Co-Authored-By names the model that actually wrote it; constraint 8 amended to "the implementing model's own attribution line + the Claude-Session line" — accurate attribution beats a uniform one — cost if wrong: a trailer line.
 Task 6: complete (commits 3fef8ce..385beb7, review clean)
+- Task 7: dispatched (sonnet) at base 54eea64
+- Task 7: implementer DONE (1ed70df 58b3c3a); 483/483 unit; check-vsix.sh extended test-first, break check caught. No integration tests affected. Review dispatched (sonnet).

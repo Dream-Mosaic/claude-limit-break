@@ -1,0 +1,185 @@
+## Commits
+58b3c3a feat: Limit Break icon and brand assets
+Copy the user-supplied final art into media/ byte-for-byte (verified
+with cmp): the Marketplace icon, the high-res logo, the README banner,
+the monochrome PNG (future status-bar icon font), and the monochrome
+SVG (future v1.1 activity-bar sidebar, "no square" variant, ships in
+currentColor on transparent).
+
+Set "icon": "media/icon.png" in package.json so the Marketplace shows
+it, and extend .vscodeignore so only media/icon.png ships in the
+VSIX; the other four assets are not needed there (README banner is
+pulled by GitHub URL; the mono assets are for later feature work).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JRHoU2Jtzz7ZD6EKVKb5bu
+
+1ed70df test: assert the VSIX ships only the Marketplace icon
+check-vsix.sh now asserts media/icon.png ships in the .vsix and that
+media/logo.png, media/banner.png, media/logo-mono.png and
+media/logo-mono.svg do not, ahead of Task 7 wiring those assets into
+package.json and .vscodeignore.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JRHoU2Jtzz7ZD6EKVKb5bu
+
+## Files changed
+ .vscodeignore         |   8 ++++++++
+ media/banner.png      | Bin 0 -> 434411 bytes
+ media/icon.png        | Bin 0 -> 10180 bytes
+ media/logo-mono.png   | Bin 0 -> 10201 bytes
+ media/logo-mono.svg   |  39 +++++++++++++++++++++++++++++++++++++++
+ media/logo.png        | Bin 0 -> 26386 bytes
+ package.json          |   1 +
+ scripts/check-vsix.sh |  22 ++++++++++++++++++++++
+ 8 files changed, 70 insertions(+)
+
+## Diff
+diff --git a/.vscodeignore b/.vscodeignore
+index 690859f..fe68efb 100644
+--- a/.vscodeignore
++++ b/.vscodeignore
+@@ -8,10 +8,18 @@ src/**
+ docs/**
+ **/*.ts
+ **/*.map
+ tsconfig.json
+ .gitignore
+ .superpowers/**
+ .github/**
+ scripts/**
+ .vscode-test/**
+ .vscode-test.mjs
++
++# Only the Marketplace icon ships in the VSIX; the high-res logo and README
++# banner are referenced by GitHub URL, and the mono assets are for a future
++# status-bar icon font and v1.1 sidebar icon that don't exist yet.
++media/logo.png
++media/banner.png
++media/logo-mono.png
++media/logo-mono.svg
+diff --git a/media/banner.png b/media/banner.png
+new file mode 100644
+index 0000000..c1a7fc2
+Binary files /dev/null and b/media/banner.png differ
+diff --git a/media/icon.png b/media/icon.png
+new file mode 100644
+index 0000000..4f57e09
+Binary files /dev/null and b/media/icon.png differ
+diff --git a/media/logo-mono.png b/media/logo-mono.png
+new file mode 100644
+index 0000000..4a93e8b
+Binary files /dev/null and b/media/logo-mono.png differ
+diff --git a/media/logo-mono.svg b/media/logo-mono.svg
+new file mode 100644
+index 0000000..b21a1c8
+--- /dev/null
++++ b/media/logo-mono.svg
+@@ -0,0 +1,39 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" shape-rendering="crispEdges">
++  <!--
++    The frame line, the word "Limit" and the gauge, drawn in the current
++    colour on a transparent background. VS Code uses an activity-bar icon as a
++    CSS mask, so only these shapes show, in the theme's foreground colour.
++  -->
++  <g fill="currentColor">
++    <!-- Frame line: a ring 46px in from the edge, 46px thick -->
++    <path fill-rule="evenodd" d="M24 25H1228V1229H24Z  M70 72H1181V1182H70Z"/>
++
++    <!-- L -->
++    <path d="M171 375H234V657H366V708H171Z"/>
++
++    <!-- i -->
++    <rect x="406" y="375" width="63" height="55"/>   <!-- dot -->
++    <rect x="406" y="478" width="63" height="230"/>  <!-- stem -->
++
++    <!-- m: three stems joined by a top bar with pixel notches -->
++    <path d="M512 478H560V503H576V478H682V503H703V478H806V503H830V708
++             H767V529H746V515H725V529H703V708
++             H640V529H619V515H598V529H576V708
++             H512Z"/>
++
++    <!-- i -->
++    <rect x="869" y="375" width="65" height="55"/>   <!-- dot -->
++    <rect x="869" y="478" width="65" height="230"/>  <!-- stem -->
++
++    <!-- t: stem, crossbar, and a foot that kicks right -->
++    <path d="M994 403H1057V478H1101V529H1057V657H1101V708
++             H1017V682H994V529H964V478H994Z"/>
++
++    <!-- Gauge outline: a ring with notched pixel corners -->
++    <path fill-rule="evenodd" d="M196 757H1076V784H1101V908H1076V934H196V908H171V784H196Z
++                                 M196 784H1076V908H196Z"/>
++
++    <!-- Gauge fill -->
++    <rect x="222" y="807" width="829" height="77"/>
++  </g>
++</svg>
+diff --git a/media/logo.png b/media/logo.png
+new file mode 100644
+index 0000000..6a87955
+Binary files /dev/null and b/media/logo.png differ
+diff --git a/package.json b/package.json
+index 6c2b01a..c5605e4 100644
+--- a/package.json
++++ b/package.json
+@@ -1,17 +1,18 @@
+ {
+   "name": "claude-limit-buster",
+   "displayName": "Claude Limit Buster",
+   "description": "Waits out Claude Code usage limits and resumes your session by ID.",
+   "version": "0.1.2",
+   "publisher": "dream-mosaic",
+   "license": "MIT",
++  "icon": "media/icon.png",
+   "repository": {
+     "type": "git",
+     "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git"
+   },
+   "engines": {
+     "vscode": "^1.93.0"
+   },
+   "categories": [
+     "Other"
+   ],
+diff --git a/scripts/check-vsix.sh b/scripts/check-vsix.sh
+index 3b67bfc..1b8ab7a 100644
+--- a/scripts/check-vsix.sh
++++ b/scripts/check-vsix.sh
+@@ -64,14 +64,36 @@ done
+ # .superpowers is gitignored, but vsce reads .vscodeignore and ignores
+ # .gitignore - so the whole development workspace once shipped to users inside
+ # the package. Assert it stays out.
+ if printf '%s\n' "$names" | grep -q "\.superpowers"; then
+   echo "::error::.superpowers is present in the .vsix"
+   failed=1
+ else
+   echo "ok: .superpowers is absent from the .vsix"
+ fi
+ 
++# The Marketplace icon is the only brand asset users need at install time; it
++# is what package.json's "icon" field points at, so it must ship.
++if printf '%s\n' "$names" | grep -qE "^extension/media/icon\.png$"; then
++  echo "ok: media/icon.png ships inside the .vsix"
++else
++  echo "::error::media/icon.png is missing from the .vsix"
++  failed=1
++fi
++
++# The other brand assets (high-res logo, README banner, mono variants) are not
++# needed inside the package: the README banner is pulled from its GitHub URL,
++# and the mono assets are for a future status-bar icon font and a v1.1
++# sidebar icon that do not exist yet. Shipping them just bloats the VSIX.
++for f in logo.png banner.png logo-mono.png logo-mono.svg; do
++  if printf '%s\n' "$names" | grep -qE "^extension/media/${f//./\\.}$"; then
++    echo "::error::media/$f is present in the .vsix and should not be"
++    failed=1
++  else
++    echo "ok: media/$f is absent from the .vsix"
++  fi
++done
++
+ if [ "$failed" -ne 0 ]; then
+   exit 1
+ fi
+ echo "The .vsix contents are correct."
