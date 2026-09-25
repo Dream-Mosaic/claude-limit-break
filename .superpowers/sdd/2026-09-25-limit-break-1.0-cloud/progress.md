@@ -163,3 +163,8 @@ Task 8: complete (commits 5392b80..32a1515, review clean)
 - Ruling (9b dispatch): Task 9b does docs only; the 1.0.0 bump and release/1.0.0 are cut AFTER the final whole-branch review, from the reviewed head — so the final review's fixes land in the release — cost if wrong: none.
 - Task 9b: dispatched (sonnet) at base 4f87eb9
 - Task 9b: implementer DONE (daebbe6 90d13f0 b23eeaa 432b086); 610/610 unit (+ test/readmeSettings.test.ts, drift-checked by 3 mutations), 9/9 integration, check-vsix green. Review dispatched (sonnet: truth-to-code checks).
+- Task 9b review 1: spec ✅ on README/NEXT (every behaviour claim checked against code; 3 deferred items confirmed still open; drops-as-fixed verified), Needs fixes on CHANGELOG.
+  - Important: CHANGELOG Added omits the new `statusBar` setting (absent in v0.1.2).
+  - Important: CHANGELOG Fixed omits 054af81 (trust by any spelling of the folder) and 73c3cec (trust warning clears mid-countdown, #8).
+  - Task 9b: minor (deferred): test/readmeSettings.test.ts rejects column-padded table rows with a misleading "missing" message.
+  - Task 9b: minor (deferred): README "What you will see" quotes the tooltip link as "Open Claude to Trust"; the tooltip says "Trust this folder" (the notification button says "Open Claude to Trust").
