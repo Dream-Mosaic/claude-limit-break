@@ -124,6 +124,34 @@ export function buildTerminalOptions(
 }
 
 /**
+ * Terminal options for a plain `claude` launch in `cwd`, with no `--resume`
+ * and no prompt (Task 5a: Trust hotlink).
+ *
+ * This terminal exists only so a human can answer Claude's own trust dialog
+ * themselves - constraint 2 forbids the extension from answering it or
+ * writing `~/.claude.json`, so nothing here sends any input into the
+ * terminal it opens. The environment is stripped exactly as
+ * buildTerminalOptions strips it: a window opened from inside a running
+ * Claude session must not hand this new `claude` process that session's
+ * identity either.
+ *
+ * Not built by calling buildTerminalOptions with a fake ResolvedSession:
+ * that function's name embeds a session id this launch does not have, and
+ * threading an empty claudeArgs list through its session-shaped signature
+ * would be more confusing than a second, smaller function.
+ */
+export function buildTrustTerminalOptions(cwd: string, launcher: Launcher): TerminalOptionsLike {
+  return {
+    name: `Limit Buster: Trust ${path.basename(cwd)}`,
+    cwd,
+    shellPath: launcher.file,
+    shellArgs: [...launcher.args],
+    isTransient: true,
+    env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
+  };
+}
+
+/**
  * Matches the shim-directory variables npm's generated launchers set to their
  * own directory: %dp0% / %~dp0% in a .cmd shim (computed by its :find_dp0
  * routine), $basedir in a .ps1 shim (computed from $PSScriptRoot). All three
