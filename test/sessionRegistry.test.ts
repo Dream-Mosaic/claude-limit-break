@@ -90,3 +90,33 @@ test('readSessionRecord reports a missing entrypoint as undefined, not as a pane
   );
   assert.deepEqual(record, { sessionId: SESSION, entrypoint: undefined });
 });
+
+test('readSessionRecord carries bridgeSessionId when Remote Control is connected', () => {
+  // The classifier's `panel` result needs to say whether the session is
+  // bridged, so Remote Control's own auto-continue can be mentioned instead
+  // of assuming nothing will pick the session back up.
+  const record = readSessionRecord(
+    DIR,
+    9624,
+    reader({
+      '/fake/.claude/sessions/9624.json': JSON.stringify({
+        pid: 9624,
+        sessionId: SESSION,
+        entrypoint: 'claude-vscode',
+        bridgeSessionId: 'bridge-abc',
+      }),
+    }),
+  );
+  assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'claude-vscode', bridgeSessionId: 'bridge-abc' });
+});
+
+test('readSessionRecord omits bridgeSessionId when the record has none, rather than reporting it as an empty string', () => {
+  const record = readSessionRecord(
+    DIR,
+    9624,
+    reader({
+      '/fake/.claude/sessions/9624.json': JSON.stringify({ pid: 9624, sessionId: SESSION, entrypoint: 'cli' }),
+    }),
+  );
+  assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'cli' });
+});

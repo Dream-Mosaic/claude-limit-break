@@ -4,8 +4,10 @@ import {
   buildResumeArgs,
   buildHeadlessArgs,
   buildTerminalOptions,
+  buildTrustTerminalOptions,
   resolveClaudeLauncher,
   cwdExists,
+  PARENT_SESSION_VARIABLES,
 } from '../src/resumer';
 import type { ResolvedSession } from '../src/sessionResolver';
 
@@ -59,6 +61,34 @@ test('terminal options launch claude directly, with no shell', () => {
   assert.equal(opts.cwd, '/projects/example');
   assert.match(opts.name, /Limit Buster/);
   assert.ok(opts.name.includes(ID.slice(0, 8)));
+});
+
+test('the trust terminal runs plain claude: no --resume, no prompt argument', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  assert.equal(opts.shellPath, '/usr/bin/claude');
+  assert.deepEqual(opts.shellArgs, [], 'no resume args and no prompt - just plain claude');
+  assert.equal(opts.cwd, '/projects/example');
+});
+
+test('the trust terminal name uses the existing "Limit Buster: " prefix', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  assert.match(opts.name, /^Limit Buster: /);
+});
+
+test('the trust terminal strips every parent-session variable, same as a resume terminal', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  for (const name of PARENT_SESSION_VARIABLES) {
+    assert.equal(opts.env[name], null, `${name} must be nulled out`);
+  }
+  assert.equal(Object.keys(opts.env).length, PARENT_SESSION_VARIABLES.length, 'no extra env entries');
+});
+
+test('a node-shim launcher is still prefixed in the trust terminal', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', {
+    file: 'C:\\Program Files\\nodejs\\node.exe',
+    args: ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'],
+  });
+  assert.deepEqual(opts.shellArgs, ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js']);
 });
 
 test('a node-shim launcher prepends its own args before the resume args', () => {

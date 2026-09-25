@@ -45,7 +45,10 @@ export function readSettings(c: ConfigSource): Settings {
     resumeMode: oneOf(RESUME_MODES, c.get('resumeMode', 'interactive'), 'interactive'),
     headlessPermissionMode: oneOf(PERMISSION_MODES, c.get('headlessPermissionMode', ''), ''),
     claudeCommand: str(c.get('claudeCommand', ''), ''),
-    resumePrompt: str(c.get('resumePrompt', 'Continue where you left off.'), 'Continue where you left off.'),
+    resumePrompt: str(
+      c.get('resumePrompt', '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.'),
+      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+    ),
     maxResumeTokens: atLeast(c.get('maxResumeTokens', 500_000), 0, 500_000),
     maxWaitHours: atLeast(c.get('maxWaitHours', 24), 1, 24),
     transcriptPollSeconds: atLeast(c.get('transcriptPollSeconds', 5), 1, 5),

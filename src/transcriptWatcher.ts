@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -101,6 +101,17 @@ export const MAX_OFFSET_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
  * expected to need.
  */
 export const MAX_OFFSET_ENTRIES = 2000;
+
+/**
+ * How stale a server-error entry's own timestamp may be before it is treated
+ * as history rather than a live overload. A usage limit carries a reset time
+ * to test staleness against; an overload has none, so age since the entry
+ * was written is the only signal a replayed transcript - a fork, or a
+ * session resumed after a long gap - gives for "this already happened and
+ * does not need retrying now". An entry with no timestamp of its own is
+ * treated as fresh, as it always has been.
+ */
+export const MAX_OVERLOAD_AGE_MS = 10 * 60_000;
 
 /**
  * Decide which offset entries survive a prune pass.
@@ -388,15 +399,29 @@ export class TranscriptWatcher {
                 file,
             }
             : undefined;
-        const candidates: string[] = [];
-        collectStrings(entry, candidates, 0);
+        const candidates: Candidate[] = [];
+        collectStrings(entry, candidates, 0, false);
         // Claude Code tags a genuine limit entry as an API error. When those markers
         // are present the entry is definitely a rate-limit event, so its text is
         // trusted outright; otherwise the text has to clear a stricter bar.
         const flagged = isRateLimitEntry(entry);
         const apiError = isApiErrorEntry(entry);
         const maxWait = this.getMaxWaitHours();
+        // The real current time: staleness and the grace window are always
+        // decided against this, never against the entry's own timestamp.
         const now = new Date();
+        // What a relative notice ("in 5 hours", "resets 1am") is resolved
+        // against: the entry's own timestamp when it has a parseable one, so
+        // a forked transcript's copied lines are read as of when they were
+        // originally written. A fork replays every line with its original
+        // timestamp intact - that is how last night's "resets 1am" re-armed
+        // an 18-hour timer when this watcher met the file fresh and resolved
+        // it against the time of reading instead. Missing or unparseable
+        // falls back to now, exactly as it behaved before entries carried a
+        // timestamp into this calculation at all.
+        const rawTimestamp = typeof entry.timestamp === 'string' ? new Date(entry.timestamp) : undefined;
+        const writtenAt = rawTimestamp && !Number.isNaN(rawTimestamp.getTime()) ? rawTimestamp : undefined;
+        const basis = writtenAt ?? now;
 
         // The user pasting a limit notice into the chat - or asking about one - must
         // never arm a resume timer. This is the same rule the overload scan below has
@@ -406,17 +431,59 @@ export class TranscriptWatcher {
         // `flagged` has to come first: Claude Code writes its own API-error notices as
         // synthetic entries that can carry type "user", so a bare type check would
         // suppress exactly the detection this extension exists for.
-        if (flagged || apiError || entry.type !== 'user') {
+        // A subagent's own transcript need not arm a limit itself (synthesis A3):
+        // a subagent that hits the limit stops its parent, whose own transcript
+        // records the same event too, so an unflagged note in the subagent's own
+        // file that merely quotes what happened - a checkpoint recap, a summary -
+        // must not re-arm. But `flagged` comes first, ahead of the subagent-file
+        // check, same as it already does ahead of the user-type check above: a
+        // subagent that genuinely hits the limit still writes Claude Code's own
+        // rate-limit marker into its own file, and that must still arm (fix round
+        // 1 - the first version of this guard dropped a real limit hit whenever it
+        // landed in a subagents/ file, flagged or not). Nothing else here is
+        // affected - turn-end and overload detection below still run over
+        // subagent files exactly as before.
+        if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
+            // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
+            // on the flagged entry itself - immune to every way the text can be
+            // misread (zone, DST, calendar rollover) - so it wins over the text
+            // outright when present. Only trusted on a flagged entry: the field
+            // turning up on an ordinary turn is not itself a limit event.
+            if (flagged) {
+                const quotaLimits = entry.quotaLimits;
+                const resetsAt =
+                    quotaLimits && typeof quotaLimits === 'object'
+                        ? (quotaLimits as Record<string, unknown>).resetsAt
+                        : undefined;
+                if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
+                    const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
+                    // Decisive either way: this is the authoritative field, so a
+                    // value that fails the grace/horizon check is not a cue to
+                    // fall back to the text - it is history (or absurd), and the
+                    // text does not get a second opinion on that.
+                    return resumeAt
+                        ? { limit: { detection: { resumeAt, rule: 'quota-limits', text: 'quotaLimits.resetsAt' }, cwd, file } }
+                        : { inputNeeded };
+                }
+            }
             for (const candidate of candidates) {
                 // Only short strings are considered: a real banner is one line, whereas a
                 // long string is a file the session happened to read. Without this, a
                 // transcript containing source code about rate limits arms a timer.
-                if (candidate.length > MAX_NOTICE_LENGTH) {
+                if (candidate.text.length > MAX_NOTICE_LENGTH) {
+                    continue;
+                }
+                // Text inside a tool_result block (or a top-level toolUseResult) is
+                // evidence Claude Code fed back to the model, not a notice it is
+                // delivering now - a `grep` hit quoting a banner is exactly how a real
+                // false positive armed a timer (synthesis A3). Flagged entries are
+                // exempt, same as every other veto here.
+                if (!flagged && candidate.toolResult) {
                     continue;
                 }
                 // Trusted entries skip the source-code guard inside detectLimit, which is
                 // where that guard now lives.
-                const detection = detectLimit(candidate, now, maxWait, { trusted: flagged });
+                const detection = detectLimit(candidate.text, basis, maxWait, { trusted: flagged, readAt: now });
                 if (detection) {
                     return { limit: { detection, cwd, file } };
                 }
@@ -425,13 +492,17 @@ export class TranscriptWatcher {
         // No limit here. A transient server error is worth reporting instead, but
         // only from an entry Claude Code itself marked as an API failure or from a
         // non-user entry: the user pasting an error into the chat - or asking about
-        // one - must never kick off an automatic retry.
-        if (apiError || entry.type !== 'user') {
+        // one - must never kick off an automatic retry. An overload carries no reset
+        // time of its own, so a replayed one is judged on age alone: written longer
+        // ago than MAX_OVERLOAD_AGE_MS, it is history rather than something to retry
+        // now.
+        const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
+        if (!overloadTooOld && (apiError || entry.type !== 'user')) {
             for (const candidate of candidates) {
-                if (candidate.length > MAX_NOTICE_LENGTH) {
+                if (candidate.text.length > MAX_NOTICE_LENGTH) {
                     continue;
                 }
-                const overload = detectOverload(candidate);
+                const overload = detectOverload(candidate.text);
                 if (overload) {
                     return { overload: { detection: overload, cwd, file } };
                 }
@@ -493,29 +564,61 @@ function isApiErrorEntry(entry: Record<string, unknown>): boolean {
 }
 
 /**
+ * Whether a transcript file lives under a `subagents/` directory (synthesis
+ * A3). A subagent that hits the limit stops its parent, whose own top-level
+ * transcript records the same event via its own entries, so a subagent
+ * file's entries never need to arm a limit timer themselves - see the doc
+ * comment on {@link MAX_OFFSET_IDLE_MS} for how common these files are
+ * (~85% of everything on disk for a typical project).
+ */
+function isSubagentFile(file: string): boolean {
+    return /[\\/]subagents[\\/]/i.test(file);
+}
+
+/** One string pulled out of a transcript entry, tagged with where it came from. */
+interface Candidate {
+    text: string;
+    /**
+     * True inside a `type: "tool_result"` content block, or anywhere under a
+     * top-level `toolUseResult` field - Claude Code's own record of what a
+     * tool returned. Text here is evidence fed back to the model, not a
+     * notice Claude Code is delivering now, so the untrusted limit path in
+     * {@link TranscriptWatcher.inspectLine} skips it outright (synthesis A3).
+     */
+    toolResult: boolean;
+}
+
+/**
  * Pull every human-readable string out of a transcript entry. Limit notices
  * turn up in assistant text blocks, tool results and error fields depending on
  * where the refusal originated, so the shape is not worth hard-coding.
+ *
+ * `inToolResult` is threaded down from the caller rather than recomputed per
+ * string: once a `tool_result` content block (or the `toolUseResult` field)
+ * is entered, every string anywhere inside it - however deeply nested -
+ * carries the same origin.
  */
-function collectStrings(value: unknown, out: string[], depth: number): void {
+function collectStrings(value: unknown, out: Candidate[], depth: number, inToolResult: boolean): void {
     if (depth > 6 || out.length > 200) {
         return;
     }
     if (typeof value === 'string') {
         if (value.length > 8) {
-            out.push(value);
+            out.push({ text: value, toolResult: inToolResult });
         }
         return;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            collectStrings(item, out, depth + 1);
+            collectStrings(item, out, depth + 1, inToolResult);
         }
         return;
     }
     if (value && typeof value === 'object') {
-        for (const item of Object.values(value)) {
-            collectStrings(item, out, depth + 1);
+        const obj = value as Record<string, unknown>;
+        const isToolResult = inToolResult || obj.type === 'tool_result';
+        for (const [key, item] of Object.entries(obj)) {
+            collectStrings(item, out, depth + 1, isToolResult || key === 'toolUseResult');
         }
     }
 }

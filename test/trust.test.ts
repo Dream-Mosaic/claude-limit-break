@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
   normalizeProjectPath,
   isFolderTrusted,
+  trustedSpelling,
   readClaudeUserConfig,
   defaultClaudeConfigPath,
 } from '../src/trust';
@@ -179,4 +180,71 @@ test('only an explicit true counts as trusted, never a merely truthy value', () 
       `hasTrustDialogAccepted: ${JSON.stringify(value)} must not count as trusted`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Two spellings of one folder, with different answers.
+//
+// Observed on the development machine, 2026-09-23: ~/.claude.json held
+//   "c:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster": { hasTrustDialogAccepted: false }
+//   "C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster": { hasTrustDialogAccepted: true }
+// The panel writes the first (VS Code reports the drive in lower case); the
+// second was written when the folder was trusted from a terminal. The CLI
+// looks its key up exactly - `projects[key]?.hasTrustDialogAccepted === !0`,
+// with the key built by `f(e).replaceAll("\\", "/")` and no case folding,
+// read out of its own bundle - so these are two records to it, not one.
+// Taking the first match answered "untrusted" for a folder the user had
+// trusted, and kept saying so after they did it.
+// ---------------------------------------------------------------------------
+
+const twoSpellings = (lower: boolean, upper: boolean) => ({
+  projects: {
+    'c:/Users/thegr/proj': { hasTrustDialogAccepted: lower },
+    'C:/Users/thegr/proj': { hasTrustDialogAccepted: upper },
+  },
+});
+
+test('a folder trusted under one drive-letter spelling counts as trusted', () => {
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'), true);
+  assert.equal(isFolderTrusted('C:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'), true);
+});
+
+test('the order the spellings appear in does not decide the answer', () => {
+  const reversed = {
+    projects: {
+      'C:/Users/thegr/proj': { hasTrustDialogAccepted: true },
+      'c:/Users/thegr/proj': { hasTrustDialogAccepted: false },
+    },
+  };
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', reversed, 'win32'), true);
+});
+
+test('neither spelling trusted is still untrusted', () => {
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', twoSpellings(false, false), 'win32'), false);
+});
+
+test('trustedSpelling returns the exact spelling the CLI has on record as trusted', () => {
+  // The resume launches with this as its cwd, so the CLI's own exact lookup
+  // finds the record the user created instead of the one the panel did.
+  assert.equal(
+    trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'),
+    'C:\\Users\\thegr\\proj',
+  );
+});
+
+test('trustedSpelling keeps the given spelling when that one is already trusted', () => {
+  assert.equal(
+    trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(true, true), 'win32'),
+    'c:\\Users\\thegr\\proj',
+  );
+});
+
+test('trustedSpelling finds nothing when no spelling is trusted', () => {
+  assert.equal(trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(false, false), 'win32'), undefined);
+});
+
+test('on linux a differently-cased path is a different folder, not another spelling', () => {
+  const config = { projects: { '/home/A/proj': { hasTrustDialogAccepted: true } } };
+  assert.equal(trustedSpelling('/home/a/proj', config, 'linux'), undefined);
+  assert.equal(isFolderTrusted('/home/a/proj', config, 'linux'), false);
 });

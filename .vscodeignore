@@ -15,3 +15,11 @@ tsconfig.json
 scripts/**
 .vscode-test/**
 .vscode-test.mjs
+
+# Only the Marketplace icon ships in the VSIX; the high-res logo and README
+# banner are referenced by GitHub URL, and the mono assets are for a future
+# status-bar icon font and v1.1 sidebar icon that don't exist yet.
+media/logo.png
+media/banner.png
+media/logo-mono.png
+media/logo-mono.svg

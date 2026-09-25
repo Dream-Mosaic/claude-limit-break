@@ -44,6 +44,18 @@ test('a non-string claudeCommand falls back to the default, a valid string passe
   assert.equal(passthrough, '/opt/claude/bin/claude');
 });
 
+test('a non-string resumePrompt falls back to the default prompt', () => {
+  // str() has two fallback arguments for resumePrompt - one for c.get() itself
+  // and one for when a malformed settings.json hands back a non-string. Both
+  // must agree, so pin the second path explicitly rather than only the
+  // no-override case every other test exercises.
+  const fallback = readSettings(source({ resumePrompt: 42 })).resumePrompt;
+  assert.equal(
+    fallback,
+    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+  );
+});
+
 test('every setting the code reads is declared in the manifest, and every declared setting is read', () => {
   // Upstream read claudeTimeout.soundCommand without declaring it, which left
   // it with no scope - so a workspace could set it. This test is that finding,

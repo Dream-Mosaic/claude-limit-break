@@ -27,7 +27,10 @@ test('a limit hit schedules a job for the stated time plus jitter', () => {
   assert.equal(p.job.resumeAtMs, at.getTime() + 600_000);
   assert.equal(p.job.jitterMs, 600_000);
   assert.equal(p.job.cwd, '/projects/example');
-  assert.equal(p.job.prompt, 'Continue where you left off.');
+  assert.equal(
+    p.job.prompt,
+    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+  );
 });
 
 test('a transcript that is not a session is ignored, not guessed at', () => {

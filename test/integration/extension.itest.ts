@@ -67,7 +67,10 @@ suite('claude-limit-buster activation', () => {
     assert.equal(config.get('resumeMode'), 'interactive');
     assert.equal(config.get('headlessPermissionMode'), '');
     assert.equal(config.get('claudeCommand'), '');
-    assert.equal(config.get('resumePrompt'), 'Continue where you left off.');
+    assert.equal(
+      config.get('resumePrompt'),
+      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+    );
     assert.equal(config.get('maxResumeTokens'), 500000);
     assert.equal(config.get('maxWaitHours'), 24);
     // Added for 1.0. Each is a default someone would notice if it drifted:
