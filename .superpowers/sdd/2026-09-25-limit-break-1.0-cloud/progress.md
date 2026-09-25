@@ -52,3 +52,4 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
 (integration tests touched by this lane's tasks, to run before merge)
 
 ## Log
+- Task 6: dispatched (sonnet) at base 3fef8ce
