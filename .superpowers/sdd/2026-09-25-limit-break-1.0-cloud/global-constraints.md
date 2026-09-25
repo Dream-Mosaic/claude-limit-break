@@ -18,7 +18,7 @@ cloud checkout. Rules 2-4 and 9-11 are unchanged.
    (The CRLF note in the Windows lane's constraints is an artefact of that checkout's autocrlf.)
 8. Commit as you go: one commit per green step, conventional-commit subjects, and end each message with
    these two lines:
-   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+   your own model's Co-Authored-By line (the attribution your harness gives you; ledger ruling after Task 6), and
    `Claude-Session: https://claude.ai/code/session_01JRHoU2Jtzz7ZD6EKVKb5bu`
 9. Match the surrounding code: dense "why" comments where the code is non-obvious, VS Code fakes in `test/helpers/vscode.ts`, module stubs via the existing `stubModule` pattern in `test/extension.test.ts`.
 10. User-facing strings still say "Claude Limit Buster" until Task 8 renames everything. Do not rename early. (Task 6's prompt text is the one deliberate exception: it is specified verbatim.)

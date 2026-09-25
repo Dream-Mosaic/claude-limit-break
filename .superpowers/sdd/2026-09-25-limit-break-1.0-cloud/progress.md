@@ -55,3 +55,7 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
 ## Log
 - Task 6: dispatched (sonnet) at base 3fef8ce
 - Task 6: implementer DONE (385beb7); 483/483 unit. Review dispatched (sonnet).
+- Task 6 review: spec ✅, quality Approved. ⚠️ TDD ordering unverifiable from the diff; the report's RED transcript is the evidence (accepted). 1 Minor:
+  - Task 6: minor (deferred): the commit trailer names Claude Sonnet 5, not the constraint's Opus 5.5.
+  - Ruling: a commit's Co-Authored-By names the model that actually wrote it; constraint 8 amended to "the implementing model's own attribution line + the Claude-Session line" — accurate attribution beats a uniform one — cost if wrong: a trailer line.
+Task 6: complete (commits 3fef8ce..385beb7, review clean)
