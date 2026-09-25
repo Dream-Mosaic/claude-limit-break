@@ -76,3 +76,26 @@ Task 7: complete (commits 54eea64..58b3c3a, review clean)
   - Task 5a: minor (deferred): the trustTerminals Set is not cleared on dispose.
   - ⚠️ resolved by controller: onDidCloseTerminal passes the same Terminal object createTerminal returned (documented API); the 9/9 integration run at a14e475 activated this wiring in real VS Code.
 - User decisions (2026-09-25, before stepping away): this lane now owns Task 4 from bbff534 and the rest of the plan (5b, 8, 9) to the end; push release/1.0.0 and open a DRAFT PR into main (never merge); this lane merges origin/main (merge commit, no rebase) for Task 9.
+
+## Extended scope (user, 2026-09-25): this lane finishes the plan
+Order: 5a (fix round) → 9a merge origin/main → merge fix/1.0-field-reports (bbff534) → 4a detection → 4b gave-up → 5b tooltip → 8 rename → 9b docs + release/1.0.0 → final whole-branch review → push release/1.0.0 + draft PR.
+
+Pre-flight scan (added tasks)
+| Pair / task | Shared | Finding |
+|---|---|---|
+| 9a / everything after | package.json, workflows, transcriptWatcher.ts | merging main FIRST means 4a-9b build and test on the real engine floor (^1.138) and main's watcher change; conflicts are smallest now (7 files). Ruling below |
+| bbff534 / 4a | limitParser.ts nextZonedOccurrence | 4a reviews bbff534 (never reviewed) as its DST bullet. OK |
+| 4a / Task 3 | transcriptWatcher.ts untrusted path, overloadParser.ts | new overload renders must respect Task 3's vetoes and the flagged exemption; brief requires a negative test. OK |
+| 4a / Task 1 | MAX_OVERLOAD_AGE_MS | new overload renders obey the age gate. OK |
+| 4b / 5a | extension.ts, notifications | 5a's trust notice is not a failure notice; 4b must not fold it into gave-up. OK |
+| 4b / 5b | statusBar.ts, the gave-up model | 4b produces per-session gave-up data (id, cwd, cause, when); 5b lists it with pending jobs in one tooltip. Interface fixed in both briefs. OK |
+| 4b / Task 10 | failed-launch paths release claims | 4b's recording on launcher-missing / cwd-missing must not change the claim release order Task 10's 3 review rounds settled. Carried into the 4b dispatch |
+| 5b / 5a | command id + cwd arg | 5b links 5a's command with a URI-encoded [cwd]. OK |
+| 8 / all | every id and string | runs after 4a-5b; 9b docs then use the new ids. OK |
+| 9b / 8 | README settings table | table uses claudeLimitBreak.* ids. OK |
+| 9b self | release branch | version bump on release/1.0.0 only; docs on this branch. User approved pushing release/1.0.0 + a DRAFT PR, never a merge. OK |
+
+- Ruling: merge origin/main (Task 9a) before Task 4, not at the end — 7 files now vs. every task's diff later, and 4a-9b get tested against engines ^1.138 — cost if wrong: none; the user approved this lane merging main.
+- Ruling: Task 4 split into 4a (detection: A5, A6, A7 incl. reviewing bbff534) and 4b (gave-up state: A8, A9) — different files, different review surfaces — cost if wrong: one extra review.
+- Ruling: Task 9 split into 9a (merge main, early) and 9b (docs + release branch, last) — cost if wrong: none.
+- Ruling: prior-art slices copied to ref/prior-art/ (from 5b4d91a) so 4a's implementer has the verbatim renders — cost if wrong: 270 KB of markdown in the workspace.
