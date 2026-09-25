@@ -106,3 +106,6 @@ Task 5a: complete (commits f1cb859..18fad58, review clean after 1 fix round; 4 m
 - Task 9a: implementer DONE (48fbb64, merge of origin/main 28b0eec; no conflicts); npm ci 0, 497/497 unit, 9/9 integration, check-vsix 0. Review dispatched (sonnet).
 - Task 9a review: spec ✅, quality Approved, no findings (reviewer confirmed both parents, main-owned files identical to main, lockfile = main's, npm ls clean).
 Task 9a: complete (commits 82dddfb..48fbb64, review clean)
+- Merged origin/fix/1.0-field-reports (bbff534) as 8923bc0; 498/498 unit.
+- Task 4a: dispatched (sonnet) at base 8923bc0
+- Task 4a: implementer DONE (912d21a 583ada4 abc9ccf); 514/514 unit, 9/9 integration; 8/8 mutations caught. Reviewing bbff534 found the spring-forward gap resolved to the EARLY side; fixed (912d21a). Review dispatched (opus), package covers bbff534 + 4a.

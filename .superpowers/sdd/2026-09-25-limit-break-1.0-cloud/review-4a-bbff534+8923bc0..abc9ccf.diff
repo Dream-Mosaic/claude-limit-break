@@ -1,0 +1,779 @@
+## Part 1: bbff534 (the Windows lane's unreviewed DST commit, merged as 8923bc0)
+bbff534 fix(limitParser): resolve a DST fall-back repeated hour to the later instant
+nextZonedOccurrence's 2-pass convergence always anchored on the offset in
+effect at the naively-guessed instant, which is always the EARLIER of the
+two real instants that share a repeated wall-clock reading during a fall-back
+transition (verified by direct execution: America/Chicago 2026-11-01
+01:30am resolved to 06:30Z/CDT, not 07:30Z/CST). Detect the ambiguity by
+checking whether stepping the candidate forward an hour still reads the same
+wall clock, and prefer that later instant: waking an hour late finds a
+still-live limit safe to re-check, waking an hour early risks resuming into
+a session that has not actually reset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+
+diff --git a/src/parsers/limitParser.ts b/src/parsers/limitParser.ts
+index 1d1aaa5..7349cb4 100644
+--- a/src/parsers/limitParser.ts
++++ b/src/parsers/limitParser.ts
+@@ -96,42 +96,84 @@ function zoneOffsetMs(timeZone: string, at: Date): number | undefined {
+ }
+ /** The calendar date currently showing in a named zone. */
+ function zoneToday(timeZone: string, at: Date): { y: number; m: number; d: number } | undefined {
+     const offset = zoneOffsetMs(timeZone, at);
+     if (offset === undefined) {
+         return undefined;
+     }
+     const shifted = new Date(at.getTime() + offset);
+     return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() };
+ }
++/**
++ * The wall-clock date and time a named zone reads at a given instant, as a
++ * sortable string - used only to compare two instants for "same local
++ * reading", never parsed back into a Date.
++ */
++function renderedWallClock(timeZone: string, at: Date): string | undefined {
++    try {
++        const parts = new Intl.DateTimeFormat('en-US', {
++            timeZone,
++            hour12: false,
++            year: 'numeric',
++            month: '2-digit',
++            day: '2-digit',
++            hour: '2-digit',
++            minute: '2-digit',
++        }).formatToParts(at);
++        const get = (type: string) => parts.find((p) => p.type === type)?.value;
++        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
++    }
++    catch {
++        return undefined;
++    }
++}
++
+ /**
+  * The instant at which a named zone's wall clock reads the given date and time.
+  * Iterates twice so a reading that lands on a DST transition still converges.
++ *
++ * A DST fall-back repeats one wall-clock hour twice, an hour apart in real
++ * time (issue A7). The 2-pass loop above always converges on whichever
++ * offset applies to the *naively guessed* instant - which is always the
++ * EARLIER of the two real instants that share that wall-clock reading,
++ * confirmed by direct execution against the unmodified algorithm. Detect
++ * that by checking whether stepping the candidate forward one hour still
++ * reads the same wall clock: if so, the candidate is the ambiguous hour's
++ * first pass, and the later occurrence - one hour on - is what
++ * nextZonedOccurrence's callers want. Resolving to the later instant is
++ * deliberate: waking an hour late finds a still-live limit safe to
++ * re-check; waking an hour early risks resuming into a session that has
++ * not actually reset yet.
+  */
+ function zonedWallClockToInstant(
+     timeZone: string,
+     y: number,
+     m: number,
+     d: number,
+     hour: number,
+     minute: number
+ ): Date | undefined {
+     const target = Date.UTC(y, m, d, hour, minute, 0, 0);
+     let instant = target;
+     for (let i = 0; i < 2; i++) {
+         const offset = zoneOffsetMs(timeZone, new Date(instant));
+         if (offset === undefined) {
+             return undefined;
+         }
+         instant = target - offset;
+     }
+-    return new Date(instant);
++    const candidate = new Date(instant);
++    const oneHourLater = new Date(instant + HOUR_MS);
++    if (renderedWallClock(timeZone, candidate) === renderedWallClock(timeZone, oneHourLater)) {
++        return oneHourLater;
++    }
++    return candidate;
+ }
+ const RULES: Rule[] = [
+     {
+         // "Claude AI usage limit reached|1754035200"  (epoch seconds or millis)
+         id: 'epoch',
+         re: /limit reached\s*[|:]\s*(\d{9,13})\b/i,
+         resolve(m) {
+             const n = Number(m[1] ?? '');
+             if (!Number.isFinite(n) || n <= 0) {
+                 return undefined;
+diff --git a/test/parsers/limitParser.test.ts b/test/parsers/limitParser.test.ts
+index 829d57f..2678177 100644
+--- a/test/parsers/limitParser.test.ts
++++ b/test/parsers/limitParser.test.ts
+@@ -193,20 +193,47 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
+     ['2024-06-10 control', '2024-06-11T03:00:00.000Z', '2024-06-11T10:00:00.000Z'],
+   ];
+   for (const [label, nowIso, expected] of cases) {
+     const now = new Date(nowIso);
+     const hit = detectLimit(text, now, MAXW, { zone: 'America/Chicago' });
+     assert.ok(hit, `not detected (${label}): ${text}`);
+     assert.equal(hit.resumeAt.toISOString(), expected, `wrong instant for ${label}`);
+   }
+ });
+ 
++test('a wall-clock time inside a DST fall-back repeated hour resolves to the LATER instant (A7)', () => {
++  // America/Chicago falls back on 2026-11-01: the clock strikes 2:00am and is
++  // set back to 1:00am, so the wall-clock hour 01:00-01:59 happens twice -
++  // once on CDT (UTC-5), once on CST (UTC-6), an hour apart in real time.
++  // "resets 1:30am" is genuinely ambiguous between them. Before this fix,
++  // zonedWallClockToInstant's 2-pass convergence always lands on whichever
++  // offset applies AT the naive target instant - which is always the
++  // EARLIER (CDT) occurrence, confirmed by direct execution against the
++  // unmodified algorithm (2026-11-01T06:30:00.000Z, not the later
++  // 07:30:00.000Z). The brief requires the LATER instant: waking an hour
++  // late finds the banner (if any) still live and safe to re-check; waking
++  // an hour early risks resuming into a session that is still limited.
++  //
++  // `now` is 2026-11-01T05:30:00Z, which is 00:30 local in Chicago (still
++  // CDT, before the transition) - so "today" in the zone is Nov 1 and the
++  // dayOffset=0 candidate is the one under test.
++  const now = new Date('2026-11-01T05:30:00Z');
++  const text = "You've hit your session limit · resets 1:30am (America/Chicago)";
++  const hit = detectLimit(text, now, MAXW);
++  assert.ok(hit, 'not detected');
++  assert.equal(
++    hit.resumeAt.toISOString(),
++    '2026-11-01T07:30:00.000Z',
++    'must resolve to the LATER (CST) instant of the repeated hour, not the earlier (CDT) one',
++  );
++});
++
+ // Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
+ // deleted without any test failing - nothing pinned any one of them
+ // individually. Each test below uses the exact input from the issue's table,
+ // chosen so it trips only that one hint (checked by hand against every other
+ // pattern in the array); deleting the hint it targets must turn it red.
+ test('LIMIT_HINTS: \\blimit reached\\b', () => {
+   assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
+ });
+ 
+ test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
+
+## Part 2: Task 4a commits (8923bc0..abc9ccf)
+abc9ccf fix(transcriptWatcher): apply the untrusted-text overload vetoes to the new overload rules
+583ada4 feat(overloadParser): cover three detection gaps (in-flight retry, transient-429, sleep/stream-interruption)
+912d21a fix(limitParser): resolve a DST spring-forward skipped hour to the safe LATER instant
+ src/parsers/limitParser.ts          |  24 ++++++++
+ src/parsers/overloadParser.ts       |  68 ++++++++++++++++++++
+ src/transcriptWatcher.ts            |  13 +++-
+ test/parsers/limitParser.test.ts    |  38 ++++++++++++
+ test/parsers/overloadParser.test.ts |  99 +++++++++++++++++++++++++++++
+ test/transcriptWatcher.test.ts      | 120 ++++++++++++++++++++++++++++++++++++
+ 6 files changed, 361 insertions(+), 1 deletion(-)
+diff --git a/src/parsers/limitParser.ts b/src/parsers/limitParser.ts
+index 7349cb4..7fc83fe 100644
+--- a/src/parsers/limitParser.ts
++++ b/src/parsers/limitParser.ts
+@@ -136,20 +136,35 @@ function renderedWallClock(timeZone: string, at: Date): string | undefined {
+  * offset applies to the *naively guessed* instant - which is always the
+  * EARLIER of the two real instants that share that wall-clock reading,
+  * confirmed by direct execution against the unmodified algorithm. Detect
+  * that by checking whether stepping the candidate forward one hour still
+  * reads the same wall clock: if so, the candidate is the ambiguous hour's
+  * first pass, and the later occurrence - one hour on - is what
+  * nextZonedOccurrence's callers want. Resolving to the later instant is
+  * deliberate: waking an hour late finds a still-live limit safe to
+  * re-check; waking an hour early risks resuming into a session that has
+  * not actually reset yet.
++ *
++ * A DST spring-forward SKIPS one wall-clock hour outright (Task 4a, A7's
++ * other half): the reading asked for may not exist at all (e.g.
++ * America/Chicago's clock jumps from 01:59:59 straight to 03:00:00, so
++ * "02:30" never happens). The 2-pass loop still converges on some instant,
++ * but it does so by re-resolving the offset a second time at its own
++ * first-pass candidate - which by then sits on the far side of the jump - so
++ * it lands on the offset that took effect *after* the jump and reads back an
++ * hour EARLIER than what was asked for (confirmed by direct execution:
++ * "02:30" on that gap resolves to an instant reading 01:30, not 02:30). That
++ * is the unsafe direction by the same reasoning as the fall-back case above,
++ * so it is detected the same way a missed target is always detected here -
++ * the resolved candidate's own wall-clock reading no longer matches what was
++ * asked for - and corrected by stepping forward one hour onto the safe side
++ * of the gap instead.
+  */
+ function zonedWallClockToInstant(
+     timeZone: string,
+     y: number,
+     m: number,
+     d: number,
+     hour: number,
+     minute: number
+ ): Date | undefined {
+     const target = Date.UTC(y, m, d, hour, minute, 0, 0);
+@@ -159,20 +174,29 @@ function zonedWallClockToInstant(
+         if (offset === undefined) {
+             return undefined;
+         }
+         instant = target - offset;
+     }
+     const candidate = new Date(instant);
+     const oneHourLater = new Date(instant + HOUR_MS);
+     if (renderedWallClock(timeZone, candidate) === renderedWallClock(timeZone, oneHourLater)) {
+         return oneHourLater;
+     }
++    // Spring-forward gap: the resolved instant does not read back the hour
++    // and minute that were actually asked for, proof the requested wall
++    // clock fell inside a skipped hour. Step forward one hour - the only
++    // gap size any zone Claude Code's own banners have been seen in uses -
++    // onto the safe, later side of the jump.
++    const requested = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
++    if (renderedWallClock(timeZone, candidate)?.slice(-5) !== requested) {
++        return oneHourLater;
++    }
+     return candidate;
+ }
+ const RULES: Rule[] = [
+     {
+         // "Claude AI usage limit reached|1754035200"  (epoch seconds or millis)
+         id: 'epoch',
+         re: /limit reached\s*[|:]\s*(\d{9,13})\b/i,
+         resolve(m) {
+             const n = Number(m[1] ?? '');
+             if (!Number.isFinite(n) || n <= 0) {
+diff --git a/src/parsers/overloadParser.ts b/src/parsers/overloadParser.ts
+index 499b709..ce7c843 100644
+--- a/src/parsers/overloadParser.ts
++++ b/src/parsers/overloadParser.ts
+@@ -36,22 +36,73 @@ const ERROR_MARKERS = [
+     /\bunavailable\b/i,
+     /\boverloaded_error\b/i,
+     // A bare "Overloaded" is the API's own one-word message, but the same word in
+     // the middle of a sentence is someone talking about a queue.
+     /^overloaded\b/i,
+     /\btimed out\b/i,
+     /\bsocket hang up\b/i,   // <-- added: Node prints this bare, with no "Error:" prefix
+     /\b5\d{2}\b/,
+ ];
+ 
++/**
++ * Claude Code's own in-flight retry status line: "API Error (529 {...}) ·
++ * Retrying in 5s · attempt 3/10". This is Claude Code already retrying, not a
++ * failure to react to - scheduling a resume on top of it would interrupt its
++ * own backoff. The colon form ("API Error: 529 ...") never carries this
++ * suffix and stays terminal/actionable (synthesis A5; prior-art
++ * 1-autoretry-detection.md "Three gaps" #1, overload.test.js:83-85: "Acting
++ * on it would interrupt Claude's own backoff"). Matched on the "Retrying
++ * in Ns .. attempt k/n" pair alone, not on the parens or the status code, so
++ * it covers every code, second count and attempt ratio Claude Code might
++ * render without needing a rule per variant.
++ */
++const IN_FLIGHT_RETRY_RE = /\bretrying in\s*\d+s\b[^\n]{0,60}\battempt\s*\d{1,2}\/\d{1,2}\b/i;
++
++/**
++ * The transient-429 render Claude Code writes when the server is throttling
++ * requests but the account's own usage limit has not been hit - its own text
++ * disclaims being a usage limit ("not your usage limit"). This must win over
++ * looksLikeOverloadMessage's ordinary "a 429 belongs to the limit parser"
++ * carve-out just below, or the message is silently dropped by both parsers
++ * (synthesis A6; prior-art 1-autoretry-detection.md "Three gaps" #3: their
++ * own OVERLOAD_ANCHOR/pattern set treats this exact render as overload, not a
++ * usage limit, "mirrored almost word-for-word" in the carve-out's own
++ * comment). Anchored on the "API Error:" head, as every other rule here is.
++ */
++const TRANSIENT_429_RE = /\bapi error:\s*server is temporarily limiting requests\b[^\n]{0,40}\bnot your usage limit\b/i;
++
++/**
++ * The stream-interruption family: a turn Claude Code's own byte-watchdog
++ * finalized after a suspend/sleep, a dropped connection, or a stalled
++ * stream - real content was already yielded, so Claude Code's built-in
++ * auto-retry (which only covers thinking-only truncation) never resumes it,
++ * and the session sits on a half-finished answer indefinitely without this
++ * rule (synthesis A6; prior-art 5-history-issues.md bug entry #3). Every
++ * variant is anchored on the literal "API Error:" head, as the brief
++ * requires, so prose that merely mentions sleep or a dropped connection never
++ * matches - the alternation only starts matching after that head is seen.
++ * The seven variants themselves are exactly the ones the prior-art evidence
++ * names (1-autoretry-detection.md:80-81, 2-autoretry-resume.md:296-297); no
++ * additional phrasing has been invented beyond what that evidence shows.
++ */
++const STREAM_INTERRUPTED_RE =
++    /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
++
+ export function looksLikeOverloadMessage(text: string): boolean {
+     const t = normalize(text);
++    // The transient-429 render names "rate limit" vocabulary in its own text
++    // while explicitly disclaiming being a usage limit - it must be claimed as
++    // an overload before the carve-out below hands anything "rate limit"-shaped
++    // to the limit parser, or it is dropped by both (see TRANSIENT_429_RE).
++    if (TRANSIENT_429_RE.test(t)) {
++        return true;
++    }
+     // A 429 is a rate limit, not an overload: it belongs to the limit parser,
+     // which knows how to read the reset time out of it. Retrying a 429 every
+     // thirty seconds would only dig the hole deeper.
+     if (looksLikeLimitMessage(t)) {
+         return false;
+     }
+     return ERROR_MARKERS.some((re) => re.test(t));
+ }
+ 
+ const RULES: OverloadRule[] = [
+@@ -74,20 +125,30 @@ const RULES: OverloadRule[] = [
+     {
+         // "API Error: Connection error.", "fetch failed", "socket hang up"
+         id: 'connection-error',
+         re: /\b(?:api error:?\s*connection error|connection error\b[^\n]{0,30}\bretr|fetch failed|socket hang up|econnreset|econnrefused|etimedout|enotfound|network error)\b/i,
+     },
+     {
+         // "Request timed out", "API Error: Request timeout"
+         id: 'timeout',
+         re: /\b(?:request timed out|request timeout|read timed out|stream timed out)\b/i,
+     },
++    {
++        // "Server is temporarily limiting requests (not your usage limit)"
++        id: 'transient-429',
++        re: TRANSIENT_429_RE,
++    },
++    {
++        // "Your computer went to sleep mid-response", dropped connection, stalled stream.
++        id: 'stream-interrupted',
++        re: STREAM_INTERRUPTED_RE,
++    },
+ ];
+ 
+ /**
+  * Whether an "API Error:" line is really a quotation of one.
+  *
+  * The general code guard cannot be used on these, because the error Claude Code
+  * prints embeds the API's JSON body — `API Error (529 {"type":"error",...})` —
+  * and braces alone would throw the real thing away. Only the markers that no
+  * error message ever carries are grounds for rejection here.
+  */
+@@ -107,20 +168,27 @@ function sniffStatus(text: string): number | undefined {
+ 
+ /** Scan one short chunk of text for a transient server failure. */
+ export function detectOverload(rawText: string): OverloadDetection | undefined {
+     const text = normalize(rawText);
+     if (!text || text.length > MAX_NOTICE_LENGTH) {
+         return undefined;
+     }
+     if (!looksLikeOverloadMessage(text)) {
+         return undefined;
+     }
++    // Claude Code is already retrying this one itself (ruling: applies on
++    // every path, flagged or not - it is retrying either way, so nothing here
++    // may schedule a second one on top of its own backoff). Checked ahead of
++    // the RULES loop so it wins even over a matching status-code rule.
++    if (IN_FLIGHT_RETRY_RE.test(text)) {
++        return undefined;
++    }
+     // Source code and conversation *about* these errors — which is exactly what a
+     // transcript of working on this extension looks like — must not arm a retry.
+     // An explicit "API Error:" prefix is trusted further, since the CLI's own
+     // wording of it carries a JSON body that the general guard cannot tell from
+     // code.
+     const isBanner = /\bapi error\b/i.test(text);
+     if (isBanner ? quotesSourceCode(text) : looksLikeCode(text)) {
+         return undefined;
+     }
+     for (const rule of RULES) {
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index b5c7dd3..2cdc32b 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -1,18 +1,18 @@
+ import * as fs from 'fs';
+ import * as fsp from 'fs/promises';
+ import * as os from 'os';
+ import * as path from 'path';
+ import * as vscode from 'vscode';
+ 
+ import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
+-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
++import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice } from './parsers/limitParser';
+ import type { Logger } from './log';
+ import { detectOverload, OverloadDetection } from './parsers/overloadParser';
+ 
+ /** Never read more than this from one file in a single pass. */
+ const MAX_READ_BYTES = 2_000_000;
+ 
+ export function transcriptRoot(): string {
+     return path.join(os.homedir(), '.claude', 'projects');
+ }
+ 
+@@ -495,20 +495,31 @@ export class TranscriptWatcher {
+         // one - must never kick off an automatic retry. An overload carries no reset
+         // time of its own, so a replayed one is judged on age alone: written longer
+         // ago than MAX_OVERLOAD_AGE_MS, it is history rather than something to retry
+         // now.
+         const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
+         if (!overloadTooOld && (apiError || entry.type !== 'user')) {
+             for (const candidate of candidates) {
+                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
+                     continue;
+                 }
++                // Task 4a: routing the transient-429 and stream-interruption renders
++                // through the overload path (see overloadParser.ts) reopens exactly
++                // the false-positive class Task 3 closed for limits - a tool's raw
++                // output, or someone else's quotation, is evidence Claude Code fed
++                // back to the model or a person is discussing, not a notice it is
++                // delivering now. Mirrors the same two guards the limit loop above
++                // already has; flagged entries stay exempt, same as every other veto
++                // in this module.
++                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text))) {
++                    continue;
++                }
+                 const overload = detectOverload(candidate.text);
+                 if (overload) {
+                     return { overload: { detection: overload, cwd, file } };
+                 }
+             }
+         }
+         return { inputNeeded };
+     }
+ 
+     stop(): void {
+diff --git a/test/parsers/limitParser.test.ts b/test/parsers/limitParser.test.ts
+index 2678177..dc076eb 100644
+--- a/test/parsers/limitParser.test.ts
++++ b/test/parsers/limitParser.test.ts
+@@ -220,20 +220,58 @@ test('a wall-clock time inside a DST fall-back repeated hour resolves to the LAT
+   const text = "You've hit your session limit · resets 1:30am (America/Chicago)";
+   const hit = detectLimit(text, now, MAXW);
+   assert.ok(hit, 'not detected');
+   assert.equal(
+     hit.resumeAt.toISOString(),
+     '2026-11-01T07:30:00.000Z',
+     'must resolve to the LATER (CST) instant of the repeated hour, not the earlier (CDT) one',
+   );
+ });
+ 
++test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the safe, LATER side of the gap (A7)', () => {
++  // America/Chicago springs forward on 2026-03-08: the clock strikes 2:00am
++  // and immediately jumps to 3:00am, so the wall-clock hour 02:00-02:59
++  // never happens at all. "resets 2:30am" names a reading that does not
++  // exist.
++  //
++  // Direct execution against the code as bbff534 left it (the 2-pass
++  // fall-back fix, with no gap-specific handling) showed it resolves this to
++  // 2026-03-08T07:30:00.000Z - which reads back as 01:30 CST, an hour
++  // EARLIER than the literal (nonexistent) 02:30 reading asked for. That
++  // happens because the 2-pass loop's second pass re-resolves the offset at
++  // its own first-pass candidate (already past the transition, so CDT),
++  // overshooting onto the early side of the jump. This is the unsafe
++  // direction the brief warns about: waking early risks resuming into a
++  // session that has not actually reset. So this is a case where the test
++  // shows the (unmodified) code wrong, per the brief's "change the
++  // implementation only if a test shows it is wrong" - the implementation
++  // was changed to detect a resolved instant that does not read back the
++  // requested hour:minute (proof the reading fell in a skipped hour) and
++  // step forward one hour onto the safe side instead: 2026-03-08T08:30:00Z,
++  // which reads 03:30 CDT - the first real instant on the other side of the
++  // jump. Late is safe (a still-live limit is simply re-checked); early is
++  // not (it resumes a session mid-limit).
++  //
++  // `now` is 2026-03-08T06:30:00Z, which is 00:30 local in Chicago (still
++  // CST, before the 08:00Z transition) - so "today" in the zone is Mar 8 and
++  // the dayOffset=0 candidate is the one under test.
++  const now = new Date('2026-03-08T06:30:00Z');
++  const text = "You've hit your session limit · resets 2:30am (America/Chicago)";
++  const hit = detectLimit(text, now, MAXW);
++  assert.ok(hit, 'not detected');
++  assert.equal(
++    hit.resumeAt.toISOString(),
++    '2026-03-08T08:30:00.000Z',
++    'must resolve to the safe, LATER side of the spring-forward gap (03:30 CDT), not the early side (01:30 CST)',
++  );
++});
++
+ // Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
+ // deleted without any test failing - nothing pinned any one of them
+ // individually. Each test below uses the exact input from the issue's table,
+ // chosen so it trips only that one hint (checked by hand against every other
+ // pattern in the array); deleting the hint it targets must turn it red.
+ test('LIMIT_HINTS: \\blimit reached\\b', () => {
+   assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
+ });
+ 
+ test('LIMIT_HINTS: (session|usage|weekly|daily|opus|sonnet) limit', () => {
+diff --git a/test/parsers/overloadParser.test.ts b/test/parsers/overloadParser.test.ts
+index 0b2b00d..e2f2dfc 100644
+--- a/test/parsers/overloadParser.test.ts
++++ b/test/parsers/overloadParser.test.ts
+@@ -1,13 +1,14 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { detectOverload } from '../../src/parsers/overloadParser';
++import { detectLimit } from '../../src/parsers/limitParser';
+ 
+ test('detects transient server failures', () => {
+   const positives = [
+     'API Error: 500 Internal Server Error',
+     'API Error: 503 Service Unavailable',
+     'API Error: 529 {"type":"overloaded_error","message":"Overloaded"}',
+     'Overloaded',
+     'Request failed: fetch failed',
+     'Error: connect ECONNRESET',
+     'Error: socket hang up',
+@@ -45,10 +46,108 @@ test('rejects text longer than the notice cap', () => {
+ });
+ 
+ test('recognises a bare socket hang up, which is how Node prints it', () => {
+   assert.ok(detectOverload('socket hang up'));
+   assert.ok(detectOverload('Error: socket hang up'), 'prefixed form must keep working');
+ });
+ 
+ test('the added marker does not admit prose about sockets', () => {
+   assert.equal(detectOverload('the socket layer hangs up on idle connections'), undefined);
+ });
++
++// ---------------------------------------------------------------------------
++// Task 4a (synthesis A5): Claude Code's own in-flight retry must not also be
++// scheduled - acting on it would interrupt Claude's own backoff. The PARENS
++// form carrying a "Retrying in"/"attempt k/n" suffix is that in-flight retry;
++// the COLON form with no such suffix is terminal and stays actionable.
++// Source: prior-art/1-autoretry-detection.md "Three gaps" #1 (line ~30) and
++// the fixture table near line 230; overload.test.js:83-85 ("Acting on it
++// would interrupt Claude's own backoff").
++// ---------------------------------------------------------------------------
++
++test('an in-flight retry (parens form, "Retrying in"/"attempt k/n") must not schedule anything', () => {
++  const positives = [
++    // Exact spec string.
++    'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
++    // Close variants: other codes, other second counts, attempt 10/10, no JSON body.
++    'API Error (500) · Retrying in 30s · attempt 10/10',
++    'API Error (503 {"type":"error","message":"Service Unavailable"}) · Retrying in 12s · attempt 1/5',
++  ];
++  for (const text of positives) {
++    assert.equal(detectOverload(text), undefined, text);
++  }
++});
++
++test('the colon form with no retry suffix stays terminal and actionable', () => {
++  assert.ok(detectOverload('API Error: 529 Overloaded'), 'colon form with no suffix must still fire');
++});
++
++// ---------------------------------------------------------------------------
++// Task 4a: the transient-429 render disclaims being a usage limit in its own
++// text and must route to overload instead of being dropped by both parsers.
++// Source: prior-art/1-autoretry-detection.md "Three gaps" #3 (line ~37-48)
++// and the fixture table near line 230.
++// ---------------------------------------------------------------------------
++
++const TRANSIENT_429 = 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited';
++
++test('a transient 429 that disclaims being a usage limit routes to overload', () => {
++  const hit = detectOverload(TRANSIENT_429);
++  assert.ok(hit, 'must be detected as overload');
++  assert.equal(hit.rule, 'transient-429');
++});
++
++test('the transient-429 render never arms a usage-limit timer, trusted or not', () => {
++  assert.equal(detectLimit(TRANSIENT_429, new Date(), 24, { trusted: false }), undefined, 'untrusted path');
++  assert.equal(detectLimit(TRANSIENT_429, new Date(), 24, { trusted: true }), undefined, 'trusted (flagged) path');
++});
++
++// ---------------------------------------------------------------------------
++// Task 4a: "computer went to sleep mid-response" and its sibling renders
++// (dropped connection, stalled stream) must route to overload as a
++// retry-class interruption. Anchored on the "API Error:" head so prose that
++// merely mentions sleep never matches.
++// Sources: prior-art/1-autoretry-detection.md line 80-81 (six of the seven
++// variants, verbatim from claude-auto-retry's own fixture, tmux pane %111);
++// prior-art/2-autoretry-resume.md line 296-297 (the "before a response was
++// produced" sleep variant, config.js:89-90); prior-art/5-history-issues.md
++// bug entry #3 ("all seven render variants... suspend, dropped connection,
++// stalled stream, mid-response server error in two forms").
++// ---------------------------------------------------------------------------
++
++test('sleep/stream-interruption renders route to overload', () => {
++  const positives: [string, string][] = [
++    // Exact spec string.
++    ['API Error: Your computer went to sleep mid-response. The response above may be incomplete.', 'spec string'],
++    ['API Error: Your computer went to sleep before a response was produced. Try again.', '2-autoretry-resume.md:296-297'],
++    ['API Error: The response stopped arriving. The response above may be incomplete.', '1-autoretry-detection.md:81 (stalled stream)'],
++    ['API Error: Connection lost mid-response. The response above may be incomplete.', '1-autoretry-detection.md:81 (dropped connection)'],
++    ['API Error: Connection lost before a response was produced. Try again.', '1-autoretry-detection.md:81 (dropped connection)'],
++    ['API Error: Server error mid-response. The response above may be incomplete.', '1-autoretry-detection.md:81'],
++    ['API Error: The response stalled before a response was produced. Try again.', '1-autoretry-detection.md:81 (stalled stream)'],
++  ];
++  for (const [text, source] of positives) {
++    const hit = detectOverload(text);
++    assert.ok(hit, `${source}: ${text}`);
++    assert.equal(hit.rule, 'stream-interrupted', source);
++  }
++});
++
++test('prose merely mentioning sleep, without the API Error: head, never matches', () => {
++  assert.equal(
++    detectOverload('My computer went to sleep mid-response earlier today, is that a problem?'),
++    undefined,
++  );
++});
++
++test('the exact stream-interruption wording without the API Error: head does not match, even when other overload vocabulary is present', () => {
++  // Isolates the head anchor itself: this text carries an ERROR_MARKERS word
++  // ("error") so it clears looksLikeOverloadMessage and actually reaches the
++  // RULES loop, and it carries the literal "your computer went to sleep
++  // mid-response" phrase the rule matches - but with a bare "error:", not
++  // "API Error:", ahead of it. Only the head anchor stands between this and
++  // a false positive.
++  assert.equal(
++    detectOverload('There was an error: your computer went to sleep mid-response, apparently.'),
++    undefined,
++  );
++});
+diff --git a/test/transcriptWatcher.test.ts b/test/transcriptWatcher.test.ts
+index 3761fa8..0f32292 100644
+--- a/test/transcriptWatcher.test.ts
++++ b/test/transcriptWatcher.test.ts
+@@ -445,20 +445,39 @@ const overloadLine = (age: number) =>
+ test('MAX_OVERLOAD_AGE_MS boundary: still comfortably inside the age limit retries', () => {
+   const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
+   assert.ok(out.overload, 'an overload just inside MAX_OVERLOAD_AGE_MS is not yet too old');
+ });
+ 
+ test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () => {
+   const out = make().inspectLine(overloadLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
+   assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
+ });
+ 
++// The new sleep/stream-interruption render must obey the same age rule as
++// every other overload render (Task 4a constraint: "the new overload renders
++// obey it too").
++const sleepLine = (age: number) =>
++  entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    timestamp: new Date(Date.now() - age).toISOString(),
++    cwd: '/projects/example',
++    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
++  });
++
++test('the sleep-interruption render also obeys MAX_OVERLOAD_AGE_MS', () => {
++  const fresh = make().inspectLine(sleepLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
++  assert.ok(fresh.overload, 'a sleep-interruption notice just inside MAX_OVERLOAD_AGE_MS is not yet too old');
++  const stale = make().inspectLine(sleepLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
++  assert.equal(stale.overload, undefined, 'an old sleep-interruption notice must not retry');
++});
++
+ // ---------------------------------------------------------------------------
+ // Task 3 (synthesis A3): untrusted text that merely LOOKS like a limit
+ // banner must not arm a timer. Three real false positives from 2026-09-23:
+ // a subagent note quoting a banner, a usage-percentage status line, and a
+ // `grep` result quoting a banner. Each is used here verbatim (or, for the
+ // grep case, a realistic reconstruction - the brief gives no exact text) as
+ // a negative case, alongside a flagged real banner as a positive case.
+ // ---------------------------------------------------------------------------
+ 
+ const SUBAGENT_FILE =
+@@ -600,10 +619,111 @@ test('a flagged banner in a subagents/ file still arms a timer', () => {
+   });
+   assert.ok(make().inspectLine(line, SUBAGENT_FILE).limit, 'a flagged entry must not be dropped by the subagent-file veto');
+ });
+ 
+ test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a timer', () => {
+   const resetsAt = Date.now() + 2 * 3_600_000;
+   const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
+   assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
+   assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
+ });
++
++// ---------------------------------------------------------------------------
++// Task 4a: the three new overload-detection rules, wired through inspectLine.
++// ---------------------------------------------------------------------------
++
++test('an in-flight retry does not report overload, even from a flagged entry', () => {
++  // Ruling 2: the in-flight-retry exclusion applies on both paths - Claude
++  // Code is already retrying either way, flagged or not.
++  const line = entry({
++    type: 'assistant',
++    isApiErrorMessage: true,
++    message: { content: 'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10' },
++  });
++  assert.equal(make().inspectLine(line, FILE).overload, undefined);
++});
++
++test('an in-flight retry from an unflagged entry also does not report overload', () => {
++  const line = entry({
++    type: 'assistant',
++    message: { content: 'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10' },
++  });
++  assert.equal(make().inspectLine(line, FILE).overload, undefined);
++});
++
++test('the transient-429 render (non-flagged, non-user entry) schedules an overload retry, not a limit timer', () => {
++  // Ruling 1: this message must never arm a usage-limit timer, on either
++  // path. Routing it to overload gives it the overload treatment instead.
++  const line = entry({
++    type: 'assistant',
++    message: { content: 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited' },
++  });
++  const out = make().inspectLine(line, FILE);
++  assert.equal(out.limit, undefined, 'must not arm a usage-limit timer');
++  assert.ok(out.overload, 'must be routed to overload');
++  assert.equal(out.overload.detection.rule, 'transient-429');
++});
++
++test('a sleep-interruption render (non-flagged, non-user entry) schedules an overload retry', () => {
++  const line = entry({
++    type: 'assistant',
++    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
++  });
++  const out = make().inspectLine(line, FILE);
++  assert.ok(out.overload, 'must be routed to overload');
++  assert.equal(out.overload.detection.rule, 'stream-interrupted');
++});
++
++// ---------------------------------------------------------------------------
++// Task 4a constraint: the untrusted-text rules from Task 3 (quoted text, tool
++// results) must keep working for the new overload rules too - a quoted or
++// tool-result copy of any of these strings on the untrusted path must not
++// schedule anything. Flagged entries stay exempt, same as every other veto
++// in this module.
++// ---------------------------------------------------------------------------
++
++test('a quoted copy of the sleep-interruption render inside a tool_result block does not schedule an overload retry', () => {
++  const line = entry({
++    type: 'user',
++    error: 'tool execution failed',
++    message: {
++      content: [
++        {
++          type: 'tool_result',
++          tool_use_id: 'toolu_03',
++          content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
++        },
++      ],
++    },
++  });
++  assert.equal(make().inspectLine(line, FILE).overload, undefined);
++});
++
++test('a grep-style quoted copy of the transient-429 render does not schedule an overload retry', () => {
++  const line = entry({
++    type: 'assistant',
++    message: {
++      content: 'docs/notes.md:12:API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited',
++    },
++  });
++  assert.equal(make().inspectLine(line, FILE).overload, undefined);
++});
++
++test('a flagged entry is exempt from the new tool-result/quoted vetoes on the overload path', () => {
++  const line = entry({
++    type: 'user',
++    isApiErrorMessage: true,
++    message: {
++      content: [
++        {
++          type: 'tool_result',
++          tool_use_id: 'toolu_04',
++          content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
++        },
++      ],
++    },
++  });
++  assert.ok(
++    make().inspectLine(line, FILE).overload,
++    'a flagged entry must still fire even from text inside a tool_result block',
++  );
++});
