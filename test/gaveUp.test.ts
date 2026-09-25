@@ -179,3 +179,20 @@ test('the budget refusal names the session, the numbers and both ways through', 
   assert.match(n, /Resume anyway/);
   assert.match(n, /claudeLimitBuster\.maxResumeTokens/);
 });
+
+test('an explicit user action always warns, even for a cause already warned about', () => {
+  // Controller ruling on concern 1: warn-once silences AUTOMATIC repeats
+  // only. A click with no visible answer is the "looks idle" failure A8 is
+  // there to remove.
+  const s = new GaveUpState();
+  assert.equal(s.record(rec(A, 'cwd')), true);
+  assert.equal(s.record(rec(A, 'cwd', 2000), true), true, 'a manual retry must be answered');
+  assert.equal(s.record(rec(A, 'cwd', 3000), true), true, 'every time');
+  assert.equal(s.list()[0]?.atMs, 3000, 'and it is still recorded');
+});
+
+test('a manual failure counts as warned, so an automatic repeat after it stays quiet', () => {
+  const s = new GaveUpState();
+  assert.equal(s.record(rec(A, 'cwd'), true), true);
+  assert.equal(s.record(rec(A, 'cwd', 2000)), false);
+});

@@ -603,10 +603,10 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
       0,
       'a resume that never launched must not make the job disappear',
     );
-    // Task 4b ruling 1: the same failure for the same session warns once;
-    // the retry still happens and fails the same way, which the log shows.
-    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
-    assert.equal(cwdFailureLogs(SESSION), 2, 'the retry must fail the same way, not silently do nothing');
+    // A manual retry is always answered (Task 4b, controller ruling on
+    // concern 1): warn-once silences automatic repeats only.
+    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+    assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(vscodeFake.terminals.length, 0, 'still no terminal');
   } finally {
     teardown(ctx);
@@ -683,10 +683,10 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
       0,
       'the offer failing must not have discarded the job it claimed',
     );
-    // Task 4b ruling 1: the same failure for the same session warns once;
-    // the retry still happens and fails the same way, which the log shows.
-    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
-    assert.equal(cwdFailureLogs(SESSION), 2, 'the retry must fail the same way, not silently do nothing');
+    // A manual retry is always answered (Task 4b, controller ruling on
+    // concern 1): warn-once silences automatic repeats only.
+    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+    assert.equal(cwdFailureLogs(SESSION), 2);
   } finally {
     teardown(ctx);
   }
@@ -716,9 +716,10 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     // If cancel() had already run, the job would be gone and this second call
     // would report "nothing pending" instead of failing the same way again.
     await resumeNow();
-    // Task 4b ruling 1: warned once; the second failure is in the log only.
-    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
-    assert.equal(cwdFailureLogs(SESSION), 2, 'the job must still be there to fail on again');
+    // A manual retry is always answered (Task 4b, controller ruling on
+    // concern 1): warn-once silences automatic repeats only.
+    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -962,9 +963,10 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
     assert.equal(vscodeFake.errors.length, 1);
 
     await resumeNow();
-    // Task 4b ruling 1: warned once; the second failure is in the log only.
-    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
-    assert.equal(cwdFailureLogs(SESSION), 2, 'the job must still be there to fail on again');
+    // A manual retry is always answered (Task 4b, controller ruling on
+    // concern 1): warn-once silences automatic repeats only.
+    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -2903,11 +2905,11 @@ test('gave up: a missing claude executable is recorded, named distinctly, and lo
     assert.match(vscodeFake.errors[0]!, /claudeLimitBuster\.claudeCommand/);
 
     await resumeNow();
-    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(vscodeFake.errors.length, 2, 'a manual retry is always answered');
     assert.equal(
       vscodeFake.outputLines.filter((l) => l.includes(`Cannot resume ${SESSION}: no claude executable`)).length,
       2,
-      'but every failure must reach the log, or a repeat would be silent everywhere',
+      'and every failure reaches the log',
     );
   } finally {
     teardown(ctx);
@@ -3187,6 +3189,81 @@ test('gave up: a stall in a folder the CLI does not trust blames the trust promp
     assert.match(stall, /not trusted/);
   } finally {
     trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('gave up: an AUTOMATIC repeat of a failure already notified stays silent, but is logged and recorded', async () => {
+  // The one automatic repeat the code can produce without a new detection:
+  // a manual Resume Now on a job still counting down fails (and is answered),
+  // the job keeps counting down, and its own fire then fails the same way.
+  // Warn-once is for exactly that second, unattended failure.
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 1500), MISSING_CWD);
+    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    assert.equal(vscodeFake.errors.length, 1, 'setup: the manual attempt was answered');
+    assert.equal(cwdFailureLogs(SESSION), 1);
+
+    const deadline = Date.now() + 5000;
+    while (cwdFailureLogs(SESSION) < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(cwdFailureLogs(SESSION), 2, 'setup: the scheduled fire must have failed the same way');
+    assert.equal(vscodeFake.errors.length, 1, 'the automatic repeat must not notify again');
+    assert.ok(showsGaveUp(), 'but it is still shown as given up');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: the Resume Now notification button is answered even when the same failure was already notified', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = offers()[0];
+    assert.ok(offer, 'setup: the off-autoResume offer must have been shown');
+    // First failure from the palette, so the button's click is the repeat.
+    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    assert.equal(vscodeFake.errors.length, 1, 'setup: the palette attempt was answered');
+    offer.answer('Resume Now');
+    await flush();
+    assert.equal(cwdFailureLogs(SESSION), 2, 'setup: the button retried and failed the same way');
+    assert.equal(vscodeFake.errors.length, 2, 'the click must be answered');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: "Resume in Terminal Anyway" is answered even when the same failure was already notified', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
+    // First failure from the palette (holder gone, so no modal), so the
+    // button's click is the repeat.
+    clearHolders();
+    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    assert.equal(vscodeFake.errors.length, 1, 'setup: the palette attempt was answered');
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    assert.equal(cwdFailureLogs(SESSION), 2, 'setup: the button retried and failed the same way');
+    assert.equal(vscodeFake.errors.length, 2, 'the click must be answered');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
     teardown(ctx);
   }
 });

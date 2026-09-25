@@ -62,14 +62,19 @@ export class GaveUpState {
   private readonly warned = new Set<string>();
 
   /**
-   * Record a failure. Returns whether the caller should notify: true only the
-   * first time this cause is seen for this session since its last detection.
-   * A repeat still replaces the record, so the tooltip shows the latest time.
+   * Record a failure. Returns whether the caller should notify: true the
+   * first time this cause is seen for this session since its last detection,
+   * and always when `manual` - the failure is the answer to something the
+   * user just clicked, and a click with no visible answer is the "looks idle"
+   * failure this state exists to remove (controller ruling on 4b concern 1).
+   * Warn-once is for AUTOMATIC repeats only. Either way the pair is marked
+   * warned, and a repeat replaces the record, so the tooltip shows the latest
+   * time.
    */
-  record(entry: GaveUpRecord): boolean {
+  record(entry: GaveUpRecord, manual = false): boolean {
     this.records.set(entry.sessionId, { ...entry });
     const key = `${entry.sessionId}\n${entry.cause}`;
-    if (this.warned.has(key)) {
+    if (this.warned.has(key) && !manual) {
       return false;
     }
     this.warned.add(key);

@@ -464,18 +464,21 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /**
    * Record that a resume of `job` failed for `cause`, and notify - through
-   * `show`, so each site keeps its own severity - only the first time that
-   * cause is seen for that session since its last detection (Task 4b ruling
-   * 1). The caller logs; this only decides about the popup and the status
-   * bar. Never touches claims: every caller's claim release happens after
-   * resume() returns, exactly as before (Task 10).
+   * `show`, so each site keeps its own severity - the first time that cause
+   * is seen for that session since its last detection (Task 4b ruling 1),
+   * and every time when `manual`: a failure answering a user's click is
+   * always shown (ruling on concern 1; see GaveUpState.record). The caller
+   * logs; this only decides about the popup and the status bar. Never
+   * touches claims: every caller's claim release happens after resume()
+   * returns, exactly as before (Task 10).
    */
   const giveUp = (
     job: PendingJob,
     cause: 'stall' | 'launcher' | 'cwd',
     show: (message: string) => Thenable<unknown>,
+    manual = false,
   ): void => {
-    const warn = gaveUp.record({ sessionId: job.sessionId, cwd: job.cwd, cause, atMs: Date.now() });
+    const warn = gaveUp.record({ sessionId: job.sessionId, cwd: job.cwd, cause, atMs: Date.now() }, manual);
     render();
     if (warn) {
       void show(
@@ -488,7 +491,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const resume = (job: PendingJob): boolean => {
+  /**
+   * `manual` is true for every call that runs because the user clicked
+   * something (the resumeNow command, the Resume Now notification button,
+   * "Resume in Terminal Anyway"): its launch failures are always notified.
+   * Only scheduler.onFire's own automatic resume leaves it false. The stall
+   * check below does not take it: a stalled session's job is gone once it
+   * launched, so a second stall needs a new detection, which already resets
+   * warn-once.
+   */
+  const resume = (job: PendingJob, manual = false): boolean => {
     const s = settings();
     const which = (cmd: string) => {
       try {
@@ -510,7 +522,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // Logged every time, notified once per session (Task 4b ruling 1): a
       // repeat must still leave a trace somewhere.
       log.error(`Cannot resume ${job.sessionId}: no claude executable found for "${s.claudeCommand || 'claude'}".`);
-      giveUp(job, 'launcher', (m) => vscode.window.showErrorMessage(m));
+      giveUp(job, 'launcher', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
     // vscode.window.createTerminal does not throw on a bad cwd - VS Code
@@ -539,7 +551,7 @@ export function activate(context: vscode.ExtensionContext): void {
     };
     if (!cwdExists(job.cwd, cwdIsDirectory)) {
       log.error(`Cannot resume ${job.sessionId}: cwd "${job.cwd}" no longer exists (recorded in ${job.transcript}).`);
-      giveUp(job, 'cwd', (m) => vscode.window.showErrorMessage(m));
+      giveUp(job, 'cwd', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
     // Headless is opt-in and machine-scoped, and does NOT inherit the
@@ -931,7 +943,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // won the claim itself ('claimed', including a stale takeover it
           // just performed) - never a claim 'taken' by someone else.
           const notifyClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
-          if (!resume(job)) {
+          if (!resume(job, true)) {
             rememberReady(job);
             if (notifyClaim === 'claimed') {
               releaseClaim(claimsDir(), claimKey, fs, log);
@@ -994,7 +1006,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // won the claim itself ('claimed', which includes a stale
           // takeover it just performed).
           const buttonClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
-          if (!resume(job)) {
+          if (!resume(job, true)) {
             rememberReady(job);
             if (buttonClaim === 'claimed') {
               releaseClaim(claimsDir(), claimKey, fs, log);
@@ -1091,7 +1103,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
           const countingClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
-          if (resume(counting)) {
+          if (resume(counting, true)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {
             releaseClaim(claimsDir(), key, fs, log);
@@ -1110,7 +1122,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
         const readyClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
-        if (resume(ready)) {
+        if (resume(ready, true)) {
           forgetReady(ready.sessionId);
         } else if (readyClaim === 'claimed') {
           releaseClaim(claimsDir(), key, fs, log);
