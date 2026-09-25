@@ -7,6 +7,97 @@ this is the only in-editor account of what changed.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-25
+
+**Limit Break** is a new name for what shipped as **Claude Limit Buster**
+through 0.1.2: package id `claude-limit-break`, extension id
+`dream-mosaic.claude-limit-break`, and every setting and command moved from
+`claudeLimitBuster.*` to `claudeLimitBreak.*`.
+
+Limit Break is a new extension id. Uninstall Claude Limit Buster 0.1.x first;
+its settings do not carry over.
+
+### Added
+
+- Coordinates with Claude Code's own session state and with other Claude
+  sessions instead of always spawning a second `claude --resume` against the
+  same session. An idle Claude Code panel still resumes unattended - the main
+  use case - and the existing stale-tab handling runs after it exactly as
+  before. A panel or terminal that is already busy or waiting is left alone. An
+  idle terminal defers to Claude Code's own "Continue automatically at usage
+  limit" setting when it is on, and only offers "Resume in Terminal Anyway"
+  when it is off. A different session busy or waiting in the *same folder*
+  still gets resumed, with a sentence added to its opening prompt asking it to
+  message the busy session via SendMessage before editing anything, rather
+  than being blocked.
+- A machine-wide, filesystem-based claim so that two VS Code windows watching
+  the same account do not both launch a resume for the same reset - the
+  scenario that motivated this release: two windows detected an identical
+  limit within milliseconds of each other and each fired its own terminal.
+- A distinct "gave up" status for a resume this window has stopped retrying on
+  its own: a launch that stalled (its transcript never grew), no `claude`
+  executable found, the session's folder no longer exists, or a token-budget
+  refusal that was dismissed rather than overridden. Each shows in the status
+  bar with its own icon and a reason, and a "Dismiss gave-up notices" menu item
+  clears them without discarding any resume still waiting.
+- `claudeLimitBreak.watchScope`: watch every Claude session on the machine (the
+  previous, and still default, behaviour) or only sessions inside this
+  window's workspace.
+- `claudeLimitBreak.checkForUpdates`, off by default: checks GitHub once a day
+  for a newer release and says so, since a `.vsix` install never shows up as
+  outdated on its own. A one-time prompt on first activation offers to turn it
+  on.
+- A trust hotlink. When a folder is not trusted by the Claude CLI, the
+  scheduling notification and the status-bar tooltip both offer "Open Claude to
+  Trust", which opens a plain `claude` terminal in that folder so you answer
+  the CLI's own trust prompt yourself - the extension never answers it and
+  never writes to `~/.claude.json`.
+- The status-bar tooltip now lists every waiting, ready, and gave-up session as
+  its own line, instead of describing only the soonest one.
+- Detects two more cases as an overload rather than a usage limit - a retry
+  Claude Code is already handling in-flight, and a stream interrupted because
+  the machine went to sleep - and a transient 429 that explicitly disclaims
+  being a usage limit. Reads the transcript's own `quotaLimits.resetsAt` field
+  ahead of parsing the banner text when a rate-limit entry carries one, which
+  gets calendar dates, time zones and same-day rollovers right without
+  depending on the wording of a message this extension does not control.
+- A new icon and brand assets, including the banner above.
+
+### Changed
+
+- `claudeLimitBreak.maxResumeTokens` default raised from 150,000 to 500,000,
+  and the estimate now reads the transcript's newest `usage` record - the live
+  context a cold resume actually has to rebuild - falling back to a byte count
+  only when there is none.
+- `claudeLimitBreak.resumePrompt` default is now "[Limit Break] I hit my usage
+  limit while you were working, but it has reset now. Please continue from
+  where you left off."
+- Dropped support for VS Code below 1.138; CI and development now target
+  Node 24.
+- Repository hardening: SHA-pinned GitHub Actions, branch and tag protection
+  rulesets, a SECURITY.md, Dependabot.
+
+### Fixed
+
+- `headless` resume mode is now actually routed to a headless launch. It was
+  declared in settings but silently fell through to the interactive path.
+- A reset time given with no explicit time zone now resolves both the
+  spring-forward and fall-back daylight-saving hours to the correct side,
+  instead of landing up to an hour off.
+- Untrusted transcript text (a `grep` quoting a banner, a subagent checkpoint
+  note, a percentage-usage warning) no longer arms a timer by accident;
+  subagent transcripts and quoted or tool-result text are excluded from that
+  path the same way a genuinely flagged entry is not.
+- A single click on the status bar no longer cancels the pending resume
+  outright; it opens a menu (Resume Now / Cancel Pending Resume / Show Log /
+  Dismiss gave-up notices when something has given up).
+- `CLAUDE_CONFIG_DIR` is honoured everywhere `~/.claude` would otherwise be
+  read (trust status, and now Claude Code's own auto-continue setting).
+- Project paths are case-folded only on filesystems that are actually
+  case-insensitive, instead of always.
+- A resume whose recorded working directory turns out to be a file, not a
+  folder, is refused with a named reason instead of failing unpredictably.
+
 ## [0.1.2] - 2026-09-23
 
 ### Added
