@@ -191,6 +191,20 @@ test('waitingCount counts a session once even if it were somehow in both lists',
   assert.equal(waitingCount, 1);
 });
 
+test('a session in both jobs and ready keeps its counting-down line, not "ready" (Task 4b fix round 1, finding 1)', () => {
+  // One session can genuinely hold a counting-down job and an unrelated
+  // stale ready job at once. `ready` must defer to `jobs` for that session,
+  // not silently overwrite the soon-to-happen countdown with "ready".
+  const at = Date.now() + 45_000;
+  const counting = job({ resumeAtMs: at });
+  const staleReady = job({ resumeAtMs: Date.now() - 99_000 });
+  const { lines, waitingCount } = buildSessionLines([counting], [staleReady], []);
+  assert.equal(lines.length, 1, 'one line per session, even here');
+  assert.match(lines[0]!, /resum/i, lines[0]);
+  assert.ok(!/ready/i.test(lines[0]!), `must not read as ready: ${lines[0]}`);
+  assert.equal(waitingCount, 1);
+});
+
 // ---------------------------------------------------------------------------
 // CountdownStatusBar.update - end to end through the fake vscode item.
 // ---------------------------------------------------------------------------

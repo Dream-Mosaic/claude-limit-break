@@ -1310,6 +1310,45 @@ test('cancelling clears the waiting jobs from storage too', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Task 5b: readyJobs reaching the tooltip. rememberReady/forgetReady must
+// re-render on every change, not rely on some other event to happen to
+// follow them - otherwise the tooltip is stale until the next unrelated
+// render.
+// ---------------------------------------------------------------------------
+
+test('a session becoming ready is reflected in the tooltip immediately, without any other event', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const tooltip = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip, /ready/i, `the ready session must already be in the tooltip: ${tooltip}`);
+    assert.ok(tooltip.includes(SESSION.slice(0, 8)), tooltip);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a session resumed by hand from the ready list drops off the tooltip immediately', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const tooltipBefore = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.ok(tooltipBefore.includes(SESSION.slice(0, 8)), 'setup: the ready session is listed');
+    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    const tooltipAfter = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.ok(!tooltipAfter.includes(SESSION.slice(0, 8)), `must drop off once resumed: ${tooltipAfter}`);
+  } finally {
+    teardown(ctx);
+  }
+});
+
 test('the status bar menu offers the three commands and runs the one picked', async () => {
   // Issue #3: the click used to be a bare destructive action.
   resetVscodeFake();
