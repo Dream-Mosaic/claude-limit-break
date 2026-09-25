@@ -160,3 +160,6 @@ Task 5b: complete (commits dfa5461..836371a, 1 fix round; 4 minors deferred)
 - Task 8: implementer DONE (32a1515); 609/609 unit, 9/9 integration, check-vsix clean; grep gate 227 → 18 hits (README x9 → 9b, CHANGELOG history x7, a dated test comment x2). Review dispatched (sonnet).
 - Task 8 review: spec ✅, quality Approved, no findings (id cross-check registered ⇄ contributed ⇄ referenced; 209/209 line swap; prompt untouched).
 Task 8: complete (commits 5392b80..32a1515, review clean)
+- Ruling (9b dispatch): Task 9b does docs only; the 1.0.0 bump and release/1.0.0 are cut AFTER the final whole-branch review, from the reviewed head — so the final review's fixes land in the release — cost if wrong: none.
+- Task 9b: dispatched (sonnet) at base 4f87eb9
+- Task 9b: implementer DONE (daebbe6 90d13f0 b23eeaa 432b086); 610/610 unit (+ test/readmeSettings.test.ts, drift-checked by 3 mutations), 9/9 integration, check-vsix green. Review dispatched (sonnet: truth-to-code checks).
