@@ -72,12 +72,12 @@ test('every setting the code reads is declared in the manifest, and every declar
     assert.ok(key, 'regex capture group must have matched something');
     read.add(key);
     assert.ok(
-      declared.has(`claudeLimitBuster.${key}`),
+      declared.has(`claudeLimitBreak.${key}`),
       `config.ts reads '${key}' but package.json does not declare it`,
     );
   }
   for (const declaredKey of declared) {
-    const shortKey = declaredKey.replace('claudeLimitBuster.', '');
+    const shortKey = declaredKey.replace('claudeLimitBreak.', '');
     assert.ok(
       read.has(shortKey),
       `package.json declares '${declaredKey}' but config.ts never reads it`,
@@ -124,7 +124,7 @@ test('execution-adjacent settings are machine-scoped', () => {
     'resumePrompt',
   ]) {
     assert.equal(
-      props[`claudeLimitBuster.${key}`].scope,
+      props[`claudeLimitBreak.${key}`].scope,
       'machine',
       `${key} influences what gets executed and must not be workspace-settable`,
     );

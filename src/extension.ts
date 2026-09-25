@@ -50,18 +50,18 @@ import { execFileSync } from 'node:child_process';
 import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
-const NS = 'claudeLimitBuster';
+const NS = 'claudeLimitBreak';
 
 /** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
 const TRUST_BUTTON = 'Open Claude to Trust';
 
 /**
  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
- * the scheduler's own `claudeLimitBuster.pending`: these have already fired,
+ * the scheduler's own `claudeLimitBreak.pending`: these have already fired,
  * and putting them back there would leave the scheduler counting down to a
  * deadline that has passed.
  */
-const READY_KEY = 'claudeLimitBuster.ready';
+const READY_KEY = 'claudeLimitBreak.ready';
 
 /**
  * How much of a transcript's end to read when looking for its newest usage
@@ -95,8 +95,8 @@ export function isInsideWorkspace(cwd: string | undefined, folders: readonly str
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const channel = vscode.window.createOutputChannel('Claude Limit Buster');
-  const log = createLogger('limit-buster', (line) => channel.appendLine(line));
+  const channel = vscode.window.createOutputChannel('Limit Break');
+  const log = createLogger('limit-break', (line) => channel.appendLine(line));
   const settings = () => readSettings(vscode.workspace.getConfiguration(NS));
 
   // Task 10: sweep claim files this window's own crashes or a stale race left
@@ -258,7 +258,7 @@ export function activate(context: vscode.ExtensionContext): void {
         folderTrusted === false
           ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
           : '';
-      const message = `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
+      const message = `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
       if (folderTrusted === false) {
         // A one-click way to answer the trust dialog ahead of the resume,
         // right when the user is at the keyboard to see this notice (Task
@@ -780,7 +780,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const fresh = await resolveReopenTarget();
     if (!fresh) {
       void vscode.window.showInformationMessage(
-        `Claude Limit Buster: could not reopen session ${resolved.sessionId.slice(0, 8)}'s tab now; close and reopen it by hand.`,
+        `Limit Break: could not reopen session ${resolved.sessionId.slice(0, 8)}'s tab now; close and reopen it by hand.`,
       );
       return;
     }
@@ -800,7 +800,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const choice = await Promise.resolve(
       vscode.window.showInformationMessage(
-        'Claude Limit Buster can check GitHub for a newer release once a day. ' +
+        'Limit Break can check GitHub for a newer release once a day. ' +
           'Nothing else will tell you: an extension installed from a .vsix never updates itself.',
         'Enable',
         'Not now',
@@ -848,7 +848,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const choice = await Promise.resolve(
       vscode.window.showInformationMessage(
-        `Claude Limit Buster ${action.latestTag} is available; this is ${current}.`,
+        `Limit Break ${action.latestTag} is available; this is ${current}.`,
         'View release',
         'Dismiss',
       ),
@@ -957,7 +957,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
         void Promise.resolve(
           vscode.window.showInformationMessage(
-            `Claude Limit Buster: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
+            `Limit Break: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
             'Resume Now',
           ),
         ).then(async (choice) => {
@@ -981,7 +981,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // `claude --resume` on it.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
-              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+              `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
             );
             return;
           }
@@ -1042,7 +1042,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // button IS the confirmation.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
-              `Claude Limit Buster: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+              `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
             );
             return;
           }
@@ -1100,7 +1100,7 @@ export function activate(context: vscode.ExtensionContext): void {
           const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
           log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
           void vscode.window.showInformationMessage(
-            `Claude Limit Buster: another Claude session (${names}) is working in this folder. ` +
+            `Limit Break: another Claude session (${names}) is working in this folder. ` +
               `The resumed session has been told to coordinate with it.`,
           );
           resumeJob = { ...job, prompt: buildResumePrompt(job.prompt, peers) };
@@ -1108,7 +1108,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (s.notify) {
         void vscode.window.showInformationMessage(
-          `Claude Limit Buster: resuming session ${job.sessionId.slice(0, 8)}.`,
+          `Limit Break: resuming session ${job.sessionId.slice(0, 8)}.`,
         );
       }
       // The scheduler already cleared this job before firing (its own
@@ -1174,7 +1174,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // instead of needing to be spliced back in.
       const ready = readyJobs[0];
       if (!ready) {
-        void vscode.window.showInformationMessage('Claude Limit Buster: nothing pending.');
+        void vscode.window.showInformationMessage('Limit Break: nothing pending.');
         return;
       }
       if (await confirmManualResume(ready)) {
@@ -1240,7 +1240,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 : 'Nothing to cancel',
           command: `${NS}.cancel`,
         },
-        { label: 'Show Log', description: 'Open the Claude Limit Buster output channel', command: `${NS}.showLog` },
+        { label: 'Show Log', description: 'Open the Limit Break output channel', command: `${NS}.showLog` },
       ];
       // Fix round 1, ruling 2b: a way to clear the gave-up state that does
       // not also discard every other session's waiting jobs, as Cancel does.
@@ -1254,7 +1254,7 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       }
       const picked = await vscode.window.showQuickPick(items, {
-        title: 'Claude Limit Buster',
+        title: 'Limit Break',
         placeHolder: waiting > 0 ? `${waiting} resume(s) waiting` : 'Watching for usage limits',
       });
       if (!picked) {
@@ -1283,7 +1283,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // keybinding has no folder to open, so this logs and stops rather than
       // guessing one.
       if (typeof cwd !== 'string') {
-        log.warn('claudeLimitBuster.openClaudeToTrust was invoked with no folder; ignoring.');
+        log.warn('claudeLimitBreak.openClaudeToTrust was invoked with no folder; ignoring.');
         return;
       }
       const s = settings();
@@ -1292,7 +1292,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Same failure, and the same handling, as the resume launch below.
         log.error(`Cannot open a trust terminal for ${cwd}: no claude executable found.`);
         void vscode.window.showErrorMessage(
-          'Claude Limit Buster: could not find the claude executable. Set claudeLimitBuster.claudeCommand.',
+          'Limit Break: could not find the claude executable. Set claudeLimitBreak.claudeCommand.',
         );
         return;
       }
@@ -1338,7 +1338,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // across a reload.
   render();
   void watcher.start();
-  log.info('Claude Limit Buster active.');
+  log.info('Limit Break active.');
 }
 
 export function deactivate(): void {

@@ -137,7 +137,7 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: 
       `not starting a second writer.`,
     notice: {
       message:
-        `Claude Limit Buster: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
+        `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
         `Continue it there.`,
       button: RESUME_IN_TERMINAL_BUTTON,
     },
@@ -174,7 +174,7 @@ export function manualResumeWarning(
   const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
   return {
     message:
-      `Claude Limit Buster: session ${shortId} is already open in ${where}. ` +
+      `Limit Break: session ${shortId} is already open in ${where}. ` +
       `Resuming here will fork the conversation.`,
     button: 'Resume Anyway',
   };

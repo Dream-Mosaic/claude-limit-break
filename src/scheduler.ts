@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { Logger } from './log';
 
-const STATE_KEY = 'claudeLimitBuster.pending';
+const STATE_KEY = 'claudeLimitBreak.pending';
 const TICK_MS = 1000;
 
 export interface PendingJob {

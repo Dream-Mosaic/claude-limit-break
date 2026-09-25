@@ -351,7 +351,7 @@ const pastJob = (cwd: string = REAL_CWD) => {
 test('with autoResume off, a fired job stays recoverable instead of vanishing', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
   const ctx = contextOver(store);
   start(ctx);
   try {
@@ -359,13 +359,13 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
     // clearing its own state before firing. That ordering is deliberate, so
     // the job only survives if extension.ts holds on to it.
     await oneTick();
-    assert.equal(store.get('claudeLimitBuster.pending'), undefined, 'the scheduler must have consumed it');
+    assert.equal(store.get('claudeLimitBreak.pending'), undefined, 'the scheduler must have consumed it');
     assert.equal(vscodeFake.terminals.length, 0, 'autoResume is off; nothing may launch on its own');
 
     const offer = offers()[0];
     assert.ok(offer, `no Resume Now offer was made; saw ${JSON.stringify(vscodeFake.info)}`);
 
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
 
@@ -427,7 +427,7 @@ test('a notification resumes the session it names, not whichever came ready last
     );
 
     // The second is untouched, and still reachable from the command.
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 2, 'the second session must still be recoverable');
@@ -454,7 +454,7 @@ test('resumeNow takes the counting-down job first and keeps the ready one', asyn
     // A second job still counting down.
     watcher.limitFor(SESSION_B, new Date(Date.now() + 600_000));
 
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
     await resumeNow();
@@ -542,7 +542,7 @@ test('a stale offer cannot resume a session the command already resumed', async 
     assert.ok(offer, 'the session must have offered a manual resume');
 
     // Resume it from the command palette, leaving the notification on screen.
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1, 'the command resumes it once');
@@ -605,7 +605,7 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
 
     // The job must have been kept, not dropped: it is reachable from Resume
     // Now instead of vanishing with the scheduler's own pre-fire cleanup.
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
     assert.equal(
@@ -685,7 +685,7 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
     // Answering the offer claims the job by removing it from readyJobs before
     // resume() runs; since the launch never started, that claim must be
     // undone rather than left to quietly lose the job.
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
     assert.equal(
@@ -716,7 +716,7 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     // resume() would even start.
     watcher.limitFor(SESSION, new Date(Date.now() + 600_000), MISSING_CWD);
 
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
     await resumeNow();
@@ -934,7 +934,7 @@ test('resumeNow on one counting-down session leaves the other one counting down'
     watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
     watcher.limitFor(SESSION_B, new Date(Date.now() + 300_000));
 
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
     await resumeNow();
@@ -965,7 +965,7 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
     await oneTick();
     assert.ok(offers()[0], 'the job must be waiting to be started by hand');
 
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
 
     await resumeNow();
@@ -1220,12 +1220,12 @@ test('logs the webview tabs it saw when none of them is a Claude panel', async (
 // given alongside.
 // ---------------------------------------------------------------------------
 
-const READY_KEY = 'claudeLimitBuster.ready';
+const READY_KEY = 'claudeLimitBreak.ready';
 
 test('a job waiting for Resume Now survives a reload', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
   const first = contextOver(store);
   start(first);
   await oneTick();
@@ -1238,7 +1238,7 @@ test('a job waiting for Resume Now survives a reload', async () => {
   const second = contextOver(store);
   start(second);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow');
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow);
     await resumeNow();
     await flush();
@@ -1256,7 +1256,7 @@ test('a job waiting for Resume Now survives a reload', async () => {
 test('a restored job carries the session it was scheduled for', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
   const first = contextOver(store);
   start(first);
   await oneTick();
@@ -1265,7 +1265,7 @@ test('a restored job carries the session it was scheduled for', async () => {
   const second = contextOver(store);
   start(second);
   try {
-    vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     await flush();
     assert.ok(
       argsOf(0)?.includes(SESSION),
@@ -1279,12 +1279,12 @@ test('a restored job carries the session it was scheduled for', async () => {
 test('a job resumed by hand is not left behind for the next window', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
   const ctx = contextOver(store);
   start(ctx);
   try {
     await oneTick();
-    vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     await flush();
     assert.equal(vscodeFake.terminals.length, 1, 'setup: it must have resumed');
     assert.equal(store.get(READY_KEY), undefined, 'a claimed job must not be persisted');
@@ -1296,13 +1296,13 @@ test('a job resumed by hand is not left behind for the next window', async () =>
 test('cancelling clears the waiting jobs from storage too', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', pastJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
   const ctx = contextOver(store);
   start(ctx);
   try {
     await oneTick();
     assert.ok(store.get(READY_KEY), 'setup: the waiting job must have been persisted');
-    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    vscodeFake.commands.get('claudeLimitBreak.cancel')!();
     await flush();
     assert.equal(store.get(READY_KEY), undefined, 'cancel must not leave it to come back on reload');
   } finally {
@@ -1320,7 +1320,7 @@ test('cancelling clears the waiting jobs from storage too', async () => {
 test('a session becoming ready is reflected in the tooltip immediately, without any other event', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -1335,13 +1335,13 @@ test('a session becoming ready is reflected in the tooltip immediately, without 
 test('a session resumed by hand from the ready list drops off the tooltip immediately', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
     const tooltipBefore = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
     assert.ok(tooltipBefore.includes(SESSION.slice(0, 8)), 'setup: the ready session is listed');
-    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     const tooltipAfter = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
     assert.ok(!tooltipAfter.includes(SESSION.slice(0, 8)), `must drop off once resumed: ${tooltipAfter}`);
   } finally {
@@ -1356,7 +1356,7 @@ test('the status bar menu offers the three commands and runs the one picked', as
   const ctx = contextOver(new Map());
   start(ctx);
   try {
-    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu');
+    const menu = vscodeFake.commands.get('claudeLimitBreak.statusBarMenu');
     assert.ok(menu, 'the menu command must be registered');
     vscodeFake.quickPickAnswer = 'Show Log';
     await menu();
@@ -1375,17 +1375,17 @@ test('the status bar menu offers the three commands and runs the one picked', as
 test('the menu can cancel, and only when that is what was picked', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const store = new Map<string, unknown>([['claudeLimitBuster.pending', futureJob()]]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', futureJob()]]);
   const ctx = contextOver(store);
   start(ctx);
   try {
-    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!;
+    const menu = vscodeFake.commands.get('claudeLimitBreak.statusBarMenu')!;
     vscodeFake.quickPickAnswer = undefined; // dismissed with Escape
     await menu();
-    assert.ok(store.get('claudeLimitBuster.pending'), 'dismissing must not cancel anything');
+    assert.ok(store.get('claudeLimitBreak.pending'), 'dismissing must not cancel anything');
     vscodeFake.quickPickAnswer = 'Cancel Pending Resume';
     await menu();
-    assert.equal(store.get('claudeLimitBuster.pending'), undefined, 'picking cancel must cancel');
+    assert.equal(store.get('claudeLimitBreak.pending'), undefined, 'picking cancel must cancel');
   } finally {
     teardown(ctx);
   }
@@ -1417,11 +1417,11 @@ test('the trust warning clears once the folder is trusted mid-countdown', async 
 });
 
 // ---------------------------------------------------------------------------
-// Task 5a: Trust hotlink - claudeLimitBuster.openClaudeToTrust
+// Task 5a: Trust hotlink - claudeLimitBreak.openClaudeToTrust
 // ---------------------------------------------------------------------------
 
 const TRUST_BUTTON = 'Open Claude to Trust';
-const trustCommand = () => vscodeFake.commands.get('claudeLimitBuster.openClaudeToTrust');
+const trustCommand = () => vscodeFake.commands.get('claudeLimitBreak.openClaudeToTrust');
 const trustTerminalOptions = (index = 0) =>
   vscodeFake.terminals[index]?.options as
     | { shellPath: string; shellArgs: string[]; cwd?: string; name: string }
@@ -1440,7 +1440,7 @@ test('the command opens exactly one plain-claude terminal at the given cwd', asy
     assert.equal(opts.shellPath, LAUNCHER);
     assert.deepEqual(opts.shellArgs, [], 'plain claude: no --resume, no prompt argument');
     assert.equal(opts.cwd, REAL_CWD);
-    assert.match(opts.name, /Limit Buster/);
+    assert.match(opts.name, /Limit Break/);
   } finally {
     teardown(ctx);
   }
@@ -1634,7 +1634,7 @@ test('closing the trust terminal re-reads trust for every pending job, not just 
     await flush();
 
     const pendingJobs = () =>
-      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+      (store.get('claudeLimitBreak.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
     const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
     assert.equal(jobB()?.folderTrusted, false, 'setup: the second job must start out untrusted too');
 
@@ -1733,7 +1733,7 @@ test('a non-soonest counting job trusted externally clears on the next scheduler
     await flush();
 
     const pendingJobs = () =>
-      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+      (store.get('claudeLimitBreak.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
     const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
     assert.equal(jobB()?.folderTrusted, false, 'setup: the non-soonest job starts out untrusted');
 
@@ -1795,7 +1795,7 @@ test('resumeMode headless actually launches headless', async () => {
     randomDelayMinMinutes: 0,
     randomDelayMaxMinutes: 0,
   };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -1818,7 +1818,7 @@ test('resumeMode headless actually launches headless', async () => {
 test('the default resume stays interactive', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2069,7 +2069,7 @@ test('with checking enabled, a newer release is reported once', async () => {
   resetVscodeFake();
   vscodeFake.config = { checkForUpdates: true };
   latestReleaseTag = 'v9.9.9';
-  const store = new Map<string, unknown>([['claudeLimitBuster.updateCheck.firstRunPromptAnswer', 'enable']]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.updateCheck.firstRunPromptAnswer', 'enable']]);
   const ctx = contextOver(store);
   start(ctx);
   try {
@@ -2079,7 +2079,7 @@ test('with checking enabled, a newer release is reported once', async () => {
     assert.ok(news, `expected a release notice; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
     news.answer('Dismiss');
     await flush();
-    assert.equal(store.get('claudeLimitBuster.updateCheck.dismissedVersion'), 'v9.9.9');
+    assert.equal(store.get('claudeLimitBreak.updateCheck.dismissedVersion'), 'v9.9.9');
   } finally {
     latestReleaseTag = undefined;
     teardown(ctx);
@@ -2090,7 +2090,7 @@ test('nothing is fetched while the setting is off', async () => {
   resetVscodeFake();
   vscodeFake.config = {};
   fetchCalls.length = 0;
-  const store = new Map<string, unknown>([['claudeLimitBuster.updateCheck.firstRunPromptAnswer', 'never']]);
+  const store = new Map<string, unknown>([['claudeLimitBreak.updateCheck.firstRunPromptAnswer', 'never']]);
   const ctx = contextOver(store);
   start(ctx);
   try {
@@ -2112,7 +2112,7 @@ test('the resume launches from the spelling of the folder the CLI has trusted', 
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const recorded = REAL_CWD + path.sep; // a distinct string naming the same directory
   trustedSpellingFor.set(recorded, REAL_CWD);
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(recorded)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(recorded)]]));
   start(ctx);
   try {
     await oneTick();
@@ -2127,7 +2127,7 @@ test('the resume launches from the spelling of the folder the CLI has trusted', 
 test('with no trusted spelling on record, the recorded cwd is used as it was', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2162,7 +2162,7 @@ test('scheduler.onFire resumes as normal when the only other process is an IDLE 
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2182,7 +2182,7 @@ test('scheduler.onFire silently drops the job when the only other process is a B
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2195,7 +2195,7 @@ test('scheduler.onFire silently drops the job when the only other process is a B
       0,
       'a busy holder drops silently - no notification naming this job',
     );
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.ok(
       vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
@@ -2211,7 +2211,7 @@ test('scheduler.onFire silently drops the job when the only other process is a W
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('cli', 'waiting');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2232,7 +2232,7 @@ test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-conti
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
   holderRow('cli', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2254,7 +2254,7 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDL
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2281,7 +2281,7 @@ test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFF
   fakeAgentRows = [
     { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
   ];
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2303,7 +2303,7 @@ test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFF
 test('scheduler.onFire does not touch the prompt when the folder is quiet', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2330,7 +2330,7 @@ test('scheduler.onFire also adds the coordination sentence when resuming an IDLE
     { pid: 999, kind: 'interactive', sessionId: SESSION_B, cwd: REAL_CWD, status: 'busy', name: 'other-session' },
   ];
   sessionRecordFor.set(111, { sessionId: SESSION, entrypoint: 'claude-vscode' });
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2352,10 +2352,10 @@ test('resumeNow shows a modal fork warning for a busy holder; declining leaves i
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', futureJob()]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     const pending = resumeNow();
     await flush();
     const modal = vscodeFake.warningOffers.find((w) => w.modal);
@@ -2376,10 +2376,10 @@ test('resumeNow proceeds after Resume Anyway is clicked on the modal', async () 
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', futureJob()]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     const pending = resumeNow();
     await flush();
     const modal = vscodeFake.warningOffers.find((w) => w.modal);
@@ -2397,10 +2397,10 @@ test('resumeNow shows no modal for an idle panel - it is not a live conflict', a
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', futureJob()]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     await flush();
     assert.equal(vscodeFake.warningOffers.length, 0, 'an idle panel needs no modal');
@@ -2415,14 +2415,14 @@ test('resumeNow also warns modally for a busy holder on a job waiting in the rea
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     // autoResume off: firing moves the job into the ready list, not
     // scheduler.current, so this exercises resumeNow's OTHER branch.
     await oneTick();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: not auto-resumed');
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     const pending = resumeNow();
     await flush();
     const modal = vscodeFake.warningOffers.find((w) => w.modal);
@@ -2440,7 +2440,7 @@ test('the off-autoResume "Resume Now" notification button also warns modally for
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2478,7 +2478,7 @@ test('scheduler.onFire drops a job whose claim is already taken by another windo
   fakeClaimResult = 'taken';
   claimCalls.length = 0;
   const job = pastJob();
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', job]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
   start(ctx);
   try {
     await oneTick();
@@ -2497,7 +2497,7 @@ test('scheduler.onFire drops a job whose claim is already taken by another windo
       claimCalls.some((c) => c.key === `${SESSION}-${job.baseResumeAtMs}`),
       `the claim must have been attempted with the reset-scoped key; saw ${JSON.stringify(claimCalls)}`,
     );
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.ok(
       vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
@@ -2516,7 +2516,7 @@ test('a fired job whose claim was just taken is not remembered even with autoRes
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
   fakeClaimResult = 'taken';
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2560,7 +2560,7 @@ test('the Task 2 holder decision declining a resume releases the claim too', asy
   fakeClaimResult = 'claimed';
   releasedKeys.length = 0;
   holderRow('claude-vscode', 'busy');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2580,10 +2580,10 @@ test('resumeNow bypasses an existing claim (the user\'s explicit intent) but sti
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'taken';
   claimCalls.length = 0;
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', futureJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', futureJob()]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(
       vscodeFake.terminals.length,
@@ -2617,7 +2617,7 @@ test('resumeNow on an already-fired, remembered job also bypasses but rewrites i
     // the fire - resumeNow must still proceed.
     fakeClaimResult = 'taken';
     claimCalls.length = 0;
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1, 'the ready-list manual resume must also bypass a taken claim');
     assert.ok(claimCalls.length > 0, 'it must still attempt to refresh the claim');
@@ -2637,10 +2637,10 @@ test('a failed manual launch on the counting-down job releases the claim it just
   // firing through onFire. Its cwd is pointed at a folder that does not
   // exist, so resume() itself fails, deterministically.
   const missingCwdJob = { ...futureJob(), cwd: MISSING_CWD };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', missingCwdJob]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', missingCwdJob]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
     assert.ok(
@@ -2666,7 +2666,7 @@ test('a failed manual launch on a ready (already-fired) job releases the claim i
     await oneTick();
     assert.ok(offers()[0], 'setup: the job must have fired and been offered for manual resume');
     releasedKeys.length = 0;
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
     assert.ok(
@@ -2685,7 +2685,7 @@ test('the off-autoResume "Resume Now" notification button writes/refreshes its o
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
   fakeClaimResult = 'claimed';
   claimCalls.length = 0;
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
@@ -2720,7 +2720,7 @@ test('"Resume in Terminal Anyway" writes a fresh claim before resuming, exactly 
   claimCalls.length = 0;
   autoContinueOn = false;
   holderRow('cli', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
@@ -2747,7 +2747,7 @@ test('"Resume in Terminal Anyway" releases its own claim if the launch fails', a
   fakeClaimResult = 'claimed';
   autoContinueOn = false;
   holderRow('cli', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
@@ -2817,7 +2817,7 @@ test('scheduler.onFire on an overload job collides across two windows sharing on
     keyB,
     'setup check: both windows must compute the identical key despite their different jitter',
   );
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', jobA]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', jobA]]));
   start(ctx);
   try {
     await oneTick();
@@ -2860,7 +2860,7 @@ test('"Resume in Terminal Anyway" does not release a claim it does not own (its 
   // for another window having taken this reset in the meantime.
   claimResultQueue.length = 0;
   claimResultQueue.push('claimed', 'taken');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
@@ -2891,10 +2891,10 @@ test('resumeNow (counting-down branch) does not release a claim it does not own 
   fakeClaimResult = 'taken';
   releasedKeys.length = 0;
   const missingCwdJob = { ...futureJob(), cwd: MISSING_CWD };
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', missingCwdJob]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', missingCwdJob]]));
   start(ctx);
   try {
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
     assert.equal(
@@ -2924,7 +2924,7 @@ test('resumeNow (ready-list branch) does not release a claim it does not own (it
     await oneTick();
     assert.ok(offers()[0], 'setup: the job must have fired and been offered for manual resume');
     releasedKeys.length = 0;
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the manual launch must have failed on the missing cwd');
     assert.equal(
@@ -2960,7 +2960,7 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
   // window having taken this reset in the meantime.
   claimResultQueue.length = 0;
   claimResultQueue.push('claimed', 'taken');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
@@ -3043,14 +3043,14 @@ test('gave up: a missing claude executable is recorded, named distinctly, and lo
   try {
     FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000));
     await oneTick();
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 0);
     assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
     assert.match(barTooltip(), /claude executable/);
     assert.equal(vscodeFake.errors.length, 1);
     assert.ok(vscodeFake.errors[0]!.includes(SESSION.slice(0, 8)), vscodeFake.errors[0]);
-    assert.match(vscodeFake.errors[0]!, /claudeLimitBuster\.claudeCommand/);
+    assert.match(vscodeFake.errors[0]!, /claudeLimitBreak\.claudeCommand/);
 
     await resumeNow();
     assert.equal(vscodeFake.errors.length, 2, 'a manual retry is always answered');
@@ -3124,7 +3124,7 @@ test('gave up: a dismissed budget refusal is recorded, without a second notifica
     const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
     assert.ok(offer, 'setup: the refusal must have been offered');
     assert.ok(offer.message.includes(SESSION.slice(0, 8)), `the refusal must name the session: ${offer.message}`);
-    assert.match(offer.message, /claudeLimitBuster\.maxResumeTokens/, 'and the lasting fix');
+    assert.match(offer.message, /claudeLimitBreak\.maxResumeTokens/, 'and the lasting fix');
     assert.ok(!showsGaveUp(), 'an open refusal is a question, not a failure yet');
 
     offer.answer(undefined);
@@ -3176,7 +3176,7 @@ test('gave up: a new detection for the session clears its record and its warn-on
     assert.doesNotMatch(barTooltip(), /Gave up/);
 
     // And the same failure is news again.
-    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    vscodeFake.commands.get('claudeLimitBreak.cancel')!();
     watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
     await oneTick();
     assert.equal(vscodeFake.errors.length, 2, 'the failure after a new detection must notify again');
@@ -3214,7 +3214,7 @@ test('gave up: a resume that launches clears the record', async () => {
   try {
     FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), dir);
     await oneTick();
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     await resumeNow();
     assert.ok(showsGaveUp(), 'setup: gave up on the missing folder');
 
@@ -3242,7 +3242,7 @@ test('gave up: the cancel command clears it, even with nothing pending', async (
     await flush();
     assert.ok(showsGaveUp(), 'setup: gave up on the budget');
 
-    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    vscodeFake.commands.get('claudeLimitBreak.cancel')!();
     assert.ok(!showsGaveUp(), `Cancel must clear it; got ${JSON.stringify(bar()?.text)}`);
     assert.doesNotMatch(barTooltip(), /Gave up/);
   } finally {
@@ -3264,7 +3264,7 @@ test('gave up: the menu offers Cancel as the way to clear it, and picking it doe
     await flush();
 
     vscodeFake.quickPickAnswer = 'Cancel Pending Resume';
-    await vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!();
+    await vscodeFake.commands.get('claudeLimitBreak.statusBarMenu')!();
     const cancel = vscodeFake.quickPicks[0]!.items.find((i) => i.label === 'Cancel Pending Resume') as
       | { description?: string }
       | undefined;
@@ -3352,7 +3352,7 @@ test('gave up: an AUTOMATIC repeat of a failure already notified stays silent, b
   start(ctx);
   try {
     FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 1500), MISSING_CWD);
-    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     assert.equal(vscodeFake.errors.length, 1, 'setup: the manual attempt was answered');
     assert.equal(cwdFailureLogs(SESSION), 1);
 
@@ -3371,14 +3371,14 @@ test('gave up: an AUTOMATIC repeat of a failure already notified stays silent, b
 test('gave up: the Resume Now notification button is answered even when the same failure was already notified', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
     const offer = offers()[0];
     assert.ok(offer, 'setup: the off-autoResume offer must have been shown');
     // First failure from the palette, so the button's click is the repeat.
-    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     assert.equal(vscodeFake.errors.length, 1, 'setup: the palette attempt was answered');
     offer.answer('Resume Now');
     await flush();
@@ -3394,7 +3394,7 @@ test('gave up: "Resume in Terminal Anyway" is answered even when the same failur
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob(MISSING_CWD)]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
   start(ctx);
   try {
     await oneTick();
@@ -3403,7 +3403,7 @@ test('gave up: "Resume in Terminal Anyway" is answered even when the same failur
     // First failure from the palette (holder gone, so no modal), so the
     // button's click is the repeat.
     clearHolders();
-    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     assert.equal(vscodeFake.errors.length, 1, 'setup: the palette attempt was answered');
     offer.answer('Resume in Terminal Anyway');
     await flush();
@@ -3427,14 +3427,14 @@ test('gave up: two manual launches of the same session that both stall are both 
   // stalls too. That click must still get its notice (ruling on concern 1).
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
   try {
     await oneTick();
     assert.ok(offers()[0], 'setup: the fired job is waiting to be started by hand');
     FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
     await flush();
-    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
     const stalls = () => vscodeFake.warnings.filter((m) => /stalled/.test(m)).length;
 
     await resumeNow();
@@ -3525,7 +3525,7 @@ test('gave up: the menu offers "Dismiss gave-up notices" only when something gav
   start(ctx);
   let transcript = '';
   try {
-    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!;
+    const menu = vscodeFake.commands.get('claudeLimitBreak.statusBarMenu')!;
     await menu();
     assert.ok(!vscodeFake.quickPicks[0]!.items.some((i) => i.label === 'Dismiss gave-up notices'), 'nothing to dismiss');
     transcript = await gaveUpOnBudget();
@@ -3542,7 +3542,7 @@ test('gave up: "Dismiss gave-up notices" clears the records and leaves every wai
   vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
   const readyJob = { ...pastJob(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl` };
   const store = new Map<string, unknown>([
-    ['claudeLimitBuster.pending', futureJob()],
+    ['claudeLimitBreak.pending', futureJob()],
     [READY_KEY, [readyJob]],
   ]);
   const ctx = contextOver(store);
@@ -3552,9 +3552,9 @@ test('gave up: "Dismiss gave-up notices" clears the records and leaves every wai
     transcript = await gaveUpOnBudget(SESSION_B);
     assert.match(barTooltip(), /Gave up/, 'setup: gave up');
     vscodeFake.quickPickAnswer = 'Dismiss gave-up notices';
-    await vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!();
+    await vscodeFake.commands.get('claudeLimitBreak.statusBarMenu')!();
     assert.doesNotMatch(barTooltip(), /Gave up/, 'the records must be gone, and the bar re-rendered');
-    assert.ok(store.get('claudeLimitBuster.pending'), 'the counting-down job must be kept');
+    assert.ok(store.get('claudeLimitBreak.pending'), 'the counting-down job must be kept');
     assert.deepEqual(
       (store.get(READY_KEY) as { sessionId: string }[] | undefined)?.map((j) => j.sessionId),
       [SESSION_B],

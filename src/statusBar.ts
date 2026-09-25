@@ -7,7 +7,7 @@ import { GAVE_UP_ICON, REASON, type GaveUpCause, type GaveUpRecord } from './gav
 export type StatusBarMode = 'always' | 'pending' | 'never';
 
 /** The Task 5a command the trust hotlink points at. */
-const TRUST_COMMAND = 'claudeLimitBuster.openClaudeToTrust';
+const TRUST_COMMAND = 'claudeLimitBreak.openClaudeToTrust';
 
 /**
  * Escape Markdown special characters in text this extension does not
@@ -203,8 +203,8 @@ export class CountdownStatusBar {
     // A menu, not the cancel command. A single click used to destroy the
     // pending resume with no confirmation and no undo, while the only warning
     // sat at the bottom of a six-line tooltip (#3).
-    this.item.command = 'claudeLimitBuster.statusBarMenu';
-    this.item.name = 'Claude Limit Buster';
+    this.item.command = 'claudeLimitBreak.statusBarMenu';
+    this.item.name = 'Limit Break';
   }
 
   /**
@@ -235,7 +235,7 @@ export class CountdownStatusBar {
         }
         this.item.text = '$(eye)';
         const idle = new vscode.MarkdownString(undefined, true);
-        idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
+        idle.appendMarkdown(`**Limit Break**\n\n`);
         idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
         idle.appendMarkdown(`_Click for actions._`);
         this.item.tooltip = idle;
@@ -281,7 +281,7 @@ export class CountdownStatusBar {
    */
   private renderTooltip(lines: readonly string[], hasTrustLink: boolean, hasGaveUp: boolean): void {
     const tooltip = new vscode.MarkdownString(undefined, true);
-    tooltip.appendMarkdown(`**Claude Limit Buster**\n\n`);
+    tooltip.appendMarkdown(`**Limit Break**\n\n`);
     for (const line of lines) {
       tooltip.appendMarkdown(`- ${line}\n`);
     }

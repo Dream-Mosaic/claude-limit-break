@@ -85,7 +85,7 @@ test('a legacy stored job without baseResumeAtMs/jitterMs is migrated on reconst
     resumeAtMs,
     reason: 'limit',
   };
-  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': legacy }), silent);
+  const s = new ResumeScheduler(memento({ 'claudeLimitBreak.pending': legacy }), silent);
   assert.equal(s.current?.baseResumeAtMs, resumeAtMs);
   assert.equal(s.current?.jitterMs, 0);
 });
@@ -99,7 +99,7 @@ test('cancel clears the pending job', () => {
 
 test('a deadline that passed while VS Code was closed fires on the first tick', async () => {
   const past = job(Date.now() - 1000);
-  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': past }), silent);
+  const s = new ResumeScheduler(memento({ 'claudeLimitBreak.pending': past }), silent);
   const fired: PendingJob[] = [];
   s.onFire((j) => fired.push(j));
   s.start();
@@ -182,7 +182,7 @@ test('another session with a later deadline is kept, not ignored', (t) => {
 test('every due job fires once, whichever session it belongs to', async (t) => {
   const past = Date.now() - 1000;
   const s = new ResumeScheduler(
-    memento({ 'claudeLimitBuster.pending': [jobFor(SESSION_A, past), jobFor(SESSION_B, past)] }),
+    memento({ 'claudeLimitBreak.pending': [jobFor(SESSION_A, past), jobFor(SESSION_B, past)] }),
     silent,
   );
   t.after(() => s.dispose());

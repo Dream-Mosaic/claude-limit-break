@@ -66,7 +66,7 @@ test('escapeMarkdown leaves text with no special characters alone', () => {
 
 test('trustCommandUri targets the Task 5a command with the cwd as its sole argument', () => {
   const uri = trustCommandUri('/projects/example');
-  assert.equal(uri, `command:claudeLimitBuster.openClaudeToTrust?${encodeURIComponent(JSON.stringify(['/projects/example']))}`);
+  assert.equal(uri, `command:claudeLimitBreak.openClaudeToTrust?${encodeURIComponent(JSON.stringify(['/projects/example']))}`);
   const query = uri.slice(uri.indexOf('?') + 1);
   assert.deepEqual(JSON.parse(decodeURIComponent(query)), ['/projects/example']);
 });
@@ -191,7 +191,7 @@ test('the folder is escaped before it reaches the line', () => {
 test('an untrusted job gets a warning marker and a trust link, and reports hasTrustLink', () => {
   const { lines, hasTrustLink } = buildSessionLines([job({ folderTrusted: false, cwd: '/projects/example' })], [], []);
   assert.match(lines[0]!, /not trusted/i);
-  assert.ok(lines[0]!.includes('command:claudeLimitBuster.openClaudeToTrust'), lines[0]);
+  assert.ok(lines[0]!.includes('command:claudeLimitBreak.openClaudeToTrust'), lines[0]);
   assert.ok(hasTrustLink);
 });
 
@@ -209,7 +209,7 @@ for (const cwd of UNBALANCED_PAREN_CWDS) {
     const { lines } = buildSessionLines([job({ folderTrusted: false, cwd })], [], []);
     const href = linkTarget(lines[0]!);
     assert.ok(href, lines[0]);
-    assert.ok(href!.startsWith('command:claudeLimitBuster.openClaudeToTrust?'), href);
+    assert.ok(href!.startsWith('command:claudeLimitBreak.openClaudeToTrust?'), href);
     const query = href!.slice(href!.indexOf('?') + 1);
     assert.deepEqual(
       JSON.parse(decodeURIComponent(query)),
@@ -260,7 +260,7 @@ test('the tooltip warns when the folder is not trusted for the CLI, and marks th
     bar.update([job({ folderTrusted: false })]);
     assert.match(tooltipText(), /not trusted/i, `expected an untrusted-folder note; got ${JSON.stringify(tooltipText())}`);
     const tooltip = vscodeFake.statusBarItems[0]?.tooltip as { isTrusted?: unknown } | undefined;
-    assert.deepEqual(tooltip?.isTrusted, { enabledCommands: ['claudeLimitBuster.openClaudeToTrust'] });
+    assert.deepEqual(tooltip?.isTrusted, { enabledCommands: ['claudeLimitBreak.openClaudeToTrust'] });
   } finally {
     bar.dispose();
   }
@@ -373,7 +373,7 @@ test('clicking opens the menu rather than cancelling outright', () => {
   resetVscodeFake();
   const bar = new CountdownStatusBar();
   bar.update([job()], [], 'always');
-  assert.equal(vscodeFake.statusBarItems[0]?.command, 'claudeLimitBuster.statusBarMenu');
+  assert.equal(vscodeFake.statusBarItems[0]?.command, 'claudeLimitBreak.statusBarMenu');
 });
 
 test('the tooltip no longer promises that clicking cancels', () => {

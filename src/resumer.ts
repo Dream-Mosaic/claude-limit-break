@@ -114,7 +114,7 @@ export function buildTerminalOptions(
   claudeArgs: string[] = buildResumeArgs(session.sessionId, prompt),
 ): TerminalOptionsLike {
   return {
-    name: `Limit Buster: ${session.sessionId.slice(0, 8)}`,
+    name: `Limit Break: ${session.sessionId.slice(0, 8)}`,
     cwd: session.cwd,
     shellPath: launcher.file,
     shellArgs: [...launcher.args, ...claudeArgs],
@@ -142,7 +142,7 @@ export function buildTerminalOptions(
  */
 export function buildTrustTerminalOptions(cwd: string, launcher: Launcher): TerminalOptionsLike {
   return {
-    name: `Limit Buster: Trust ${path.basename(cwd)}`,
+    name: `Limit Break: Trust ${path.basename(cwd)}`,
     cwd,
     shellPath: launcher.file,
     shellArgs: [...launcher.args],

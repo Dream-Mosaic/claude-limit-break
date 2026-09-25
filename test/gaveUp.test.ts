@@ -157,7 +157,7 @@ test('each failure notice names its cause and what to do about it', () => {
   assert.match(stall, /stalled/i);
   assert.match(stall, /terminal/i, 'the stall notice points at the terminal to look at');
   assert.match(launcher, /claude executable/i);
-  assert.match(launcher, /claudeLimitBuster\.claudeCommand/, 'the launcher notice names the setting to fix');
+  assert.match(launcher, /claudeLimitBreak\.claudeCommand/, 'the launcher notice names the setting to fix');
   assert.match(cwd, /no longer exists/i);
   assert.ok(cwd.includes('/work/app'), 'the missing-folder notice names the folder');
   assert.match(cwd, /Resume Now/, 'the missing-folder notice says how to retry');
@@ -177,7 +177,7 @@ test('the budget refusal names the session, the numbers and both ways through', 
   assert.ok(n.includes(A.slice(0, 8)));
   assert.match(n, /estimated at ~9 tokens/);
   assert.match(n, /Resume anyway/);
-  assert.match(n, /claudeLimitBuster\.maxResumeTokens/);
+  assert.match(n, /claudeLimitBreak\.maxResumeTokens/);
 });
 
 test('an explicit user action always warns, even for a cause already warned about', () => {

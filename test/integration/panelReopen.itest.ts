@@ -29,7 +29,7 @@ function findTab(viewType: string): vscode.Tab | undefined {
 
 suite('panel reopen - unverified behaviours from issue #7', () => {
   test('TabInputWebview.viewType as reported by a real tabGroups', async () => {
-    const requested = 'claudeLimitBusterProbeViewType';
+    const requested = 'claudeLimitBreakProbeViewType';
     const panel = vscode.window.createWebviewPanel(requested, 'CLB probe', vscode.ViewColumn.Active, {});
     try {
       await waitFor(() => findTab(requested) !== undefined);
@@ -39,7 +39,7 @@ suite('panel reopen - unverified behaviours from issue #7', () => {
       const observed = (tab.input as vscode.TabInputWebview).viewType;
 
       // FINDING (VS Code 1.137.0, Extension Development Host): the runtime
-      // value came back as "mainThreadWebview-claudeLimitBusterProbeViewType"
+      // value came back as "mainThreadWebview-claudeLimitBreakProbeViewType"
       // - prefixed with "mainThreadWebview-" ahead of exactly what was passed
       // to createWebviewPanel. That confirms the issue's premise: the match
       // against Claude Code's real viewType has to be `includes(...)`, not
@@ -55,7 +55,7 @@ suite('panel reopen - unverified behaviours from issue #7', () => {
   });
 
   test('workbench.action.reopenClosedEditor against a registered WebviewPanelSerializer', async () => {
-    const viewType = 'claudeLimitBusterProbeSerializer';
+    const viewType = 'claudeLimitBreakProbeSerializer';
     let deserializeCalls = 0;
     let restoredPanel: vscode.WebviewPanel | undefined;
     const registration = vscode.window.registerWebviewPanelSerializer(viewType, {

@@ -59,7 +59,7 @@ test('terminal options launch claude directly, with no shell', () => {
   assert.equal(opts.shellPath, '/usr/bin/claude');
   assert.deepEqual(opts.shellArgs, ['--resume', ID, 'go']);
   assert.equal(opts.cwd, '/projects/example');
-  assert.match(opts.name, /Limit Buster/);
+  assert.match(opts.name, /Limit Break/);
   assert.ok(opts.name.includes(ID.slice(0, 8)));
 });
 
@@ -70,9 +70,9 @@ test('the trust terminal runs plain claude: no --resume, no prompt argument', ()
   assert.equal(opts.cwd, '/projects/example');
 });
 
-test('the trust terminal name uses the existing "Limit Buster: " prefix', () => {
+test('the trust terminal name uses the existing "Limit Break: " prefix', () => {
   const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
-  assert.match(opts.name, /^Limit Buster: /);
+  assert.match(opts.name, /^Limit Break: /);
 });
 
 test('the trust terminal strips every parent-session variable, same as a resume terminal', () => {
