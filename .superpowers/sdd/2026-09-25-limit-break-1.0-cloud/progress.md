@@ -144,3 +144,12 @@ Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3
 Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 4 minors deferred)
 - Task 5b: dispatched (sonnet) at base 0ba5d0d
 - Task 5b: implementer DONE (73b7daa a331e9e); 604/604 unit, 9/9 integration; 16 mutations (15 caught, 1 did not compile). Concerns: a new "ready, nothing counting down" pill (left to review); README "What you will see" stale (→ 9b). Review dispatched (opus: markdown injection surface).
+- Task 5b review 1 (opus): spec ✅ (the "ready" pill judged required, not Extra), Needs fixes. No injection path (checked through marked: links, command URIs, HTML incl. after a \n\n break-out, entities, autolinks); isTrusted scoped.
+  - Important 1: a cwd with an unbalanced ")" truncates the inline link target (encodeURIComponent leaves ( ) unencoded) → the command runs with no args → silent no-op.
+  - Important 2: the untrusted marker goes stale for ready jobs and non-soonest counting jobs (onChange refreshes only the soonest; the trust-terminal close loops scheduler.jobs only).
+  - Ruling (Important 1): percent-encode "(" and ")" (and "!", "'", "*" for good measure — all left raw by encodeURIComponent) after encodeURIComponent; red test: a cwd ending in ")" whose rendered link target parses back to [cwd] — cost if wrong: none (VS Code decodes with decodeURIComponent).
+  - Ruling (Important 2): refresh trust for scheduler.jobs AND readyJobs on the trust-terminal close and on scheduler.onChange (not on every countdown tick); persist the ready list when a ready job's folderTrusted flips so the fix survives reload — refreshTrust is mtime-cached per session, so the cost is a stat per listed job per change — cost if wrong: a few stat calls.
+  - Task 5b: minor (deferred): a newline in a folder name breaks the one-line layout (still escaped text).
+  - Task 5b: minor (deferred): "$(...)" theme-icon syntax and "~~" are not neutralised in folder names (cosmetic; supportThemeIcons is on).
+  - Task 5b: minor (deferred): harmless double render in rememberReady.
+  - Task 5b: minor (deferred): a locale-fragile negative assertion; no escape test on a gave-up-only line.
