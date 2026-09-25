@@ -154,3 +154,6 @@ Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 
   - Task 5b: minor (deferred): harmless double render in rememberReady.
   - Task 5b: minor (deferred): a locale-fragile negative assertion; no escape test on a gave-up-only line.
 - Task 5b: fix round 1/5 (2 claimed addressed, awaiting re-review; commits a331e9e..836371a); 609/609 unit, 9/9 integration; 6/6 mutations caught. Scoped re-review dispatched (sonnet).
+- Task 5b re-review 1: both ADDRESSED; refreshAllTrust stats only untrusted jobs (~1/s while pending); no render/onChange loop; persist only on a ready flip.
+Task 5b: complete (commits dfa5461..836371a, 1 fix round; 4 minors deferred)
+- Task 8: dispatched (sonnet) at base 8b00568
