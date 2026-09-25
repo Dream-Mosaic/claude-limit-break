@@ -287,3 +287,93 @@ None blocking. Two things worth a reviewer's eye:
   trimmed further, since the addenda specifically ask to "collect every
   minor (deferred), parked, and ⚠️ open line" — but a reviewer could
   reasonably want it shorter.
+
+## Fix round 1
+
+Review found README and NEXT.md accurate; two Important gaps in the
+CHANGELOG (Added omitted `claudeLimitBreak.statusBar`; Fixed omitted
+`054af81` and `73c3cec`), plus a request to sweep for anything else
+user-visible the entry missed. Minors from the review were explicitly
+deferred, not addressed this round.
+
+### What was wrong and why
+
+- **`claudeLimitBreak.statusBar` missing from Added.** Confirmed absent
+  from v0.1.2 (`git show v0.1.2:package.json | grep statusBar` → nothing).
+  It was introduced by `a235e36` ("keep a marker in the status bar when
+  nothing is pending") and `a0e8f5f` (merge of `feat/status-bar-presence`
+  into `main`), both inside `v0.1.2..HEAD`. I had described the setting's
+  *behaviour* in README/NEXT but never added it as its own CHANGELOG bullet
+  next to `watchScope`/`checkForUpdates` — an oversight, not a judgment
+  call.
+- **`054af81` and `73c3cec` missing from Fixed.** Read both commits in full
+  (`git show`). `054af81`: the Claude CLI keys trust records by exact path
+  string with no case-folding, so a folder trusted from a terminal
+  (`C:/...`) and the same folder opened from the panel (`c:/...`) were two
+  different records to it; `isFolderTrusted` only ever checked the first,
+  so a genuinely-trusted folder still showed as untrusted. Now any trusted
+  spelling counts, and the resume launches using that spelling so the CLI's
+  own lookup finds it. `73c3cec` (#8): the untrusted-folder flag was
+  computed once at schedule time and never re-read, so the warning (meant
+  to prompt trusting the folder *during* the countdown) could never reflect
+  that you had just done exactly that; it's now re-checked (mtime-cached)
+  and clears the moment the CLI's own record says trusted.
+
+### Sweep
+
+Re-ran `git log --oneline v0.1.2..HEAD -- src package.json` (the full list
+is in this task's session tool output) and checked every entry against the
+existing CHANGELOG bullets:
+
+- Rename, holder-policy/auto-continue coordination, cross-window claim,
+  gave-up state + tooltip rework, trust hotlink, new overload
+  detection/`quotaLimits.resetsAt`, DST spring-forward and fall-back,
+  subagent/quoted-text veto, brand assets, `resumePrompt` default,
+  `maxResumeTokens` default + usage-based estimate (`7b9f6d5`), VS Code
+  1.138/Node 24 (`9d8302a`), repo hardening, `headless` routing, reject-file-
+  as-cwd, case-fold-only-when-insensitive, single-click-opens-a-menu,
+  `CLAUDE_CONFIG_DIR`, `watchScope`/`checkForUpdates` (including all their
+  internal wiring commits: `c601174`, `442f13c`, `481091a`, `bcb9c5d`,
+  `5d62226`, `23f1bec`, `9e1c757`, `8cb9da0`, `57d8072`) — all already had a
+  bullet.
+- Found one more genuinely user-visible fix with no existing bullet:
+  `62d857f` ("keep the first schedule on a same-reset re-detection") — a
+  repeated usage-limit notice for a reset already scheduled used to be able
+  to re-roll a smaller random delay and pull the resume time earlier (the
+  2026-09-24 field incident: a re-detection moved a window's resume from
+  2:27:19 to 2:20:11). Added to Fixed.
+- Everything else in the log is either a merge commit whose contents are
+  represented by another bullet (`8923bc0`, `48fbb64`, `442f13c`,
+  `481091a`, `c1a415d`, `a0e8f5f`), a pure internal refactor/wiring step
+  with no independent user-visible effect (`db1bb9d`, `a2311c7`,
+  `c1470e4`, `43f8884`, `1a0e082`, `84b0ef5`, `3b454bd`, `a2710f4`, `af5d44e`
+  and the rest of the claim-wiring commits, `bcb9c5d`/`5d62226`/etc. above),
+  or a test-only fix with no user-visible counterpart (most of `29c97b7`'s
+  and `c1a415d`'s constituent commits, already covered qualitatively by the
+  "Untrusted transcript text..." and DST bullets).
+
+### Changes
+
+- `CHANGELOG.md`: added the `statusBar` bullet to Added, and the two
+  required plus the one sweep-found bullet to Fixed (4 new bullets total).
+  No other section touched.
+
+### Verification
+
+- Unit: `npm test > /tmp/t9b_fix1.log 2>&1; echo "exit=$?"` → `exit=0`,
+  610/610 (unchanged from before the fix — the CHANGELOG carries no test
+  coverage of its own beyond shipping in the `.vsix`).
+- `bash scripts/check-vsix.sh <vsix>`: packaged fresh, ran against it →
+  "The .vsix contents are correct." (CHANGELOG.md still ships.) Deleted the
+  `.vsix` immediately after; `git status --porcelain` showed only
+  `CHANGELOG.md` modified before the commit.
+- Did not re-run the integration suite: nothing under `test/integration`
+  reads `CHANGELOG.md`'s contents (only `check-vsix.sh` and the packaging
+  step touch it), so it was not expected to move and re-running it would
+  not have exercised the change.
+
+### Commit
+
+`cb13d7e` `docs(changelog): fix round 1 - cover the missing statusBar
+setting and two trust fixes` — single commit, CHANGELOG.md only, trailer
+per constraint 8.

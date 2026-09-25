@@ -168,3 +168,4 @@ Task 8: complete (commits 5392b80..32a1515, review clean)
   - Important: CHANGELOG Fixed omits 054af81 (trust by any spelling of the folder) and 73c3cec (trust warning clears mid-countdown, #8).
   - Task 9b: minor (deferred): test/readmeSettings.test.ts rejects column-padded table rows with a misleading "missing" message.
   - Task 9b: minor (deferred): README "What you will see" quotes the tooltip link as "Open Claude to Trust"; the tooltip says "Trust this folder" (the notification button says "Open Claude to Trust").
+- Task 9b: fix round 1/5 (2 claimed addressed + 62d857f added from a sweep; commit cb13d7e); 610/610 unit, check-vsix green. Scoped re-review dispatched (sonnet).

@@ -1,0 +1,43 @@
+cb13d7e docs(changelog): fix round 1 - cover the missing statusBar setting and two trust fixes
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b01f5c8..1f7f864 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -45,10 +45,15 @@ its settings do not carry over.
+   window's workspace.
+ - `claudeLimitBreak.checkForUpdates`, off by default: checks GitHub once a day
+   for a newer release and says so, since a `.vsix` install never shows up as
+   outdated on its own. A one-time prompt on first activation offers to turn it
+   on.
++- `claudeLimitBreak.statusBar`. `always` (the default) keeps a small marker in
++  the status bar even when nothing is pending, so a window running the
++  extension does not look identical to one where it silently failed to load;
++  `pending` hides that marker and shows the item only while something is
++  counting down, ready, or given up; `never` hides it entirely.
+ - A trust hotlink. When a folder is not trusted by the Claude CLI, the
+   scheduling notification and the status-bar tooltip both offer "Open Claude to
+   Trust", which opens a plain `claude` terminal in that folder so you answer
+   the CLI's own trust prompt yourself - the extension never answers it and
+   never writes to `~/.claude.json`.
+@@ -95,10 +100,21 @@ its settings do not carry over.
+   read (trust status, and now Claude Code's own auto-continue setting).
+ - Project paths are case-folded only on filesystems that are actually
+   case-insensitive, instead of always.
+ - A resume whose recorded working directory turns out to be a file, not a
+   folder, is refused with a named reason instead of failing unpredictably.
++- A folder the Claude CLI already trusted under a different spelling of its
++  path (for example a drive letter cased differently between a terminal and
++  the panel) was still reported untrusted; any spelling the CLI has trusted
++  now counts, and the resume launches from that spelling so the CLI's own
++  lookup finds it.
++- The untrusted-folder warning - in the notification and the status-bar
++  tooltip - now clears once you trust the folder while its countdown is
++  still running, instead of only at the next detection (#8).
++- A repeated "usage limit" notice for a reset already scheduled no longer
++  re-rolls its random padding and moves the resume time; the first schedule
++  for a given reset is kept regardless of how many times it is re-detected.
+ 
+ ## [0.1.2] - 2026-09-23
+ 
+ ### Added
+ 
