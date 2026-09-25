@@ -196,3 +196,27 @@ test('a manual failure counts as warned, so an automatic repeat after it stays q
   assert.equal(s.record(rec(A, 'cwd'), true), true);
   assert.equal(s.record(rec(A, 'cwd', 2000)), false);
 });
+
+test('a finished turn clears that session record only, and keeps its warn-once memory', () => {
+  // Fix round 1, ruling 2a: a turn ending is evidence the session works
+  // again, so the record goes; it is not a new detection, so the memory stays.
+  const s = new GaveUpState();
+  s.record(rec(A, 'stall'));
+  s.record(rec(B, 'cwd'));
+  assert.equal(s.turnEnded(A), true);
+  assert.deepEqual(s.list().map((r) => r.sessionId), [B], 'another session is left alone');
+  assert.equal(s.record(rec(A, 'stall')), false, 'an automatic repeat after it stays quiet');
+  assert.equal(s.turnEnded('ffffffff-0000-4000-8000-000000000000'), false, 'nothing recorded, nothing to re-render');
+});
+
+test('dismissing clears every record but keeps the warn-once memory', () => {
+  // Fix round 1, ruling 2b: "Dismiss gave-up notices" is "I have seen these",
+  // not a new attempt - an automatic repeat afterwards is still not news.
+  const s = new GaveUpState();
+  s.record(rec(A, 'stall'));
+  s.record(rec(B, 'cwd'));
+  assert.equal(s.dismissRecords(), true);
+  assert.deepEqual(s.list(), []);
+  assert.equal(s.record(rec(A, 'stall')), false);
+  assert.equal(new GaveUpState().dismissRecords(), false, 'nothing recorded, nothing to re-render');
+});

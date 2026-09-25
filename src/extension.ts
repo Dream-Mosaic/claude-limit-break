@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from './log';
 import { readSettings, type Settings } from './config';
-import { TranscriptWatcher } from './transcriptWatcher';
+import { TranscriptWatcher, isSubagentFile } from './transcriptWatcher';
 import { ResumeScheduler, type PendingJob } from './scheduler';
 import { CountdownStatusBar } from './statusBar';
 import { planResume } from './policy';
@@ -496,9 +496,9 @@ export function activate(context: vscode.ExtensionContext): void {
    * something (the resumeNow command, the Resume Now notification button,
    * "Resume in Terminal Anyway"): its launch failures are always notified.
    * Only scheduler.onFire's own automatic resume leaves it false. The stall
-   * check below does not take it: a stalled session's job is gone once it
-   * launched, so a second stall needs a new detection, which already resets
-   * warn-once.
+   * check below takes it too: one session can hold a ready job AND a
+   * counting-down job, so two manual launches - and two stalls - can happen
+   * with no detection in between (fix round 1, finding 1).
    */
   const resume = (job: PendingJob, manual = false): boolean => {
     const s = settings();
@@ -625,7 +625,7 @@ export function activate(context: vscode.ExtensionContext): void {
         `Resume of ${job.sessionId} did not produce any work: ${job.transcript} was ${bytesAtLaunch} bytes at launch and ` +
           `${bytesNow ?? 'unreadable'} now.${trustFirst}`,
       );
-      giveUp(job, 'stall', (m) => vscode.window.showWarningMessage(m));
+      giveUp(job, 'stall', (m) => vscode.window.showWarningMessage(m), manual);
     }, GRACE_MS);
     stallChecks.add(check);
     return true;
@@ -852,6 +852,19 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
     watcher.onInputNeeded((hit) => {
+      // A finished turn is evidence the session works again, so a gave-up
+      // record for it is stale (fix round 1, ruling 2a). Ahead of both
+      // filters below: gave-up records belong to any watched session, not
+      // just this window's folders, and clearing one is safe while disabled -
+      // it launches and notifies nothing, it only stops the status bar
+      // showing a problem that is over. A subagent's transcript finishing a
+      // turn says nothing about its parent session, so it never clears one.
+      // resolveSession's statBytes is stubbed: only the id is wanted here.
+      const ended = isSubagentFile(hit.file) ? undefined : resolveSession(hit.file, hit.cwd, () => 0);
+      if (ended && gaveUp.turnEnded(ended.sessionId)) {
+        log.info(`Session ${ended.sessionId} finished a turn; clearing its gave-up state.`);
+        render();
+      }
       const s = settings();
       if (!s.enabled) {
         return;
@@ -1181,11 +1194,29 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         { label: 'Show Log', description: 'Open the Claude Limit Buster output channel', command: `${NS}.showLog` },
       ];
+      // Fix round 1, ruling 2b: a way to clear the gave-up state that does
+      // not also discard every other session's waiting jobs, as Cancel does.
+      // Only offered when there is something to dismiss.
+      const DISMISS = 'Dismiss gave-up notices';
+      if (gaveUpCount > 0) {
+        items.push({
+          label: DISMISS,
+          description: `Clear ${gaveUpCount} gave-up notice(s); waiting resumes are kept`,
+          command: '',
+        });
+      }
       const picked = await vscode.window.showQuickPick(items, {
         title: 'Claude Limit Buster',
         placeHolder: waiting > 0 ? `${waiting} resume(s) waiting` : 'Watching for usage limits',
       });
       if (!picked) {
+        return;
+      }
+      if (picked.label === DISMISS) {
+        if (gaveUp.dismissRecords()) {
+          log.info('Dismissed the gave-up notices; waiting resumes are untouched.');
+          render();
+        }
         return;
       }
       await vscode.commands.executeCommand(picked.command);

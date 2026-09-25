@@ -101,6 +101,28 @@ export class GaveUpState {
     return this.records.delete(sessionId);
   }
 
+  /**
+   * The session finished a turn: it is working again, so its record goes.
+   * Not a new detection, so its warn-once memory stays (fix round 1, ruling
+   * 2a). Returns whether a record was removed.
+   */
+  turnEnded(sessionId: string): boolean {
+    return this.records.delete(sessionId);
+  }
+
+  /**
+   * "Dismiss gave-up notices" from the menu: every record goes, and nothing
+   * else - no job is touched (the caller never passes it one), and the
+   * warn-once memory stays, since dismissing is "I have seen these", not a
+   * new attempt (fix round 1, ruling 2b). Returns whether anything was
+   * recorded.
+   */
+  dismissRecords(): boolean {
+    const had = this.records.size > 0;
+    this.records.clear();
+    return had;
+  }
+
   /** Cancel from the menu or the command: everything goes. Returns whether anything was recorded. */
   clearAll(): boolean {
     const had = this.records.size > 0;

@@ -55,6 +55,11 @@ class FakeWatcher {
     this.inputEmitter.fire({ cwd, file: `/h/p/${SESSION}.jsonl` });
   }
 
+  /** Pretend a Claude turn just ended in the transcript `file`. */
+  endTurnFor(file: string, cwd?: string): void {
+    this.inputEmitter.fire({ cwd, file });
+  }
+
   /**
    * Pretend a usage limit was detected for `sessionId`, resetting at
    * `resumeAt`. This runs through the real policy and the real scheduler; the
@@ -102,7 +107,12 @@ const sounds: { file?: string }[] = [];
  */
 let trustedCwds: Set<string> | 'all' = 'all';
 
-stubModule('./transcriptWatcher', { TranscriptWatcher: FakeWatcher });
+// Spread first so the real (pure) isSubagentFile is available to
+// extension.ts; only the watcher class itself is faked.
+stubModule('./transcriptWatcher', {
+  ...(require('../src/transcriptWatcher') as Record<string, unknown>),
+  TranscriptWatcher: FakeWatcher,
+});
 stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.push(o) });
 // The real 60s grace would make every stall test take a minute. The verdict
 // logic itself is the real one - only the wait is shortened.
@@ -2861,8 +2871,8 @@ const autoConfig = () => ({
 });
 
 /** Budget-refusal fixture: a real transcript over a 1-token cap. */
-const overBudgetTranscript = () => {
-  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+const overBudgetTranscript = (sessionId: string = SESSION) => {
+  const transcript = path.join(os.tmpdir(), `${sessionId}.jsonl`);
   fs.writeFileSync(transcript, 'x'.repeat(100_000));
   return transcript;
 };
@@ -3265,5 +3275,156 @@ test('gave up: "Resume in Terminal Anyway" is answered even when the same failur
     autoContinueOn = true;
     clearHolders();
     teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 4b fix round 1.
+// ---------------------------------------------------------------------------
+
+test('gave up: two manual launches of the same session that both stall are both answered', async () => {
+  // Review finding 1: one session can hold a ready job AND a counting-down
+  // job. Resume Now takes the counting one (it stalls: warned), then the
+  // ready one - a second manual launch, no detection in between - which
+  // stalls too. That click must still get its notice (ruling on concern 1).
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(offers()[0], 'setup: the fired job is waiting to be started by hand');
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    const stalls = () => vscodeFake.warnings.filter((m) => /stalled/.test(m)).length;
+
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the counting-down job launched');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(stalls(), 1, 'setup: the first stall was answered');
+
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 2, 'setup: the ready job launched');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(stalls(), 2, 'the second manual launch stalling must be answered too');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+/** Gave up on the budget for `sessionId`, with nothing pending. Returns the transcript to clean up. */
+async function gaveUpOnBudget(sessionId: string = SESSION): Promise<string> {
+  const transcript = overBudgetTranscript(sessionId);
+  FakeWatcher.latest!.limitFor(sessionId, new Date(Date.now() - 1000), REAL_CWD, transcript);
+  await flush();
+  vscodeFake.warningOffers.find((w) => w.message.includes(sessionId.slice(0, 8)))!.answer(undefined);
+  await flush();
+  return transcript;
+}
+
+test('gave up: a finished turn for the session clears its record, even outside this window folders', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  // No workspace folders: the turn is outside this window, which the chime
+  // and stale-tab logic ignore - gave-up records belong to any watched session.
+  const ctx = contextOver(new Map());
+  start(ctx);
+  let transcript = '';
+  try {
+    transcript = await gaveUpOnBudget();
+    assert.ok(showsGaveUp(), 'setup: gave up');
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`, '/somewhere/else');
+    assert.ok(!showsGaveUp(), `a finished turn must clear it and re-render; got ${JSON.stringify(bar()?.text)}`);
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: a finished turn clears the record even while the extension is disabled', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  let transcript = '';
+  try {
+    transcript = await gaveUpOnBudget();
+    vscodeFake.config = { ...vscodeFake.config, enabled: false };
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`);
+    assert.doesNotMatch(barTooltip(), /Gave up/, 'stale state must not outlive the problem because the watcher is off');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: a finished turn for another session, or for a subagent transcript, leaves the record alone', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  let transcript = '';
+  try {
+    transcript = await gaveUpOnBudget();
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION_B}.jsonl`);
+    assert.ok(showsGaveUp(), 'another session finishing a turn says nothing about this one');
+    // Named like the session on purpose: only the subagents/ guard can tell
+    // it apart from the session's own transcript.
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION}/subagents/${SESSION}.jsonl`);
+    assert.ok(showsGaveUp(), 'a subagent finishing is not the session finishing');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: the menu offers "Dismiss gave-up notices" only when something gave up', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  let transcript = '';
+  try {
+    const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!;
+    await menu();
+    assert.ok(!vscodeFake.quickPicks[0]!.items.some((i) => i.label === 'Dismiss gave-up notices'), 'nothing to dismiss');
+    transcript = await gaveUpOnBudget();
+    await menu();
+    assert.ok(vscodeFake.quickPicks[1]!.items.some((i) => i.label === 'Dismiss gave-up notices'));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: "Dismiss gave-up notices" clears the records and leaves every waiting job alone', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const readyJob = { ...pastJob(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl` };
+  const store = new Map<string, unknown>([
+    ['claudeLimitBuster.pending', futureJob()],
+    [READY_KEY, [readyJob]],
+  ]);
+  const ctx = contextOver(store);
+  start(ctx);
+  let transcript = '';
+  try {
+    transcript = await gaveUpOnBudget(SESSION_B);
+    assert.match(barTooltip(), /Gave up/, 'setup: gave up');
+    vscodeFake.quickPickAnswer = 'Dismiss gave-up notices';
+    await vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!();
+    assert.doesNotMatch(barTooltip(), /Gave up/, 'the records must be gone, and the bar re-rendered');
+    assert.ok(store.get('claudeLimitBuster.pending'), 'the counting-down job must be kept');
+    assert.deepEqual(
+      (store.get(READY_KEY) as { sessionId: string }[] | undefined)?.map((j) => j.sessionId),
+      [SESSION_B],
+      'the job waiting to be started by hand must be kept',
+    );
+    assert.match(bar()!.text, /resumes in/);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
   }
 });
