@@ -143,3 +143,4 @@ Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3
 - Task 4b re-review 1: both ADDRESSED; resolveSession on turn-end does no I/O (statBytes stub); no claim line touched; tsc clean.
 Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 4 minors deferred)
 - Task 5b: dispatched (sonnet) at base 0ba5d0d
+- Task 5b: implementer DONE (73b7daa a331e9e); 604/604 unit, 9/9 integration; 16 mutations (15 caught, 1 did not compile). Concerns: a new "ready, nothing counting down" pill (left to review); README "What you will see" stale (→ 9b). Review dispatched (opus: markdown injection surface).
