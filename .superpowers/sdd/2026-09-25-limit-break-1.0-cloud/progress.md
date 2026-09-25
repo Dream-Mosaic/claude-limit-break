@@ -68,3 +68,11 @@ Task 7: complete (commits 54eea64..58b3c3a, review clean)
 - Task 5a: dispatched (sonnet) at base f1cb859
 - Task 5a: implementer DONE (69ad673 d70840d 9b44133); 496/496 unit; 6 mutations (4 caught, 2 did not compile). statusBar.ts untouched. Review dispatched (opus: multi-file extension.ts wiring).
 - Integration now runnable (user allowed *.visualstudio.com, *.microsoft.com, 2026-09-25). At a14e475: 9/9 integration (VS Code 1.139.0 under xvfb), covering T6's defaults test and T5a's command-registration check. "Integration pending" list cleared. Constraint 6 amended: integration gates every task from here.
+- Task 5a review 1 (opus): spec ✅, quality Needs fixes. Reviewer verified both DID-NOT-COMPILE mutations are real (TS2345 under strict), and that the status.update re-render is load-bearing (its removal is caught).
+  - Important: ruling 2 ("refreshTrust for EVERY pending job") is untested; narrowing the loop to scheduler.current SURVIVED (87/87). Fix round 1 sent.
+  - Task 5a: minor (deferred): no cwdExists check before opening the trust terminal (resume has one).
+  - Task 5a: minor (deferred): the "could not find the claude executable" string is now duplicated (~452, ~1128).
+  - Task 5a: minor (deferred): `void executeCommand(...)` inside the notification's .then has no .catch.
+  - Task 5a: minor (deferred): the trustTerminals Set is not cleared on dispose.
+  - ⚠️ resolved by controller: onDidCloseTerminal passes the same Terminal object createTerminal returned (documented API); the 9/9 integration run at a14e475 activated this wiring in real VS Code.
+- User decisions (2026-09-25, before stepping away): this lane now owns Task 4 from bbff534 and the rest of the plan (5b, 8, 9) to the end; push release/1.0.0 and open a DRAFT PR into main (never merge); this lane merges origin/main (merge commit, no rebase) for Task 9.
