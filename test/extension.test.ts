@@ -1535,6 +1535,64 @@ test('closing the trust terminal re-reads trust immediately, without waiting for
   }
 });
 
+test('closing the trust terminal re-reads trust for every pending job, not just the current one', async () => {
+  // Fix round 1: the status-bar tooltip only ever shows `scheduler.current`
+  // (the soonest job), so a test that only asserts the tooltip cannot tell
+  // `refreshTrust` for every job apart from `refreshTrust(scheduler.current)`
+  // alone - a mutation the reviewer ran and found SURVIVED against the
+  // single-job close-hook test above. This asserts the SECOND job's own
+  // `folderTrusted` directly, read back from the scheduler's persisted state
+  // (the memento the fake globalState wraps): `scheduler.jobs` and the
+  // objects `persist()` writes into it are the same references `refreshTrust`
+  // mutates in place, so this reflects exactly what the close hook did to a
+  // job that was never `current` and never rendered anywhere.
+  resetVscodeFake();
+  vscodeFake.config = {
+    autoResume: false,
+    claudeCommand: LAUNCHER,
+    randomDelayMinMinutes: 0,
+    randomDelayMaxMinutes: 0,
+  };
+  trustedCwds = new Set(); // nothing trusted yet
+  const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-job-b-'));
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    // SESSION is scheduled with the sooner deadline, so it - not SESSION_B -
+    // stays `scheduler.current` (and the only one the tooltip ever shows) for
+    // the whole test. SESSION_B's folder is deliberately never trusted for
+    // SESSION's sake - only SESSION_B's own folder is - so nothing here can
+    // pass by accident via SESSION's own tooltip clearing.
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000), REAL_CWD);
+    FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_200_000), dirB);
+    await flush();
+
+    const pendingJobs = () =>
+      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+    const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
+    assert.equal(jobB()?.folderTrusted, false, 'setup: the second job must start out untrusted too');
+
+    // Open the trust terminal for the SECOND job's folder specifically, and
+    // close it having trusted only that folder.
+    await trustCommand()!(dirB);
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the trust terminal must have opened');
+    trustedCwds = new Set([dirB]);
+    fireTerminalClose(vscodeFake.terminals[0]!);
+    await flush();
+
+    assert.equal(
+      jobB()?.folderTrusted,
+      true,
+      'the non-current job must have its trust re-checked too, not just scheduler.current',
+    );
+  } finally {
+    trustedCwds = 'all';
+    fs.rmSync(dirB, { recursive: true, force: true });
+    teardown(ctx);
+  }
+});
+
 test('closing an unrelated terminal does not re-read trust', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
