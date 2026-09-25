@@ -264,7 +264,8 @@ const LAUNCHER = '/opt/claude/bin/claude';
 const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
 /** The pid the fake terminal reports, i.e. the resume this extension launched. */
 const TERMINAL_PID = 4242;
-const PROMPT = 'Continue where you left off.';
+const PROMPT =
+  '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.';
 
 // resume() now checks the cwd on the real filesystem before launching, so
 // fixtures that expect a launch need a directory that is actually there.
