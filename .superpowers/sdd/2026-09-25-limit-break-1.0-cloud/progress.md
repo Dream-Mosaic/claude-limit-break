@@ -109,3 +109,14 @@ Task 9a: complete (commits 82dddfb..48fbb64, review clean)
 - Merged origin/fix/1.0-field-reports (bbff534) as 8923bc0; 498/498 unit.
 - Task 4a: dispatched (sonnet) at base 8923bc0
 - Task 4a: implementer DONE (912d21a 583ada4 abc9ccf); 514/514 unit, 9/9 integration; 8/8 mutations caught. Reviewing bbff534 found the spring-forward gap resolved to the EARLY side; fixed (912d21a). Review dispatched (opus), package covers bbff534 + 4a.
+- Task 4a review 1 (opus): spec ❌, Needs fixes. bbff534 fall-back ✅ in Chicago/London/Sydney/Lord_Howe; in-flight exclusion ✅ both paths; transient-429 routing ✅ on the untrusted path.
+  - Important 1: a FLAGGED transient-429 entry carrying quotaLimits.resetsAt arms a usage-limit timer (the quotaLimits branch returns before text is read) — breaks ruling 1.
+  - Important 2: new overload rules not line-start anchored; mid-sentence prose / a Bash tool_use echo of the render schedules a retry on the untrusted path (prior art: must-not-fire).
+  - Important 3: subagent-file veto not applied to unflagged overload text; the report's rationale cited a test whose entry is flagged.
+  - Ruling (Important 1): skip the quotaLimits branch when the entry's text matches the transient-429 render; do NOT add a quotaLimits.status gate — that would change Task 1's reviewed behaviour on evidence we do not have — cost if wrong: a flagged non-429 entry with status 'allowed' could still arm from resetsAt (not observed).
+  - Ruling (Important 2): anchor the NEW rules (transient-429, stream-interrupted) at a line start, allowing leading whitespace and the TUI glyphs ⏺/●; leave the old api-error-status rule as is (deferred minor below) — the fix stays scoped to this task — cost if wrong: an old-rule false positive from quoted prose, pre-existing.
+  - Ruling (Important 3): add isSubagentFile to the !flagged veto for overload text too — Task 3's intent; flagged entries stay exempt — cost if wrong: an unflagged real overload in a subagent file is missed; its parent records it.
+  - Task 4a: minor (deferred): spring-forward east of UTC overshoots by an extra hour (London 01:30 → 03:30 BST); safe direction; only Chicago is tested.
+  - Task 4a: minor (deferred): the in-flight regex's narrowness is unpinned (no terminal case containing "attempt").
+  - Task 4a: minor (deferred, pre-existing): the old api-error-status rule fires on mid-sentence "API Error: 529" prose.
+  - ⚠️ open: whether Claude Code writes these renders into JSONL with the literal "API Error:" head, and whether a transient-429 entry carries quotaLimits — evidence covers the TUI render and CHANGELOG only. For NEXT.md.
