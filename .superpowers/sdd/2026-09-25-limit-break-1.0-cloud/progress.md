@@ -121,3 +121,7 @@ Task 9a: complete (commits 82dddfb..48fbb64, review clean)
   - Task 4a: minor (deferred, pre-existing): the old api-error-status rule fires on mid-sentence "API Error: 529" prose.
   - ⚠️ open: whether Claude Code writes these renders into JSONL with the literal "API Error:" head, and whether a transient-429 entry carries quotaLimits — evidence covers the TUI render and CHANGELOG only. For NEXT.md.
 - Task 4a: fix round 1/5 (3 claimed addressed, awaiting re-review; commits abc9ccf..29c97b7); 524/524 unit, 9/9 integration; 3/3 mutations caught. Implementer note: the subagent veto now covers the OLD overload rules too for unflagged subagent entries (intended by the ruling's wording). Scoped re-review dispatched (sonnet).
+- Task 4a re-review 1: all 3 ADDRESSED (verified live against out/); no new breakage.
+  - Ruling: the subagent-file veto on unflagged overload text also covers the OLD overload rules (e.g. a bare unflagged "API Error: 529" in subagents/) — intended: unflagged text in a subagent file is not a live notice, a flagged one always is (Task 3's rule, now uniform across limit and overload) — cost if wrong: an unflagged real overload in a subagent file goes unretried; the parent transcript still records the stop.
+Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3 minors deferred)
+- Task 4b: dispatched (opus: design of the shared gave-up model + Task 10 claim interplay) at base cff81b4
