@@ -103,3 +103,4 @@ Pre-flight scan (added tasks)
 - Task 5a re-review 1: ADDRESSED (the asserted job never becomes current; reference identity through the memento traced); no new breakage.
 Task 5a: complete (commits f1cb859..18fad58, review clean after 1 fix round; 4 minors deferred)
 - Task 9a: dispatched (sonnet) at base cd53868
+- Task 9a: implementer DONE (48fbb64, merge of origin/main 28b0eec; no conflicts); npm ci 0, 497/497 unit, 9/9 integration, check-vsix 0. Review dispatched (sonnet).

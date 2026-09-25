@@ -1,0 +1,514 @@
+## Merge commit
+48fbb64 merge: bring in origin/main (repo hardening, VS Code 1.138/Node 24)
+Merges origin/main (28b0eec) into claude/limit-break-1.0-cloud per Task 9a.
+git's three-way merge resolved every touched file automatically (no manual
+conflict markers), because each side's edits landed in disjoint regions; the
+files below still needed a decision on which side's *intent* should stand
+where both sides touched the same file:
+
+- package.json: kept both sides. main's side wins on `engines.vscode`
+  (^1.138.0), `devDependencies["@types/node"]` (^24.13.6),
+  `devDependencies["@types/vscode"]` (^1.138.0), and the new
+  `overrides["serialize-javascript"]` (^7.0.5). This branch's side wins on
+  the `icon` field, the `openClaudeToTrust` command + its hidden
+  command-palette `when: "false"` menu entry, and the `resumePrompt`
+  default (the Limit Break resume message from Task 6). No overlap between
+  the two sets of edits.
+
+- src/transcriptWatcher.ts: kept both sides. main's side wins on
+  `listTranscripts`: the `Dirent.path` fallback is dropped from the
+  `parentPath ?? entry.path ?? root` chain (that alias was removed in
+  Node 24, which VS Code 1.138's Electron runs), leaving `parentPath ??
+  root`. This branch's side wins on `inspectLine` and its helpers -
+  `quotaLimits.resetsAt` handling, the subagent-file veto, the
+  tool-result-text veto, `MAX_OVERLOAD_AGE_MS` staleness, and the
+  `Candidate`-tagged `collectStrings` rewrite - none of which touch
+  `listTranscripts`.
+
+- package-lock.json: not hand-merged. Took main's lockfile as-is (git's
+  merge already resolved it to main's content, since this branch made no
+  lockfile edits of its own since the merge base), then ran `npm install`
+  against the merged package.json to confirm it needed no further changes.
+  `npm ci` succeeds against the result.
+
+Non-conflicting additions from main, all applied cleanly: .github/dependabot.yml
+(new), .github/workflows/ci.yml and release.yml (pinned actions by SHA, Node
+24), SECURITY.md (new).
+
+Verified on the merged tree: npm ci (exit 0), full unit suite - 497 passing
+(exit 0), xvfb-run integration suite - 9 passing (exit 0), and
+scripts/check-vsix.sh against a fresh `vsce package` (exit 0, .vsix deleted
+after).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JRHoU2Jtzz7ZD6EKVKb5bu
+
+## What main brought into this branch (HEAD^1..HEAD)
+ .github/dependabot.yml        | 23 +++++++++++++++++++++++
+ .github/workflows/ci.yml      | 20 ++++++++++----------
+ .github/workflows/release.yml |  8 ++++----
+ SECURITY.md                   | 19 +++++++++++++++++++
+ package.json                  |  9 ++++++---
+ src/transcriptWatcher.ts      |  8 ++++----
+ 6 files changed, 66 insertions(+), 21 deletions(-)
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+new file mode 100644
+index 0000000..a08e905
+--- /dev/null
++++ b/.github/dependabot.yml
+@@ -0,0 +1,23 @@
++version: 2
++updates:
++  - package-ecosystem: github-actions
++    directory: /
++    schedule:
++      interval: weekly
++    groups:
++      actions:
++        patterns: ["*"]
++  - package-ecosystem: npm
++    directory: /
++    schedule:
++      interval: weekly
++    groups:
++      dev-dependencies:
++        dependency-type: development
++        update-types: [minor, patch]
++    ignore:
++      # @types/node tracks the Node inside VS Code's Electron (Node 24 for
++      # VS Code 1.138), not the newest Node. Bump its major by hand together
++      # with engines.vscode.
++      - dependency-name: "@types/node"
++        update-types: ["version-update:semver-major"]
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 9fd5ddc..ba96fcf 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -8,49 +8,49 @@ on:
+ permissions:
+   contents: read
+ 
+ jobs:
+   test:
+     runs-on: ${{ matrix.os }}
+     strategy:
+       matrix:
+         os: [ubuntu-latest, windows-latest]
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: npm test
+ 
+   # Boots a real VS Code and activates the extension inside it. The unit suite
+   # runs against a hand-written fake `vscode`, which cannot tell whether the
+   # extension activates at all, so this is the only job that proves it does.
+   # Linux runners have no display, hence xvfb.
+   integration:
+     name: Integration (real VS Code)
+     runs-on: ubuntu-latest
+     needs: test
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: xvfb-run -a npm run test:integration
+ 
+   package:
+     runs-on: ubuntu-latest
+     needs: test
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: npx --yes @vscode/vsce package --out limit-buster.vsix
+       - name: Verify the package
+         run: bash scripts/check-vsix.sh limit-buster.vsix
+-      - uses: actions/upload-artifact@v4
++      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+         with:
+           name: vsix
+           path: limit-buster.vsix
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 7e87286..9b0f58a 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -22,21 +22,21 @@ permissions:
+   contents: read
+ 
+ jobs:
+   check:
+     name: Is this version released yet?
+     runs-on: ubuntu-latest
+     outputs:
+       version: ${{ steps.version.outputs.version }}
+       release: ${{ steps.version.outputs.release }}
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+         with:
+           # Tags are the record of what has already been released, so the
+           # shallow default would make every version look new.
+           fetch-depth: 0
+       - id: version
+         run: |
+           set -euo pipefail
+           version=$(node -p "require('./package.json').version")
+           echo "version=$version" >> "$GITHUB_OUTPUT"
+           # Keyed on the tag rather than on the release, because a tag with no
+@@ -67,35 +67,35 @@ jobs:
+     if: needs.check.outputs.release == 'true'
+     runs-on: ubuntu-latest
+     permissions:
+       # Only this job writes. The check job above stays read-only.
+       contents: write
+     env:
+       VSIX: claude-limit-buster-${{ needs.check.outputs.version }}.vsix
+       VERSION: ${{ needs.check.outputs.version }}
+       GH_TOKEN: ${{ github.token }}
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+       # Before anything expensive, and before the tag exists. A version whose
+       # changes were never written down is the way a changelog rots.
+       - name: The version being released needs a changelog section
+         run: |
+           set -euo pipefail
+           if ! grep -qE "^## \[?${VERSION//./\\.}\]?( |\$)" CHANGELOG.md; then
+             echo "::error::CHANGELOG.md has no '## [$VERSION]' section. Move the Unreleased notes under it before releasing."
+             exit 1
+           fi
+           echo "CHANGELOG.md documents $VERSION."
+ 
+-      - uses: actions/setup-node@v4
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+ 
+       # Re-run the suite here rather than trusting that CI passed on this
+       # commit. A release that publishes untested code is the one failure this
+       # workflow exists to prevent, and a minute of tests is cheap insurance.
+       - run: npm test
+ 
+       - name: Package
+         run: npx --yes @vscode/vsce package --out "$VSIX"
+ 
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..0686b0d
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,19 @@
++# Security policy
++
++## Reporting a vulnerability
++
++Please report security problems privately through GitHub:
++**[Report a vulnerability](https://github.com/Dream-Mosaic/claude-limit-break/security/advisories/new)**
++(the repository's Security tab → "Report a vulnerability").
++
++Please do not open a public issue for a vulnerability. You can expect an acknowledgement within a week.
++
++## Scope
++
++The extension launches the Claude Code CLI on your machine and reads Claude Code's transcripts and settings under `~/.claude` and `~/.claude.json`. Reports of particular interest:
++- anything that could make it launch a command other than `claude --resume <session-id>`, or pass it attacker-controlled arguments;
++- anything that could make it write to Claude Code's configuration, or answer Claude Code's folder-trust prompt on your behalf; it is designed never to do either.
++
++## Supported versions
++
++Only the latest release receives fixes.
+diff --git a/package.json b/package.json
+index d8c1a54..fc19a89 100644
+--- a/package.json
++++ b/package.json
+@@ -4,21 +4,21 @@
+   "description": "Waits out Claude Code usage limits and resumes your session by ID.",
+   "version": "0.1.2",
+   "publisher": "dream-mosaic",
+   "license": "MIT",
+   "icon": "media/icon.png",
+   "repository": {
+     "type": "git",
+     "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git"
+   },
+   "engines": {
+-    "vscode": "^1.93.0"
++    "vscode": "^1.138.0"
+   },
+   "categories": [
+     "Other"
+   ],
+   "extensionKind": [
+     "workspace"
+   ],
+   "capabilities": {
+     "untrustedWorkspaces": {
+       "supported": false,
+@@ -219,17 +219,20 @@
+   },
+   "scripts": {
+     "compile": "tsc -p .",
+     "watch": "tsc -p . -w",
+     "vscode:prepublish": "npm run compile",
+     "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
+     "test:integration": "npm run compile && vscode-test"
+   },
+   "devDependencies": {
+     "@types/mocha": "^10.0.10",
+-    "@types/node": "^22.9.0",
+-    "@types/vscode": "^1.93.0",
++    "@types/node": "^24.13.6",
++    "@types/vscode": "^1.138.0",
+     "@vscode/test-cli": "^0.0.15",
+     "@vscode/test-electron": "^3.1.0",
+     "typescript": "^5.6.3"
++  },
++  "overrides": {
++    "serialize-javascript": "^7.0.5"
+   }
+ }
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index 3bd4599..b5c7dd3 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -234,24 +234,24 @@ export class TranscriptWatcher {
+             entries = await fsp.readdir(root, { withFileTypes: true, recursive: true });
+         }
+         catch (err) {
+             this.log.warn(`Cannot list ${root}: ${String(err)}`);
+             return out;
+         }
+         for (const entry of entries) {
+             if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+                 continue;
+             }
+-            // Node >=20 sets parentPath on recursive readdir results.
+-            const parent = entry.parentPath ??
+-                entry.path ??
+-                root;
++            // parentPath is set on recursive readdir results from Node 20.12;
++            // the old Dirent.path alias was removed in Node 24, which is what
++            // VS Code 1.138 (Electron 42) runs.
++            const parent = entry.parentPath ?? root;
+             out.push(path.join(parent, entry.name));
+         }
+         return out;
+     }
+ 
+     private async scan(): Promise<void> {
+         if (this.scanning) {
+             return;
+         }
+         this.scanning = true;
+
+## package-lock.json (stat only)
+ package-lock.json | 46 ++++++++++++++++++----------------------------
+ 1 file changed, 18 insertions(+), 28 deletions(-)
+
+## For reference: main's own change since merge base (53d1a88..origin/main), excluding lockfile
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+new file mode 100644
+index 0000000..a08e905
+--- /dev/null
++++ b/.github/dependabot.yml
+@@ -0,0 +1,23 @@
++version: 2
++updates:
++  - package-ecosystem: github-actions
++    directory: /
++    schedule:
++      interval: weekly
++    groups:
++      actions:
++        patterns: ["*"]
++  - package-ecosystem: npm
++    directory: /
++    schedule:
++      interval: weekly
++    groups:
++      dev-dependencies:
++        dependency-type: development
++        update-types: [minor, patch]
++    ignore:
++      # @types/node tracks the Node inside VS Code's Electron (Node 24 for
++      # VS Code 1.138), not the newest Node. Bump its major by hand together
++      # with engines.vscode.
++      - dependency-name: "@types/node"
++        update-types: ["version-update:semver-major"]
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 9fd5ddc..ba96fcf 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -15,10 +15,10 @@ jobs:
+       matrix:
+         os: [ubuntu-latest, windows-latest]
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: npm test
+ 
+@@ -31,10 +31,10 @@ jobs:
+     runs-on: ubuntu-latest
+     needs: test
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: xvfb-run -a npm run test:integration
+ 
+@@ -42,15 +42,15 @@ jobs:
+     runs-on: ubuntu-latest
+     needs: test
+     steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+       - run: npx --yes @vscode/vsce package --out limit-buster.vsix
+       - name: Verify the package
+         run: bash scripts/check-vsix.sh limit-buster.vsix
+-      - uses: actions/upload-artifact@v4
++      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+         with:
+           name: vsix
+           path: limit-buster.vsix
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 7e87286..9b0f58a 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -29,7 +29,7 @@ jobs:
+       version: ${{ steps.version.outputs.version }}
+       release: ${{ steps.version.outputs.release }}
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+         with:
+           # Tags are the record of what has already been released, so the
+           # shallow default would make every version look new.
+@@ -74,7 +74,7 @@ jobs:
+       VERSION: ${{ needs.check.outputs.version }}
+       GH_TOKEN: ${{ github.token }}
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+       # Before anything expensive, and before the tag exists. A version whose
+       # changes were never written down is the way a changelog rots.
+       - name: The version being released needs a changelog section
+@@ -86,9 +86,9 @@ jobs:
+           fi
+           echo "CHANGELOG.md documents $VERSION."
+ 
+-      - uses: actions/setup-node@v4
++      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+         with:
+-          node-version: '22'
++          node-version: '24'
+       - run: npm ci
+ 
+       # Re-run the suite here rather than trusting that CI passed on this
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..0686b0d
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,19 @@
++# Security policy
++
++## Reporting a vulnerability
++
++Please report security problems privately through GitHub:
++**[Report a vulnerability](https://github.com/Dream-Mosaic/claude-limit-break/security/advisories/new)**
++(the repository's Security tab → "Report a vulnerability").
++
++Please do not open a public issue for a vulnerability. You can expect an acknowledgement within a week.
++
++## Scope
++
++The extension launches the Claude Code CLI on your machine and reads Claude Code's transcripts and settings under `~/.claude` and `~/.claude.json`. Reports of particular interest:
++- anything that could make it launch a command other than `claude --resume <session-id>`, or pass it attacker-controlled arguments;
++- anything that could make it write to Claude Code's configuration, or answer Claude Code's folder-trust prompt on your behalf; it is designed never to do either.
++
++## Supported versions
++
++Only the latest release receives fixes.
+diff --git a/package.json b/package.json
+index 698ba60..807cda8 100644
+--- a/package.json
++++ b/package.json
+@@ -10,7 +10,7 @@
+     "url": "https://github.com/Dream-Mosaic/claude-limit-buster.git"
+   },
+   "engines": {
+-    "vscode": "^1.93.0"
++    "vscode": "^1.138.0"
+   },
+   "categories": [
+     "Other"
+@@ -213,10 +213,13 @@
+   },
+   "devDependencies": {
+     "@types/mocha": "^10.0.10",
+-    "@types/node": "^22.9.0",
+-    "@types/vscode": "^1.93.0",
++    "@types/node": "^24.13.6",
++    "@types/vscode": "^1.138.0",
+     "@vscode/test-cli": "^0.0.15",
+     "@vscode/test-electron": "^3.1.0",
+     "typescript": "^5.6.3"
++  },
++  "overrides": {
++    "serialize-javascript": "^7.0.5"
+   }
+ }
+diff --git a/src/transcriptWatcher.ts b/src/transcriptWatcher.ts
+index 65c3c9f..57296db 100644
+--- a/src/transcriptWatcher.ts
++++ b/src/transcriptWatcher.ts
+@@ -230,10 +230,10 @@ export class TranscriptWatcher {
+             if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+                 continue;
+             }
+-            // Node >=20 sets parentPath on recursive readdir results.
+-            const parent = entry.parentPath ??
+-                entry.path ??
+-                root;
++            // parentPath is set on recursive readdir results from Node 20.12;
++            // the old Dirent.path alias was removed in Node 24, which is what
++            // VS Code 1.138 (Electron 42) runs.
++            const parent = entry.parentPath ?? root;
+             out.push(path.join(parent, entry.name));
+         }
+         return out;
