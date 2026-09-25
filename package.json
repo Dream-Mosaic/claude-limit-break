@@ -189,7 +189,7 @@
           ],
           "enumDescriptions": [
             "Show a marker while watching, and the countdown when a resume is pending.",
-            "Show the countdown only; nothing while idle.",
+            "Show the countdown, the ready pill and the gave-up marker; nothing while merely watching with none of those pending.",
             "Never show a status bar item."
           ],
           "default": "always",
