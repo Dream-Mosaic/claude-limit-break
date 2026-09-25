@@ -99,3 +99,4 @@ Pre-flight scan (added tasks)
 - Ruling: Task 4 split into 4a (detection: A5, A6, A7 incl. reviewing bbff534) and 4b (gave-up state: A8, A9) — different files, different review surfaces — cost if wrong: one extra review.
 - Ruling: Task 9 split into 9a (merge main, early) and 9b (docs + release branch, last) — cost if wrong: none.
 - Ruling: prior-art slices copied to ref/prior-art/ (from 5b4d91a) so 4a's implementer has the verbatim renders — cost if wrong: 270 KB of markdown in the workspace.
+- Task 5a: fix round 1/5 (1 addressed per implementer, awaiting re-review — every-pending-job test; commits 9b44133..18fad58); 497/497 unit, 9/9 integration; named mutation now CAUGHT. Scoped re-review dispatched (sonnet).

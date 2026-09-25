@@ -264,3 +264,127 @@ suite above.
 
 Not pushed (controller pushes, per constraint 1). No branch switches, no
 rebase/reset.
+
+---
+
+## Fix round 1
+
+Base for this round: current HEAD at the time (`25b6b28`, after the
+controller's `.superpowers/`-only bookkeeping commits `a14e475`, `650d7a5`,
+`25b6b28`) — no rebase, no reset; those commits were already present locally.
+
+### Issue
+
+Reviewer: ruling 2 ("`refreshTrust` for EVERY pending job") was untested. The
+only close-hook test schedules a single job, so narrowing the loop at
+`src/extension.ts` (`for (const job of scheduler.jobs) { refreshTrust(job); }`)
+to `refreshTrust(scheduler.current)` passes the whole suite unnoticed
+(reviewer's mutation: SURVIVED, 87/87).
+
+### What changed
+
+Added one test to `test/extension.test.ts`: **"closing the trust terminal
+re-reads trust for every pending job, not just the current one"**.
+
+The status-bar tooltip only ever renders `scheduler.current` (the soonest
+job), so a test built around the tooltip structurally cannot distinguish
+"refreshed every job" from "refreshed only the current one" unless the
+non-current job is later promoted to current — and promoting it via any
+scheduler event (`cancel`, a new `schedule`, a tick) itself fires
+`onChange`, whose handler already calls `refreshTrust` on the new current
+job, which would silently repair the very state the mutation broke and mask
+the bug again.
+
+Instead the new test reads the second job's `folderTrusted` directly back
+out of the scheduler's persisted state (the `Map` the fake `globalState`
+wraps, captured via `contextOver(store)`). `ResumeScheduler.persist()` writes
+`this.jobs` — an array of the *same* `PendingJob` object references held in
+its internal `Map` — into that store, and `refreshTrust` mutates
+`job.folderTrusted` in place on those same references. So reading
+`store.get('claudeLimitBuster.pending')` after the close event reflects
+exactly what the close hook did to a job that was never current and never
+rendered anywhere, with no dependency on any later promotion or on-tick
+refresh.
+
+Test shape:
+1. Two pending jobs, `SESSION` (sooner deadline, stays `scheduler.current`
+   for the whole test, cwd = `REAL_CWD`) and `SESSION_B` (later deadline,
+   never current, cwd = a fresh `fs.mkdtempSync` directory) — both start
+   untrusted.
+2. Open the trust terminal for `SESSION_B`'s folder specifically
+   (`trustCommand()!(dirB)`), then mark only `dirB` as trusted
+   (`trustedCwds = new Set([dirB])`) — `SESSION`'s folder is deliberately
+   left untrusted throughout, so nothing about `SESSION`'s own tooltip can
+   make the test pass by accident.
+3. Fire the close event and assert `SESSION_B`'s persisted `folderTrusted`
+   flipped to `true`.
+
+### Covering tests / commands / output
+
+**Compile + the new test, in isolation (confirms it's green against the
+correct implementation):**
+```
+$ npm run compile; echo exit=$?
+exit=0
+$ node --test out/test/extension.test.js | grep -A3 "every pending job"
+ok 43 - closing the trust terminal re-reads trust for every pending job, not just the current one
+  ---
+  duration_ms: 3.632192
+```
+
+**Mutation re-run, the reviewer's exact mutation:**
+```json
+{
+  "file": "src/extension.ts",
+  "name": "close hook narrowed to refreshTrust(scheduler.current) only",
+  "old": "      for (const job of scheduler.jobs) {\n        refreshTrust(job);\n      }",
+  "new": "      refreshTrust(scheduler.current);",
+  "tests": ["out/test/extension.test.js"]
+}
+```
+```
+$ python3 .superpowers/sdd/2026-09-25-limit-break-1.0-cloud/mutate.py <spec>
+CAUGHT  close hook narrowed to refreshTrust(scheduler.current) only
+    red: closing the trust terminal re-reads trust for every pending job, not just the current one
+```
+Confirmed: **CAUGHT**, with the new test as the named red test — matches the
+reviewer's ask exactly. `src/extension.ts` verified byte-restored afterward
+(`git diff --stat` showed only `test/extension.test.ts`).
+
+**Full unit suite:**
+```
+$ npm test > /tmp/t5a.log 2>&1; echo "exit=$?"
+exit=0
+# tests 497
+# pass 497
+# fail 0
+```
+(497 = 496 from the initial round + this one new test.)
+
+**Integration suite (now runnable in this container):**
+```
+$ xvfb-run -a npm run test:integration > /tmp/it5a.log 2>&1; echo "exit=$?"
+...
+  claude-limit-buster activation
+    ✔ the extension is present and activates
+    ✔ every command the manifest declares is registered
+    ✔ resuming with nothing pending opens no terminal
+    ✔ cancelling with nothing pending is harmless
+    ✔ the declared settings reach the configuration API with their declared defaults
+    ✔ the execution-adjacent settings are machine-scoped in the running instance
+  resume terminal environment
+    ✔ a variable set to null in TerminalOptions.env is removed from the child process (919ms)
+  9 passing (2s)
+exit=0
+```
+The `Failed to fetch` / SSL-handshake lines earlier in that log are VS Code's
+own background marketplace/update calls, as noted — not related to this
+extension's code.
+
+### Commit
+
+- `18fad58` — test: cover refreshTrust for every pending job, not just current (fix round 1)
+
+Nothing outside `test/extension.test.ts` and this report file was touched
+this round; `.superpowers/` was left alone apart from this report, per the
+coordinator's note.
