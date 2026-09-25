@@ -50,6 +50,8 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
 
 ## Integration pending
 (integration tests touched by this lane's tasks, to run before merge)
+- T6: test/integration/extension.itest.ts "the declared settings reach the configuration API with their declared defaults" (resumePrompt default)
 
 ## Log
 - Task 6: dispatched (sonnet) at base 3fef8ce
+- Task 6: implementer DONE (385beb7); 483/483 unit. Review dispatched (sonnet).
