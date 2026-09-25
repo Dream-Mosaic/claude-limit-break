@@ -171,3 +171,23 @@ Task 8: complete (commits 5392b80..32a1515, review clean)
 - Task 9b: fix round 1/5 (2 claimed addressed + 62d857f added from a sweep; commit cb13d7e); 610/610 unit, check-vsix green. Scoped re-review dispatched (sonnet).
 - Task 9b re-review 1: all ADDRESSED; each new CHANGELOG bullet verified against its commit.
 Task 9b (docs): complete (commits 4f87eb9..cb13d7e, 1 fix round; 2 minors deferred). The version bump + release/1.0.0 follow the final review.
+
+## Final whole-branch review (opus, 28b0eec..8b31dbd)
+Verdict: ready after Critical/Important fixes. Hard constraints hold across the diff; T8 rename complete; tests isolated from the real ~/.claude.
+- Critical 1 (T2×T4a): decideOnFire ignores job.reason, so an OVERLOAD in an idle terminal with native auto-continue on (the default) is silently dropped; native auto-continue covers usage limits only. Regression from 0.1.2.
+  - Ruling: native auto-continue counts only for reason 'limit'; overload jobs with an idle terminal holder take the remember + "Resume in Terminal Anyway" branch — cost if wrong: none.
+- Important 2 (T2×T10): the claim is released when the holder policy declines, so every window re-offers "Resume in Terminal Anyway"; two clicks = two writers.
+  - Ruling: keep the claim when the decision remembers/notifies or drops the job for a busy/waiting holder; manual clicks already ignore claims — cost if wrong: a stale claim suppresses a later automatic fire of the same key for ≤1h (manual still works).
+- Important 3 (T10×T4a): overload claim key (10-min bucket) collides with this window's own earlier claim → a real repeat overload is dropped, logged as "another window".
+  - Ruling: key overload claims on the detection entry's own identity (its timestamp, identical in every window, distinct per event) instead of the bucket; write a window identity (vscode.env.sessionId) into the claim and log a self-collision as such — cost if wrong: none.
+- Important 4 (pre-existing, widens a deferred minor): unflagged assistant prose ("fetch failed", "timed out", "Internal server error", "API Error: 529" mid-sentence) arms an overload retry.
+  - Ruling: on the UNFLAGGED path every overload rule requires a line starting with "API Error" (widen LINE_HEAD_RE to `api error[:(]`); flagged entries keep full recall — cost if wrong: an unflagged genuine overload without an API Error head is missed (Claude Code flags its own errors).
+- Important 5 (T8): nothing warns when Claude Limit Buster 0.1.x is still installed → two extensions, the old one without claims/holder checks.
+  - Ruling: on activation, if the old extension id is present, warn once per activation with an "Uninstall Claude Limit Buster" button (workbench.extensions.uninstallExtension) — cost if wrong: one popup.
+- Important 6 (T2): "auto-continue on when the key is absent" is unverified; if the account lacks the feature, an idle-terminal limit is silently dropped.
+  - Ruling: after standing down for native auto-continue, arm a check (reuse the stall-watch grace) at the reset; if the transcript has not grown, fall through to remember + a notice ("Claude Code did not continue this session on its own") — cost if wrong: one late notice.
+- Important 7 (pre-existing): Cancel cancels in one window only.
+  - Ruling: on Cancel, write a claim for each cancelled job's key so other windows drop it when it fires. The shared globalState job lists across windows (pre-existing) → NEXT.md — cost if wrong: a cancelled resume fires in another window (as today).
+- Minors folded into the fix wave (cheap, user-facing): CHANGELOG in-flight-retry wording is wrong + garbled Fixed sentence; README tooltip link label ("Trust this folder"); peer names in buildResumePrompt quoted, newline-stripped, length-capped; gave-up tooltip footer lists every way to clear.
+- Minors → NEXT.md (ruled OK to ship): reason-specific default prompt; flagged in-flight 429 with quotaLimits (open question); execFileSync blocking up to 10s; budget-dismiss gave-up while counting; Resume Now "nothing pending" vs gave-up; UUID-named subagent test fixtures; real-timer tests; duplicated which/readShim; plus every deferred item the triage marked OK TO SHIP.
+- Deferred triage: all OK TO SHIP except "api-error-status fires on mid-sentence prose" → covered by Important 4.
