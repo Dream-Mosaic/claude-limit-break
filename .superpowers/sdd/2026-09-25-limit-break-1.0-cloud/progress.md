@@ -191,3 +191,4 @@ Verdict: ready after Critical/Important fixes. Hard constraints hold across the 
 - Minors folded into the fix wave (cheap, user-facing): CHANGELOG in-flight-retry wording is wrong + garbled Fixed sentence; README tooltip link label ("Trust this folder"); peer names in buildResumePrompt quoted, newline-stripped, length-capped; gave-up tooltip footer lists every way to clear.
 - Minors → NEXT.md (ruled OK to ship): reason-specific default prompt; flagged in-flight 429 with quotaLimits (open question); execFileSync blocking up to 10s; budget-dismiss gave-up while counting; Resume Now "nothing pending" vs gave-up; UUID-named subagent test fixtures; real-timer tests; duplicated which/readShim; plus every deferred item the triage marked OK TO SHIP.
 - Deferred triage: all OK TO SHIP except "api-error-status fires on mid-sentence prose" → covered by Important 4.
+- Final fix wave: dispatched (opus) at base 61b0103 with final-fix-brief.md (C1, I2-I7, 4 minors, docs)
