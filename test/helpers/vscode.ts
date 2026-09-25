@@ -35,6 +35,23 @@ export interface FakeTerminal {
 }
 
 /**
+ * A single, module-level emitter for `vscode.window.onDidCloseTerminal`.
+ *
+ * Unlike FakeWatcher's emitters (recreated per activate() call, since a real
+ * TranscriptWatcher is per-window), `window.onDidCloseTerminal` is part of
+ * the shared fake `vscode` API surface itself - one global, exactly like real
+ * VS Code. A test's `finally { teardown(ctx) }` disposes the extension's own
+ * subscription (removing its listener), so this can be reused across tests
+ * without a reset.
+ */
+const closeTerminalEmitter = new FakeEventEmitter<FakeTerminal>();
+
+/** Fire a terminal-closed event, as if the user closed `terminal`'s tab. */
+export function fireTerminalClose(terminal: FakeTerminal): void {
+  closeTerminalEmitter.fire(terminal);
+}
+
+/**
  * One recorded information message. `answer` settles the promise the extension
  * is awaiting, so a test can leave an offer open - firing other events while it
  * hangs - and accept it later, which is the only way to reproduce a second
@@ -209,6 +226,7 @@ const fakeVscode = {
       vscodeFake.statusBarItems.push(item);
       return item;
     },
+    onDidCloseTerminal: closeTerminalEmitter.event,
     createTerminal: (options: unknown): FakeTerminal => {
       const terminal: FakeTerminal = {
         options,

@@ -46,8 +46,20 @@
       {
         "command": "claudeLimitBuster.statusBarMenu",
         "title": "Claude Limit Buster: Status Bar Menu"
+      },
+      {
+        "command": "claudeLimitBuster.openClaudeToTrust",
+        "title": "Claude Limit Buster: Open Claude to Trust"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "claudeLimitBuster.openClaudeToTrust",
+          "when": "false"
+        }
+      ]
+    },
     "configuration": {
       "title": "Claude Limit Buster",
       "properties": {

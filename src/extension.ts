@@ -11,6 +11,7 @@ import { randomJitterMs } from './randomDelay';
 import { playAlertSound } from './sound';
 import {
   buildTerminalOptions,
+  buildTrustTerminalOptions,
   buildResumeArgs,
   buildHeadlessArgs,
   resolveClaudeLauncher,
@@ -49,6 +50,9 @@ import { execFileSync } from 'node:child_process';
 import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
 
 const NS = 'claudeLimitBuster';
+
+/** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
+const TRUST_BUTTON = 'Open Claude to Trust';
 
 /**
  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
@@ -228,9 +232,20 @@ export function activate(context: vscode.ExtensionContext): void {
         folderTrusted === false
           ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
           : '';
-      void vscode.window.showInformationMessage(
-        `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`,
-      );
+      const message = `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
+      if (folderTrusted === false) {
+        // A one-click way to answer the trust dialog ahead of the resume,
+        // right when the user is at the keyboard to see this notice (Task
+        // 5a). The button only ever opens a terminal - see
+        // openClaudeToTrust below - never answers the dialog itself (#2).
+        void Promise.resolve(vscode.window.showInformationMessage(message, TRUST_BUTTON)).then((choice) => {
+          if (choice === TRUST_BUTTON) {
+            void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
+          }
+        });
+      } else {
+        void vscode.window.showInformationMessage(message);
+      }
     }
   };
 
@@ -741,6 +756,14 @@ export function activate(context: vscode.ExtensionContext): void {
     .then(() => runUpdateCheck())
     .catch(() => {});
 
+  /**
+   * Terminals opened by openClaudeToTrust, tracked so the close hook below
+   * (ruling 2) only re-checks trust for terminals THIS command opened - a
+   * resume terminal, or any other terminal in the window, closing must not
+   * trigger it.
+   */
+  const trustTerminals = new Set<vscode.Terminal>();
+
   context.subscriptions.push(
     {
       dispose: () => {
@@ -1078,6 +1101,63 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await vscode.commands.executeCommand(picked.command);
+    }),
+    /**
+     * Trust hotlink (Task 5a). Opens a terminal running plain `claude` (no
+     * `--resume`, no prompt) in `cwd`, so the user answers Claude's own trust
+     * dialog themselves - the extension never types into this terminal and
+     * never writes `~/.claude.json` (constraint 2). Linked from the
+     * untrusted-folder notice above; the tooltip link is Task 5b.
+     */
+    vscode.commands.registerCommand(`${NS}.openClaudeToTrust`, (cwd?: unknown) => {
+      // Only ever invoked with a cwd today (the notice button, and Task 5b's
+      // tooltip link); a bare Command Palette invocation - which is why it is
+      // hidden there (`"when": "false"` in package.json) - or a stale
+      // keybinding has no folder to open, so this logs and stops rather than
+      // guessing one.
+      if (typeof cwd !== 'string') {
+        log.warn('claudeLimitBuster.openClaudeToTrust was invoked with no folder; ignoring.');
+        return;
+      }
+      const s = settings();
+      const launcher = findLauncher(s.claudeCommand);
+      if (!launcher) {
+        // Same failure, and the same handling, as the resume launch below.
+        log.error(`Cannot open a trust terminal for ${cwd}: no claude executable found.`);
+        void vscode.window.showErrorMessage(
+          'Claude Limit Buster: could not find the claude executable. Set claudeLimitBuster.claudeCommand.',
+        );
+        return;
+      }
+      // Same reasoning as the resume launch: open from whichever spelling
+      // the CLI already has on record, so a folder trusted from a terminal
+      // is recognised even when VS Code reports a different-cased drive
+      // letter for the same directory (trust.ts).
+      const onRecord = trustedSpelling(
+        cwd,
+        readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
+        process.platform,
+      );
+      const opts = buildTrustTerminalOptions(onRecord ?? cwd, launcher);
+      const terminal = vscode.window.createTerminal(opts);
+      trustTerminals.add(terminal);
+      terminal.show();
+      log.info(`Opened a terminal at ${opts.cwd} to trust it with the Claude CLI.`);
+    }),
+    vscode.window.onDidCloseTerminal((terminal) => {
+      if (!trustTerminals.delete(terminal)) {
+        return;
+      }
+      // Ruling 2: re-check EVERY pending job, not just the one the terminal
+      // was opened for - refreshTrust is mtime-cached per session, so this is
+      // cheap, and it is what catches a job whose cwd is a different spelling
+      // of the same folder the user just trusted. Then force the same render
+      // call scheduler.onChange uses (above), so the tooltip's marker clears
+      // now instead of waiting for the next countdown tick.
+      for (const job of scheduler.jobs) {
+        refreshTrust(job);
+      }
+      status.update(scheduler.current, scheduler.jobs.length, settings().statusBar);
     }),
   );
 
