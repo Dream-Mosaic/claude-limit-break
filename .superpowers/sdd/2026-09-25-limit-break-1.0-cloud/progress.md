@@ -130,3 +130,4 @@ Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3
   - Ruling (concern 2): a dismissed budget refusal records gave-up with no second popup — the refusal was the notice — cost if wrong: none.
   - Ruling (concern 3): `statusBar: "pending"` showing gave-up is right (not idle); the setting's description is updated in Task 9b's README/settings pass — cost if wrong: one description line.
   - Carried to 5b (concern 4): a session can be both pending and gave-up — one line per session in the combined list; folder names must be escaped.
+- Task 4b: pre-review change DONE (06dd962): manual flag; 569/569 unit, 9/9 integration; 10/10 mutations caught. Review dispatched (opus).

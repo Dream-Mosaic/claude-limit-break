@@ -210,3 +210,51 @@ they were for: the job is still there, and the retry really ran and failed the s
    per-line text is `describeGaveUp` in gaveUp.ts.
 7. Minor: the launcher-missing error in `openClaudeToTrust` (Task 5a) is unchanged and not recorded. It is not a
    resume failure.
+
+## Pre-review change: manual clicks are always answered (controller ruling on concern 1)
+
+Commit: 06dd962 ("fix(gaveUp): a failure answering a user's click is always notified"), on top of 762dbb6.
+
+- `GaveUpState.record(entry, manual = false)`: returns true when `manual` even if (sessionId, cause) was already
+  warned; a manual failure still marks the pair warned, so an automatic repeat after it stays quiet.
+- `giveUp(job, cause, show, manual = false)` passes it through; `resume(job, manual = false)` passes it to the
+  launcher and cwd sites. `true` at: the off-autoResume "Resume Now" notification button, "Resume in Terminal
+  Anyway", and both resumeNow command branches (counting-down, ready). scheduler.onFire's automatic
+  `resume(resumeJob)` stays automatic.
+- Stall does not take the flag: once a resume launches its job is gone, so a second stall needs a new detection,
+  which already resets warn-once. No observable difference, so no untestable flag.
+- Task 10: only the `resume(...)` argument lists on the lines after each `claimResume` changed
+  (`if (!resume(job, true))` etc.); every `claimResume` / `releaseClaim` call is byte-identical, same order, same
+  conditions. `git diff | grep -i claim` over the change shows only doc-comment lines.
+
+Tests:
+- The 4 existing tests are back to `errors.length === 2` on the manual retry (plus the log count); the launcher test
+  expects 2 notices for 2 clicks.
+- New pure tests: "an explicit user action always warns, even for a cause already warned about"; "a manual failure
+  counts as warned, so an automatic repeat after it stays quiet".
+- New extension tests: "gave up: an AUTOMATIC repeat of a failure already notified stays silent, but is logged and
+  recorded" (manual Resume Now on a job counting down fails, then its own scheduled fire fails the same way: 1
+  notice, 2 log lines, still gave-up); "the Resume Now notification button is answered even when the same failure
+  was already notified"; "\"Resume in Terminal Anyway\" is answered even when ...".
+- RED: tsc TS2554 on `record(..., true)`; 6 failures (the 4 restored tests, the launcher test, the pure manual
+  test). The automatic-repeat test and the two button tests passed before the change as expected (old behaviour
+  silenced every repeat / the first-ever failure notifies anyway); their bite is shown by M10, M6, M7 below.
+
+Mutations (all CAUGHT):
+
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | pure: `&& !manual` dropped | explicit user action always warns |
+| M2 | pure: manual does not mark warned | manual failure counts as warned ... automatic repeat quiet |
+| M3 | giveUp does not pass manual | 7 tests |
+| M4 | launcher site drops manual | missing claude executable |
+| M5 | cwd site drops manual | 6 tests |
+| M6 | notification button resume not manual | the Resume Now notification button is answered ... |
+| M7 | Terminal Anyway resume not manual | "Resume in Terminal Anyway" is answered ... |
+| M8 | resumeNow counting-down branch not manual | resumeNow does not cancel the counting-down job ... |
+| M9 | resumeNow ready branch not manual | 4 tests |
+| M10 | automatic onFire resume treated as manual | AUTOMATIC repeat ... stays silent |
+
+Results: unit exit=0, 569/569; integration exit=0, 9 passing.
+
+Concern 1 above is resolved by this change; concerns 2-4 stand as accepted.
