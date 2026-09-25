@@ -1310,6 +1310,45 @@ test('cancelling clears the waiting jobs from storage too', async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Task 5b: readyJobs reaching the tooltip. rememberReady/forgetReady must
+// re-render on every change, not rely on some other event to happen to
+// follow them - otherwise the tooltip is stale until the next unrelated
+// render.
+// ---------------------------------------------------------------------------
+
+test('a session becoming ready is reflected in the tooltip immediately, without any other event', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const tooltip = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip, /ready/i, `the ready session must already be in the tooltip: ${tooltip}`);
+    assert.ok(tooltip.includes(SESSION.slice(0, 8)), tooltip);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a session resumed by hand from the ready list drops off the tooltip immediately', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const tooltipBefore = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.ok(tooltipBefore.includes(SESSION.slice(0, 8)), 'setup: the ready session is listed');
+    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
+    const tooltipAfter = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.ok(!tooltipAfter.includes(SESSION.slice(0, 8)), `must drop off once resumed: ${tooltipAfter}`);
+  } finally {
+    teardown(ctx);
+  }
+});
+
 test('the status bar menu offers the three commands and runs the one picked', async () => {
   // Issue #3: the click used to be a bare destructive action.
   resetVscodeFake();
@@ -1611,6 +1650,100 @@ test('closing the trust terminal re-reads trust for every pending job, not just 
       jobB()?.folderTrusted,
       true,
       'the non-current job must have its trust re-checked too, not just scheduler.current',
+    );
+  } finally {
+    trustedCwds = 'all';
+    fs.rmSync(dirB, { recursive: true, force: true });
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review 1, Important 2. Now that EVERY listed session shows the untrusted
+// marker (Task 5b), a marker that never re-checks for a ready job - or for
+// a counting-down job that was never `scheduler.current` - stays wrong
+// forever, including across a reload (a ready job's folderTrusted is
+// persisted).
+// ---------------------------------------------------------------------------
+
+test('closing the trust terminal re-reads trust for a ready job too, and persists the flip', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig(); // autoResume off, so the fired job becomes "ready"
+  trustedCwds = new Set(); // nothing trusted yet
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000)); // already past -> fires on the first tick
+    await oneTick();
+    const readyStored = () =>
+      (store.get(READY_KEY) as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+    assert.equal(readyStored()[0]?.folderTrusted, false, 'setup: the ready job must start out untrusted');
+    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip(), /not trusted/i, 'setup: the tooltip warns about the ready session too');
+
+    // The fake globalState never serialises - a stored array's ELEMENTS are
+    // the exact same live objects refreshTrust mutates in place, so they
+    // would read as trusted here even if the flip were never written back.
+    // The array reference itself is the only thing that tells the two apart:
+    // persistReady() always stores a fresh `[...readyJobs]` array, so a
+    // second persistReady() call after the flip is the only way this
+    // reference can change.
+    const storedBeforeClose = store.get(READY_KEY);
+
+    await trustCommand()!(REAL_CWD);
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the trust terminal must have opened');
+    trustedCwds = 'all';
+    fireTerminalClose(vscodeFake.terminals[0]!);
+    await flush();
+
+    assert.ok(!/not trusted/i.test(tooltip()), `the ready session's marker must clear too: ${tooltip()}`);
+    assert.equal(
+      readyStored()[0]?.folderTrusted,
+      true,
+      'the flip must be written back to the persisted ready list, or a reload shows "not trusted" again',
+    );
+    assert.notEqual(
+      store.get(READY_KEY),
+      storedBeforeClose,
+      'the ready list must actually be re-persisted (a new array written), not just mutated in memory',
+    );
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('a non-soonest counting job trusted externally clears on the next scheduler change, not just the soonest', async () => {
+  // "Externally" here means without ever using this extension's own trust
+  // hotlink or closing a terminal it opened - e.g. trusted from an ordinary
+  // terminal, or the CLI's own trust prompt answered directly. Nothing here
+  // fires onDidCloseTerminal at all: only an ordinary scheduler tick, which
+  // fires scheduler.onChange with `current` still SESSION, never SESSION_B.
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  trustedCwds = new Set(); // nothing trusted yet
+  const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-nonsoonest-'));
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000), REAL_CWD); // sooner: stays scheduler.current
+    FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_200_000), dirB); // later: never current
+    await flush();
+
+    const pendingJobs = () =>
+      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
+    const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
+    assert.equal(jobB()?.folderTrusted, false, 'setup: the non-soonest job starts out untrusted');
+
+    trustedCwds = new Set([dirB]);
+    await oneTick(); // an ordinary countdown tick - no detection, no terminal close
+
+    assert.equal(
+      jobB()?.folderTrusted,
+      true,
+      'an ordinary scheduler.onChange must re-check every job, not just scheduler.current',
     );
   } finally {
     trustedCwds = 'all';
@@ -2858,6 +2991,7 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
 // ---------------------------------------------------------------------------
 
 const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
+const { escapeMarkdown } = require('../src/statusBar') as typeof import('../src/statusBar');
 
 const bar = () => vscodeFake.statusBarItems[0];
 const barTooltip = () => (bar()?.tooltip as { value: string } | undefined)?.value ?? '';
@@ -2888,7 +3022,11 @@ test('gave up: a missing folder shows the gave-up icon and names the session, fo
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have been refused');
     assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
     assert.ok(barTooltip().includes(SESSION.slice(0, 8)), barTooltip());
-    assert.ok(barTooltip().includes(MISSING_CWD), barTooltip());
+    // Task 5b: the unified session line shows the folder BASENAME, escaped
+    // (ruling 1/2) - not the full path. MISSING_CWD's own basename here
+    // happens to be SESSION itself (see its definition), so it is escaped
+    // too (a UUID is full of hyphens, one of the escaped characters).
+    assert.ok(barTooltip().includes(escapeMarkdown(path.basename(MISSING_CWD))), barTooltip());
     assert.match(barTooltip(), /no longer exists/);
     assert.equal(vscodeFake.errors.length, 1, 'warned once');
   } finally {

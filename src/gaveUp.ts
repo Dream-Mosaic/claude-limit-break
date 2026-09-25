@@ -137,8 +137,14 @@ export class GaveUpState {
   }
 }
 
-/** Short, per-cause reason for a tooltip line. Each cause reads differently. */
-const REASON: Record<GaveUpCause, string> = {
+/**
+ * Short, per-cause reason for a tooltip line. Each cause reads differently.
+ * Exported for Task 5b's unified session-list tooltip (statusBar.ts), which
+ * annotates a pending/ready line with just the reason - describeGaveUp below
+ * builds a whole standalone line, which is redundant once the id and folder
+ * are already on that line from the pending/ready side.
+ */
+export const REASON: Record<GaveUpCause, string> = {
   stall: 'resume stalled: its transcript did not grow after launch',
   launcher: 'could not find the claude executable',
   cwd: 'its folder no longer exists',
