@@ -24,6 +24,10 @@ interface OverloadRule {
     id: string;
     re: RegExp;
     statusGroup?: number;
+    // Require `re` to match on a physical line of the RAW text whose own
+    // visible content genuinely begins with "API Error:" - not merely
+    // contains it somewhere. See matchesApiErrorLine below.
+    lineAnchored?: boolean;
 }
 
 /**
@@ -87,6 +91,40 @@ const TRANSIENT_429_RE = /\bapi error:\s*server is temporarily limiting requests
 const STREAM_INTERRUPTED_RE =
     /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
 
+/**
+ * The head every genuine "API Error:" banner line starts with - optionally
+ * behind the single message glyph Claude Code's own renders show ("⏺ API
+ * Error: ..." / "● API Error: ..."), with nothing but leading whitespace in
+ * front of it.
+ */
+const LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api error:/i;
+
+/**
+ * Whether `innerRe` matches a physical line of `rawText` whose own visible
+ * content genuinely BEGINS with "API Error:" - not one where the phrase
+ * merely turns up mid-sentence in a longer line of prose, or inside a quoted
+ * shell argument (Task 4a fix round 1, review finding #2: model notes like
+ * "Added a rule so API Error: Your computer went to sleep mid-response. …"
+ * and a Bash tool_use argument `echo "API Error: ..."` both fired the
+ * transient-429/stream-interrupted rules on the untrusted path before this).
+ *
+ * Checked per physical line of the RAW text, before normalize() collapses
+ * every real newline into a single space and destroys the position a
+ * line-start anchor would need to see - the same reason looksLikeQuotedNotice
+ * (limitParser.ts) is checked this way rather than against the normalized
+ * whole-text string. `innerRe` (which still carries its own "api error:"
+ * requirement) is then tested against that one line's own normalized text, so
+ * it keeps matching through normalize()'s usual quote/dash/whitespace
+ * cleanup.
+ *
+ * Only used for the two rules the brief calls "NEW" (transient-429,
+ * stream-interrupted); the older api-error-status rule is left unanchored,
+ * unchanged, per the controller's ruling (deferred, not this round).
+ */
+function matchesApiErrorLine(rawText: string, innerRe: RegExp): boolean {
+    return rawText.split(/\r?\n/).some((line) => LINE_HEAD_RE.test(line) && innerRe.test(normalize(line)));
+}
+
 export function looksLikeOverloadMessage(text: string): boolean {
     const t = normalize(text);
     // The transient-429 render names "rate limit" vocabulary in its own text
@@ -136,11 +174,13 @@ const RULES: OverloadRule[] = [
         // "Server is temporarily limiting requests (not your usage limit)"
         id: 'transient-429',
         re: TRANSIENT_429_RE,
+        lineAnchored: true,
     },
     {
         // "Your computer went to sleep mid-response", dropped connection, stalled stream.
         id: 'stream-interrupted',
         re: STREAM_INTERRUPTED_RE,
+        lineAnchored: true,
     },
 ];
 
@@ -192,6 +232,12 @@ export function detectOverload(rawText: string): OverloadDetection | undefined {
         return undefined;
     }
     for (const rule of RULES) {
+        if (rule.lineAnchored) {
+            if (!matchesApiErrorLine(rawText, rule.re)) {
+                continue;
+            }
+            return { rule: rule.id, status: sniffStatus(text), text };
+        }
         const m = rule.re.exec(text);
         if (!m) {
             continue;

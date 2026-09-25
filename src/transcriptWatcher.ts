@@ -440,16 +440,30 @@ export class TranscriptWatcher {
         // subagent that genuinely hits the limit still writes Claude Code's own
         // rate-limit marker into its own file, and that must still arm (fix round
         // 1 - the first version of this guard dropped a real limit hit whenever it
-        // landed in a subagents/ file, flagged or not). Nothing else here is
-        // affected - turn-end and overload detection below still run over
-        // subagent files exactly as before.
+        // landed in a subagents/ file, flagged or not). Turn-end detection below
+        // is unaffected by this gate either way. Overload detection below now has
+        // its own separate subagent-file veto too (Task 4a fix round 1), applied
+        // per candidate rather than gating entry to the loop, so it stays exempt
+        // for flagged entries the same way this gate does.
         if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
             // on the flagged entry itself - immune to every way the text can be
             // misread (zone, DST, calendar rollover) - so it wins over the text
             // outright when present. Only trusted on a flagged entry: the field
             // turning up on an ordinary turn is not itself a limit event.
-            if (flagged) {
+            // The transient-429 render disclaims being a usage limit in its own
+            // text (ruling 1), but Claude Code writes quotaLimits on every
+            // rate_limit entry regardless of which kind of rate limit it is
+            // (fix round 1, review finding #1) - so this field alone is not
+            // enough to tell a genuine limit reset apart from a transient-429
+            // entry that merely happens to carry it. Checked by asking the
+            // overload parser itself (not a duplicated regex) whether any of
+            // the entry's own candidate text is that exact render; if so, the
+            // quotaLimits branch is skipped outright; regardless of its
+            // status, so the entry falls through to the ordinary text/overload
+            // path below and is routed to overload instead.
+            const isTransientRateLimit = flagged && candidates.some((c) => detectOverload(c.text)?.rule === 'transient-429');
+            if (flagged && !isTransientRateLimit) {
                 const quotaLimits = entry.quotaLimits;
                 const resetsAt =
                     quotaLimits && typeof quotaLimits === 'object'
@@ -510,7 +524,16 @@ export class TranscriptWatcher {
                 // delivering now. Mirrors the same two guards the limit loop above
                 // already has; flagged entries stay exempt, same as every other veto
                 // in this module.
-                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text))) {
+                //
+                // Fix round 1 (review finding #3): an unflagged note in a
+                // subagents/ file must not arm an overload retry either, for the
+                // same reason the limit loop above skips subagent files - a
+                // subagent that genuinely hits an overload still writes Claude
+                // Code's own API-error marker (flagged), which stays exempt from
+                // this veto exactly like every other one. Applies to every
+                // overload rule here, old and new, since it is checked before
+                // detectOverload is ever called on the candidate.
+                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
                     continue;
                 }
                 const overload = detectOverload(candidate.text);

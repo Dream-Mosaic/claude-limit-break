@@ -151,3 +151,69 @@ test('the exact stream-interruption wording without the API Error: head does not
     undefined,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Task 4a fix round 1 (review finding #2, Important): the transient-429 and
+// stream-interrupted RULES entries were not anchored to a line start, so
+// "API Error:" turning up mid-sentence in model prose - or inside a quoted
+// shell argument - fired both on the untrusted path. Anchored per physical
+// line of the raw text (matchesApiErrorLine), the same technique
+// looksLikeQuotedNotice (limitParser.ts) already uses, since normalize()
+// collapses every real newline before the RULES loop ever sees the text.
+// Sources: prior-art/1-autoretry-detection.md:82 ("NOT just 'API Error
+// nearby'... these are ordinary-English causes... that get quoted in prose
+// easily"); 5-history-issues.md:55, :174.
+// ---------------------------------------------------------------------------
+
+test('mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)', () => {
+  // Verbatim from the review finding.
+  assert.equal(
+    detectOverload(
+      'Added a rule so API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+    ),
+    undefined,
+  );
+});
+
+test('mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)', () => {
+  assert.equal(
+    detectOverload(
+      'When Claude Code prints API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited we should back off.',
+    ),
+    undefined,
+  );
+});
+
+test('a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)', () => {
+  // The Bash tool_use `command` shape: a shell string literal, not a banner
+  // line of its own.
+  assert.equal(detectOverload('echo "API Error: Your computer went to sleep mid-response."'), undefined);
+});
+
+test('the verbatim renders still fire at the true start of the string', () => {
+  assert.equal(detectOverload(TRANSIENT_429)?.rule, 'transient-429');
+  assert.equal(
+    detectOverload('API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
+      ?.rule,
+    'stream-interrupted',
+  );
+});
+
+test('the verbatim renders still fire on their own physical line, after a real newline', () => {
+  const preceded = (banner: string) => `Some preceding context.\n${banner}`;
+  assert.equal(detectOverload(preceded(TRANSIENT_429))?.rule, 'transient-429');
+  assert.equal(
+    detectOverload(
+      preceded('API Error: Your computer went to sleep mid-response. The response above may be incomplete.'),
+    )?.rule,
+    'stream-interrupted',
+  );
+});
+
+test('the message glyph Claude Code prefixes a banner line with is still accepted', () => {
+  assert.equal(
+    detectOverload('⏺ API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
+      ?.rule,
+    'stream-interrupted',
+  );
+});
