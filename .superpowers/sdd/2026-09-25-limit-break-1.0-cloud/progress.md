@@ -50,8 +50,7 @@ Baseline at `ca4f2ae`: 482/482 unit (matches the Task 3 report). Integration: no
 
 ## Integration pending
 (integration tests touched by this lane's tasks, to run before merge)
-- T6: test/integration/extension.itest.ts "the declared settings reach the configuration API with their declared defaults" (resumePrompt default)
-- T5a: test/integration/extension.itest.ts activation + command registration (new contributed command openClaudeToTrust; the test does not enumerate it)
+(none: all green at a14e475)
 
 ## Log
 - Task 6: dispatched (sonnet) at base 3fef8ce
@@ -68,3 +67,4 @@ Task 7: complete (commits 54eea64..58b3c3a, review clean)
 - Ruling (T5a dispatch): invoked without a string cwd (e.g. from the palette) the command logs and does nothing, and it is hidden from the palette — it only makes sense with a folder — cost if wrong: one menu entry.
 - Task 5a: dispatched (sonnet) at base f1cb859
 - Task 5a: implementer DONE (69ad673 d70840d 9b44133); 496/496 unit; 6 mutations (4 caught, 2 did not compile). statusBar.ts untouched. Review dispatched (opus: multi-file extension.ts wiring).
+- Integration now runnable (user allowed *.visualstudio.com, *.microsoft.com, 2026-09-25). At a14e475: 9/9 integration (VS Code 1.139.0 under xvfb), covering T6's defaults test and T5a's command-registration check. "Integration pending" list cleared. Constraint 6 amended: integration gates every task from here.

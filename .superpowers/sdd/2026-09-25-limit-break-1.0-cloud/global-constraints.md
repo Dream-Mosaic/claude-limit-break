@@ -10,10 +10,10 @@ cloud checkout. Rules 2-4 and 9-11 are unchanged.
 4. `claude --resume` must only ever receive a UUID session id.
 5. TDD. Write the failing test first, see it fail for the expected reason, then implement. For every new guard or branch, verify it with a mutation: break the line, confirm that a named test goes red, then restore it. A runner is at `.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/mutate.py`; read its header before use.
 6. Gate on EXIT CODES, never on grep output: `npm test > /tmp/t.log 2>&1; echo "exit=$?"`.
-   Integration tests (`npm run test:integration`) CANNOT run in this container: the network policy blocks
-   update.code.visualstudio.com, so VS Code cannot be downloaded. Do not try. Instead, list in your report
-   every integration test you changed or that could be affected, so the controller can mark them for a run
-   on the user's machine or in CI. Unit tests must be green before you report DONE.
+   Integration: `xvfb-run -a npm run test:integration > /tmp/it.log 2>&1; echo "exit=$?"` (downloads VS Code once into
+   .vscode-test/; the user allowed *.visualstudio.com and *.microsoft.com on 2026-09-25). Both must be green before
+   you report DONE. VS Code's own "Failed to fetch" / SSL handshake lines in that log are its background traffic
+   (gallery, GitHub) and are not test noise.
 7. Line endings: the repository stores `src/*.ts` and `test/*.ts` as LF (`git ls-files --eol`). Keep LF.
    (The CRLF note in the Windows lane's constraints is an artefact of that checkout's autocrlf.)
 8. Commit as you go: one commit per green step, conventional-commit subjects, and end each message with
