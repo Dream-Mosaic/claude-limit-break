@@ -452,6 +452,25 @@ test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () 
   assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
 });
 
+// The new sleep/stream-interruption render must obey the same age rule as
+// every other overload render (Task 4a constraint: "the new overload renders
+// obey it too").
+const sleepLine = (age: number) =>
+  entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    timestamp: new Date(Date.now() - age).toISOString(),
+    cwd: '/projects/example',
+    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
+  });
+
+test('the sleep-interruption render also obeys MAX_OVERLOAD_AGE_MS', () => {
+  const fresh = make().inspectLine(sleepLine(MAX_OVERLOAD_AGE_MS - GRACE_TEST_MARGIN_MS), FILE);
+  assert.ok(fresh.overload, 'a sleep-interruption notice just inside MAX_OVERLOAD_AGE_MS is not yet too old');
+  const stale = make().inspectLine(sleepLine(MAX_OVERLOAD_AGE_MS + GRACE_TEST_MARGIN_MS), FILE);
+  assert.equal(stale.overload, undefined, 'an old sleep-interruption notice must not retry');
+});
+
 // ---------------------------------------------------------------------------
 // Task 3 (synthesis A3): untrusted text that merely LOOKS like a limit
 // banner must not arm a timer. Three real false positives from 2026-09-23:
@@ -606,4 +625,105 @@ test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a tim
   const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
   assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
   assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a: the three new overload-detection rules, wired through inspectLine.
+// ---------------------------------------------------------------------------
+
+test('an in-flight retry does not report overload, even from a flagged entry', () => {
+  // Ruling 2: the in-flight-retry exclusion applies on both paths - Claude
+  // Code is already retrying either way, flagged or not.
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: 'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10' },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('an in-flight retry from an unflagged entry also does not report overload', () => {
+  const line = entry({
+    type: 'assistant',
+    message: { content: 'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10' },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('the transient-429 render (non-flagged, non-user entry) schedules an overload retry, not a limit timer', () => {
+  // Ruling 1: this message must never arm a usage-limit timer, on either
+  // path. Routing it to overload gives it the overload treatment instead.
+  const line = entry({
+    type: 'assistant',
+    message: { content: 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.equal(out.limit, undefined, 'must not arm a usage-limit timer');
+  assert.ok(out.overload, 'must be routed to overload');
+  assert.equal(out.overload.detection.rule, 'transient-429');
+});
+
+test('a sleep-interruption render (non-flagged, non-user entry) schedules an overload retry', () => {
+  const line = entry({
+    type: 'assistant',
+    message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.overload, 'must be routed to overload');
+  assert.equal(out.overload.detection.rule, 'stream-interrupted');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a constraint: the untrusted-text rules from Task 3 (quoted text, tool
+// results) must keep working for the new overload rules too - a quoted or
+// tool-result copy of any of these strings on the untrusted path must not
+// schedule anything. Flagged entries stay exempt, same as every other veto
+// in this module.
+// ---------------------------------------------------------------------------
+
+test('a quoted copy of the sleep-interruption render inside a tool_result block does not schedule an overload retry', () => {
+  const line = entry({
+    type: 'user',
+    error: 'tool execution failed',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_03',
+          content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+        },
+      ],
+    },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('a grep-style quoted copy of the transient-429 render does not schedule an overload retry', () => {
+  const line = entry({
+    type: 'assistant',
+    message: {
+      content: 'docs/notes.md:12:API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited',
+    },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('a flagged entry is exempt from the new tool-result/quoted vetoes on the overload path', () => {
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_04',
+          content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+        },
+      ],
+    },
+  });
+  assert.ok(
+    make().inspectLine(line, FILE).overload,
+    'a flagged entry must still fire even from text inside a tool_result block',
+  );
 });

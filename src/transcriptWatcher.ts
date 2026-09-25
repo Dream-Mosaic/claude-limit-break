@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -500,6 +500,17 @@ export class TranscriptWatcher {
         if (!overloadTooOld && (apiError || entry.type !== 'user')) {
             for (const candidate of candidates) {
                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
+                    continue;
+                }
+                // Task 4a: routing the transient-429 and stream-interruption renders
+                // through the overload path (see overloadParser.ts) reopens exactly
+                // the false-positive class Task 3 closed for limits - a tool's raw
+                // output, or someone else's quotation, is evidence Claude Code fed
+                // back to the model or a person is discussing, not a notice it is
+                // delivering now. Mirrors the same two guards the limit loop above
+                // already has; flagged entries stay exempt, same as every other veto
+                // in this module.
+                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text))) {
                     continue;
                 }
                 const overload = detectOverload(candidate.text);
