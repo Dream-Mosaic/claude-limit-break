@@ -241,10 +241,10 @@ export class TranscriptWatcher {
             if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
                 continue;
             }
-            // Node >=20 sets parentPath on recursive readdir results.
-            const parent = entry.parentPath ??
-                entry.path ??
-                root;
+            // parentPath is set on recursive readdir results from Node 20.12;
+            // the old Dirent.path alias was removed in Node 24, which is what
+            // VS Code 1.138 (Electron 42) runs.
+            const parent = entry.parentPath ?? root;
             out.push(path.join(parent, entry.name));
         }
         return out;

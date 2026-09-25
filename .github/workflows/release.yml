@@ -29,7 +29,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Tags are the record of what has already been released, so the
           # shallow default would make every version look new.
@@ -74,7 +74,7 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Before anything expensive, and before the tag exists. A version whose
       # changes were never written down is the way a changelog rots.
       - name: The version being released needs a changelog section
@@ -86,9 +86,9 @@ jobs:
           fi
           echo "CHANGELOG.md documents $VERSION."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'
+          node-version: '24'
       - run: npm ci
 
       # Re-run the suite here rather than trusting that CI passed on this
