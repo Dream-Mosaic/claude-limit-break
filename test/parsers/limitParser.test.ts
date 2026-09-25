@@ -227,6 +227,44 @@ test('a wall-clock time inside a DST fall-back repeated hour resolves to the LAT
   );
 });
 
+test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the safe, LATER side of the gap (A7)', () => {
+  // America/Chicago springs forward on 2026-03-08: the clock strikes 2:00am
+  // and immediately jumps to 3:00am, so the wall-clock hour 02:00-02:59
+  // never happens at all. "resets 2:30am" names a reading that does not
+  // exist.
+  //
+  // Direct execution against the code as bbff534 left it (the 2-pass
+  // fall-back fix, with no gap-specific handling) showed it resolves this to
+  // 2026-03-08T07:30:00.000Z - which reads back as 01:30 CST, an hour
+  // EARLIER than the literal (nonexistent) 02:30 reading asked for. That
+  // happens because the 2-pass loop's second pass re-resolves the offset at
+  // its own first-pass candidate (already past the transition, so CDT),
+  // overshooting onto the early side of the jump. This is the unsafe
+  // direction the brief warns about: waking early risks resuming into a
+  // session that has not actually reset. So this is a case where the test
+  // shows the (unmodified) code wrong, per the brief's "change the
+  // implementation only if a test shows it is wrong" - the implementation
+  // was changed to detect a resolved instant that does not read back the
+  // requested hour:minute (proof the reading fell in a skipped hour) and
+  // step forward one hour onto the safe side instead: 2026-03-08T08:30:00Z,
+  // which reads 03:30 CDT - the first real instant on the other side of the
+  // jump. Late is safe (a still-live limit is simply re-checked); early is
+  // not (it resumes a session mid-limit).
+  //
+  // `now` is 2026-03-08T06:30:00Z, which is 00:30 local in Chicago (still
+  // CST, before the 08:00Z transition) - so "today" in the zone is Mar 8 and
+  // the dayOffset=0 candidate is the one under test.
+  const now = new Date('2026-03-08T06:30:00Z');
+  const text = "You've hit your session limit · resets 2:30am (America/Chicago)";
+  const hit = detectLimit(text, now, MAXW);
+  assert.ok(hit, 'not detected');
+  assert.equal(
+    hit.resumeAt.toISOString(),
+    '2026-03-08T08:30:00.000Z',
+    'must resolve to the safe, LATER side of the spring-forward gap (03:30 CDT), not the early side (01:30 CST)',
+  );
+});
+
 // Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
 // deleted without any test failing - nothing pinned any one of them
 // individually. Each test below uses the exact input from the issue's table,

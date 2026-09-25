@@ -143,6 +143,21 @@ function renderedWallClock(timeZone: string, at: Date): string | undefined {
  * deliberate: waking an hour late finds a still-live limit safe to
  * re-check; waking an hour early risks resuming into a session that has
  * not actually reset yet.
+ *
+ * A DST spring-forward SKIPS one wall-clock hour outright (Task 4a, A7's
+ * other half): the reading asked for may not exist at all (e.g.
+ * America/Chicago's clock jumps from 01:59:59 straight to 03:00:00, so
+ * "02:30" never happens). The 2-pass loop still converges on some instant,
+ * but it does so by re-resolving the offset a second time at its own
+ * first-pass candidate - which by then sits on the far side of the jump - so
+ * it lands on the offset that took effect *after* the jump and reads back an
+ * hour EARLIER than what was asked for (confirmed by direct execution:
+ * "02:30" on that gap resolves to an instant reading 01:30, not 02:30). That
+ * is the unsafe direction by the same reasoning as the fall-back case above,
+ * so it is detected the same way a missed target is always detected here -
+ * the resolved candidate's own wall-clock reading no longer matches what was
+ * asked for - and corrected by stepping forward one hour onto the safe side
+ * of the gap instead.
  */
 function zonedWallClockToInstant(
     timeZone: string,
@@ -164,6 +179,15 @@ function zonedWallClockToInstant(
     const candidate = new Date(instant);
     const oneHourLater = new Date(instant + HOUR_MS);
     if (renderedWallClock(timeZone, candidate) === renderedWallClock(timeZone, oneHourLater)) {
+        return oneHourLater;
+    }
+    // Spring-forward gap: the resolved instant does not read back the hour
+    // and minute that were actually asked for, proof the requested wall
+    // clock fell inside a skipped hour. Step forward one hour - the only
+    // gap size any zone Claude Code's own banners have been seen in uses -
+    // onto the safe, later side of the jump.
+    const requested = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    if (renderedWallClock(timeZone, candidate)?.slice(-5) !== requested) {
         return oneHourLater;
     }
     return candidate;
