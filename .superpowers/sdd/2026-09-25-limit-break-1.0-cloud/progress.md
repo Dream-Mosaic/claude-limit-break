@@ -139,3 +139,4 @@ Task 4a: complete (commits 8923bc0..29c97b7 incl. bbff534 review, 1 fix round; 3
   - Task 4b: minor (deferred): a repeated limit notice that the scheduler drops as a duplicate still runs gaveUp.detected(), resetting warn-once (ruling 2 read literally).
   - Task 4b: minor (deferred): a stall check armed before Cancel can record/notify just after Cancel.
   - Task 4b: minor (→ 9b): package.json description for statusBar "pending" is stale (gave-up now shows in that mode).
+- Task 4b: fix round 1/5 (2 claimed addressed, awaiting re-review; commits 06dd962..f1ce3df); 577/577 unit, 9/9 integration; 15/15 mutations caught. Scoped re-review dispatched (sonnet).

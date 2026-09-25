@@ -258,3 +258,75 @@ Mutations (all CAUGHT):
 Results: unit exit=0, 569/569; integration exit=0, 9 passing.
 
 Concern 1 above is resolved by this change; concerns 2-4 stand as accepted.
+
+## Fix round 1
+
+Commit: f1ce3df, on top of b0ac8e3.
+
+### Finding 1: a manual resume that stalls can end silently
+
+- `resume()`'s stall check now passes `manual` to `giveUp`. The doc comment's old justification was false and is
+  corrected: one session can hold a ready job AND a counting-down job, so two manual launches (and two stalls) can
+  happen with no detection in between.
+- Test "gave up: two manual launches of the same session that both stall are both answered" follows the reviewer's
+  repro exactly. With autoResume off, a fired job goes to the ready list. A new limit schedules a countdown for the
+  same session. Resume Now (counting-down branch) launches and stalls: notice 1. Resume Now (ready branch) launches
+  and stalls: notice 2. RED before the fix: `1 !== 2`.
+
+### Finding 2 (ruling): a record outlives the problem, and Cancel was the only remedy
+
+(a) `watcher.onInputNeeded`: the first thing the handler does is clear that session's record with
+`GaveUpState.turnEnded(id)`. That removes the record only; the warn-once memory stays. It re-renders when
+something was cleared. The session id comes from `resolveSession(hit.file, hit.cwd, () => 0)` (basename without
+`.jsonl`, UUID-validated; the stat is stubbed because only the id is needed). Files under `subagents/` are skipped
+via `isSubagentFile`, which I exported from transcriptWatcher.ts, so there is still one definition. The test file's
+`./transcriptWatcher` stub now spreads the real module, the same pattern as the other stubs, so the real helper is
+the one used.
+
+The clear runs BEFORE the `s.enabled` return and BEFORE the workspace filter. It is safe while disabled: it
+launches nothing and notifies nothing. It only stops the status bar showing a problem that is over, and gave-up
+records can belong to any watched session.
+
+(b) The status-bar menu gains "Dismiss gave-up notices", offered only when there is at least one record.
+Picking it calls `GaveUpState.dismissRecords()`: all records go, the warn-once memory stays ("I have seen these",
+not a new attempt), and no job is touched. The bar then re-renders. Cancel keeps its current behaviour. The item
+is handled inside the menu, so no new command or package.json contribution was added.
+
+New pure tests: "a finished turn clears that session record only, and keeps its warn-once memory"; "dismissing
+clears every record but keeps the warn-once memory".
+
+New extension tests:
+- "a finished turn for the session clears its record, even outside this window folders"
+- "a finished turn clears the record even while the extension is disabled"
+- "a finished turn for another session, or for a subagent transcript, leaves the record alone"
+- "the menu offers \"Dismiss gave-up notices\" only when something gave up"
+- "\"Dismiss gave-up notices\" clears the records and leaves every waiting job alone" (checks both a
+  counting-down job and a ready job)
+
+RED: TS2339 for the missing methods, and the 7 new tests failed for the expected reasons. The
+another-session/subagent test passed before the change, as a guard with nothing yet to guard; F4 and F5 show it
+catches the change.
+
+### Mutations (all CAUGHT)
+
+| # | Mutation | Caught by |
+|---|---|---|
+| F1 | stall drops `manual` | two manual launches ... both answered |
+| F2 | turn end never clears (first form did not compile, re-run as `ended.sessionId === 'never'`) | outside folders; while disabled |
+| F3 | turn end clears without re-render | outside folders; while disabled |
+| F4 | subagent guard removed | another session / subagent |
+| F5 | turn end clears every session | another session / subagent |
+| F6 | clear moved after the `enabled` return | while disabled |
+| F7 | clear moved after the workspace filter | outside folders; while disabled |
+| F8 | dismiss item always offered | offered only when something gave up; the three-commands menu test |
+| F9 | dismiss does not clear | Dismiss clears ... keeps jobs |
+| F10 | dismiss also runs Cancel | Dismiss clears ... keeps jobs |
+| F11 | dismiss without re-render | Dismiss clears ... keeps jobs |
+| F12 | turnEnded forgets warnings | finished turn keeps warn-once memory |
+| F13 | dismissRecords forgets warnings | dismissing keeps warn-once memory |
+| F14 | dismissRecords keeps records | dismissing ... |
+| F15 | dismissRecords always reports a change | dismissing ... |
+
+Task 10: no claim line changed (`git diff | grep -i claim` over the change is empty).
+
+Results: unit exit=0, 577/577; integration exit=0, 9 passing. Minors deferred as instructed.
