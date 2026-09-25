@@ -558,6 +558,10 @@ test('a stale offer cannot resume a session the command already resumed', async 
 
 const TRANSCRIPT = `/h/.claude/projects/p/${SESSION}.jsonl`;
 
+/** How many times resume() has logged refusing `sessionId` for a missing folder. */
+const cwdFailureLogs = (sessionId: string) =>
+  vscodeFake.outputLines.filter((l) => l.includes(`Cannot resume ${sessionId}: cwd`)).length;
+
 test('an autoResume that lands on a deleted folder is refused, blames the right path, and keeps the job', async () => {
   resetVscodeFake();
   vscodeFake.config = {
@@ -599,7 +603,10 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
       0,
       'a resume that never launched must not make the job disappear',
     );
-    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+    // Task 4b ruling 1: the same failure for the same session warns once;
+    // the retry still happens and fails the same way, which the log shows.
+    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(cwdFailureLogs(SESSION), 2, 'the retry must fail the same way, not silently do nothing');
     assert.equal(vscodeFake.terminals.length, 0, 'still no terminal');
   } finally {
     teardown(ctx);
@@ -676,7 +683,10 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
       0,
       'the offer failing must not have discarded the job it claimed',
     );
-    assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
+    // Task 4b ruling 1: the same failure for the same session warns once;
+    // the retry still happens and fails the same way, which the log shows.
+    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(cwdFailureLogs(SESSION), 2, 'the retry must fail the same way, not silently do nothing');
   } finally {
     teardown(ctx);
   }
@@ -706,7 +716,9 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     // If cancel() had already run, the job would be gone and this second call
     // would report "nothing pending" instead of failing the same way again.
     await resumeNow();
-    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    // Task 4b ruling 1: warned once; the second failure is in the log only.
+    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(cwdFailureLogs(SESSION), 2, 'the job must still be there to fail on again');
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -950,7 +962,9 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
     assert.equal(vscodeFake.errors.length, 1);
 
     await resumeNow();
-    assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
+    // Task 4b ruling 1: warned once; the second failure is in the log only.
+    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(cwdFailureLogs(SESSION), 2, 'the job must still be there to fail on again');
     assert.equal(
       vscodeFake.info.filter((m) => m.message.includes('nothing pending')).length,
       0,
@@ -2818,6 +2832,317 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
     );
   } finally {
     claimResultQueue.length = 0;
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 4b: the gave-up state. A resume that fails in a way this extension
+// stops retrying on must leave the status bar saying so - its own icon, and a
+// tooltip naming the session and cause - instead of going back to looking
+// idle. Four causes: stall, launcher missing, cwd missing, budget refusal
+// dismissed. Warned once per session per cause (ruling 1); cleared by a new
+// detection or a resume that launches (ruling 2), or by Cancel (ruling 3).
+// ---------------------------------------------------------------------------
+
+const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
+
+const bar = () => vscodeFake.statusBarItems[0];
+const barTooltip = () => (bar()?.tooltip as { value: string } | undefined)?.value ?? '';
+const showsGaveUp = () => Boolean(bar()?.visible && bar()?.text.startsWith(GAVE_UP_ICON));
+
+const autoConfig = () => ({
+  autoResume: true,
+  claudeCommand: LAUNCHER,
+  randomDelayMinMinutes: 0,
+  randomDelayMaxMinutes: 0,
+});
+
+/** Budget-refusal fixture: a real transcript over a 1-token cap. */
+const overBudgetTranscript = () => {
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  return transcript;
+};
+
+test('gave up: a missing folder shows the gave-up icon and names the session, folder and cause', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have been refused');
+    assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
+    assert.ok(barTooltip().includes(SESSION.slice(0, 8)), barTooltip());
+    assert.ok(barTooltip().includes(MISSING_CWD), barTooltip());
+    assert.match(barTooltip(), /no longer exists/);
+    assert.equal(vscodeFake.errors.length, 1, 'warned once');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a missing claude executable is recorded, named distinctly, and logged every time', async () => {
+  resetVscodeFake();
+  // A bare name goes through PATH (resolveClaudeLauncher); this one is on nobody's PATH.
+  vscodeFake.config = { ...manualConfig(), claudeCommand: 'clb-no-such-claude-4b' };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
+    assert.match(barTooltip(), /claude executable/);
+    assert.equal(vscodeFake.errors.length, 1);
+    assert.ok(vscodeFake.errors[0]!.includes(SESSION.slice(0, 8)), vscodeFake.errors[0]);
+    assert.match(vscodeFake.errors[0]!, /claudeLimitBuster\.claudeCommand/);
+
+    await resumeNow();
+    assert.equal(vscodeFake.errors.length, 1, 'the same failure again must not notify twice');
+    assert.equal(
+      vscodeFake.outputLines.filter((l) => l.includes(`Cannot resume ${SESSION}: no claude executable`)).length,
+      2,
+      'but every failure must reach the log, or a repeat would be silent everywhere',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a stalled resume shows the gave-up icon and a stall notice naming the cause', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000));
+    // Polled rather than oneTick(): the (stubbed, 300ms) grace starts at the
+    // launch, and a fixed wait could land after it.
+    const deadline = Date.now() + 4000;
+    while (vscodeFake.terminals.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the resume must have launched');
+    assert.ok(!showsGaveUp(), 'a resume that launched has not given up (yet)');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.ok(showsGaveUp(), `expected the gave-up icon after the stall; got ${JSON.stringify(bar()?.text)}`);
+    assert.match(barTooltip(), /stalled/);
+    const stall = vscodeFake.warnings.filter((m) => /stalled/.test(m));
+    assert.equal(stall.length, 1, JSON.stringify(vscodeFake.warnings));
+    assert.ok(stall[0]!.includes(SESSION.slice(0, 8)));
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a stall after a new detection warns again (the detection cleared the warn-once memory)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(vscodeFake.warnings.filter((m) => /stalled/.test(m)).length, 1, 'setup: first stall warned');
+
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000));
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 2, 'setup: the second detection must have launched again');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(vscodeFake.warnings.filter((m) => /stalled/.test(m)).length, 2, 'a new attempt is news');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a dismissed budget refusal is recorded, without a second notification on top of the refusal', async () => {
+  resetVscodeFake();
+  const transcript = overBudgetTranscript();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
+    assert.ok(offer, 'setup: the refusal must have been offered');
+    assert.ok(offer.message.includes(SESSION.slice(0, 8)), `the refusal must name the session: ${offer.message}`);
+    assert.match(offer.message, /claudeLimitBuster\.maxResumeTokens/, 'and the lasting fix');
+    assert.ok(!showsGaveUp(), 'an open refusal is a question, not a failure yet');
+
+    offer.answer(undefined);
+    await flush();
+    assert.ok(showsGaveUp(), `expected the gave-up icon after dismissal; got ${JSON.stringify(bar()?.text)}`);
+    assert.match(barTooltip(), /budget/);
+    assert.equal(vscodeFake.warnings.length, 1, 'the refusal the user just closed was the notice');
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes(SESSION) && /dismissed/i.test(l)), 'the dismissal is logged');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: a refusal answered "Resume anyway" is not recorded as given up', async () => {
+  resetVscodeFake();
+  const transcript = overBudgetTranscript();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000), REAL_CWD, transcript);
+    await flush();
+    vscodeFake.warningOffers.find((w) => w.message.includes('estimated'))!.answer('Resume anyway');
+    await flush();
+    assert.ok(!showsGaveUp());
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: a new detection for the session clears its record and its warn-once memory', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.ok(showsGaveUp(), 'setup: gave up on the missing folder');
+
+    // Still counting down, so nothing fires: the detection alone must clear it.
+    watcher.limitFor(SESSION, new Date(Date.now() + 3_600_000), MISSING_CWD);
+    await flush();
+    assert.ok(!showsGaveUp(), `a new detection must clear it; got ${JSON.stringify(bar()?.text)}`);
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+
+    // And the same failure is news again.
+    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    assert.equal(vscodeFake.errors.length, 2, 'the failure after a new detection must notify again');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a detection for a different session leaves the record alone', async () => {
+  resetVscodeFake();
+  vscodeFake.config = autoConfig();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    watcher.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+    await oneTick();
+    watcher.limitFor(SESSION_B, new Date(Date.now() + 3_600_000));
+    await flush();
+    assert.match(bar()!.text, /resumes in/, 'the countdown wins the text');
+    assert.ok(barTooltip().includes(SESSION.slice(0, 8)), `the tooltip still names the gave-up session: ${barTooltip()}`);
+    assert.match(barTooltip(), /no longer exists/);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('gave up: a resume that launches clears the record', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const dir = path.join(os.tmpdir(), `clb-4b-comes-back-${process.pid}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), dir);
+    await oneTick();
+    const resumeNow = vscodeFake.commands.get('claudeLimitBuster.resumeNow')!;
+    await resumeNow();
+    assert.ok(showsGaveUp(), 'setup: gave up on the missing folder');
+
+    fs.mkdirSync(dir, { recursive: true });
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the folder is back, so the retry launched');
+    assert.ok(!showsGaveUp(), `a launched resume must clear it; got ${JSON.stringify(bar()?.text)}`);
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('gave up: the cancel command clears it, even with nothing pending', async () => {
+  resetVscodeFake();
+  const transcript = overBudgetTranscript();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    vscodeFake.warningOffers.find((w) => w.message.includes('estimated'))!.answer(undefined);
+    await flush();
+    assert.ok(showsGaveUp(), 'setup: gave up on the budget');
+
+    vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+    assert.ok(!showsGaveUp(), `Cancel must clear it; got ${JSON.stringify(bar()?.text)}`);
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: the menu offers Cancel as the way to clear it, and picking it does', async () => {
+  resetVscodeFake();
+  const transcript = overBudgetTranscript();
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    vscodeFake.warningOffers.find((w) => w.message.includes('estimated'))!.answer(undefined);
+    await flush();
+
+    vscodeFake.quickPickAnswer = 'Cancel Pending Resume';
+    await vscodeFake.commands.get('claudeLimitBuster.statusBarMenu')!();
+    const cancel = vscodeFake.quickPicks[0]!.items.find((i) => i.label === 'Cancel Pending Resume') as
+      | { description?: string }
+      | undefined;
+    assert.match(cancel?.description ?? '', /gave up/i, `nothing is waiting, but Cancel still clears something: ${cancel?.description}`);
+    assert.ok(!showsGaveUp(), 'picking Cancel must clear it');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('gave up: the untrusted-folder notice is not a failure notice (Task 5a), so dismissing it records nothing', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...autoConfig(), notify: true };
+  trustedCwds = new Set();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const notice = vscodeFake.info.find((m) => m.items.includes('Open Claude to Trust'));
+    assert.ok(notice, 'setup: the trust notice must have been shown');
+    notice.answer(undefined);
+    await flush();
+    assert.ok(!showsGaveUp());
+    assert.doesNotMatch(barTooltip(), /Gave up/);
+  } finally {
+    trustedCwds = 'all';
     teardown(ctx);
   }
 });
