@@ -237,3 +237,113 @@ extension still activates and registers every command cleanly.
 
 Both commits carry the required trailer; branch `claude/limit-break-1.0-cloud`,
 nothing pushed, no branch switches, no rebase/reset.
+
+## Fix round 1 (review 1: two Important issues)
+
+### Issue 1 (Important): trust link truncated by an unbalanced ")"
+
+`encodeURIComponent` leaves `( ) ! ' *` raw (RFC 3986's own "unreserved"
+set). Those characters sit inside a Markdown inline link's `(...)` target
+(`[Trust this folder](command:...)`), and a Markdown renderer reads that
+target only up to the first UNESCAPED `)`. A cwd containing a raw `)` -
+`/home/me/foo)`, or an ordinary `/home/me/project (copy)` - closed the link
+target early; VS Code then called `openClaudeToTrust` with no arguments,
+which logs "invoked with no folder" and silently no-ops.
+
+Fix: `trustCommandUri` (`src/statusBar.ts`) now percent-encodes `( ) ! ' *`
+by hand, after `encodeURIComponent`, using each character's own hex code
+point (`%28`, `%29`, `%21`, `%27`, `%2A`).
+
+Red tests first (both failed for the right reason - `not query.includes` /
+truncated decode - before the fix):
+- `trustCommandUri also percent-encodes the characters encodeURIComponent
+  leaves raw: ( ) ! ' *` - five cwds (`)`, `(copy)`, an apostrophe, `*`, `!`),
+  asserts no raw special character in the query and an exact
+  `JSON.parse(decodeURIComponent(query))` round-trip to `[cwd]`.
+- Two `the trust link target is not truncated by an unbalanced paren in the
+  cwd (...)` tests - build a real session line via `buildSessionLines` for
+  an untrusted job, extract the link target the way a renderer would
+  (`/\[Trust this folder\]\(([^)]*)\)/` - up to the first unescaped `)`),
+  and confirm THAT substring still decodes to exactly `[cwd]`. This is the
+  reviewer's exact repro, reproduced as a test rather than only unit-testing
+  `trustCommandUri` in isolation.
+
+Mutation: dropping the extra `.replace(...)` (reverting to a bare
+`encodeURIComponent(JSON.stringify([cwd]))`) - CAUGHT by all three tests
+above.
+
+### Issue 2 (Important): the untrusted marker goes stale for ready jobs and non-soonest counting jobs
+
+Two separate gaps, both in `src/extension.ts`:
+- `scheduler.onChange((job) => { refreshTrust(job); ... })` only ever
+  refreshed the SOONEST job (the `job` argument onChange fires with) - a
+  counting-down job that was never `scheduler.current` never got re-checked
+  at all, on any event.
+- The trust-terminal close handler already looped `scheduler.jobs` (every
+  counting-down job, from an earlier fix), but never touched `readyJobs` -
+  a job trusted while sitting in the ready list (autoResume off, waiting for
+  "Resume Now") kept showing "not trusted" forever, and since `readyJobs`
+  persists across a reload (`#11`), the stale `folderTrusted: false` would
+  keep coming back after a reload too.
+
+Fix: `refreshTrust` now returns whether it actually flipped a job (needed to
+know when to persist). A new `refreshAllTrust()` loops both `scheduler.jobs`
+and `readyJobs`, calling `refreshTrust` on each; if any READY job flipped,
+it calls `persistReady()` so the flip survives a reload. Both
+`scheduler.onChange` and the trust-terminal close handler now call
+`refreshAllTrust()` instead of refreshing just one job or just
+`scheduler.jobs`. `scheduler.onChange` fires on every countdown tick as
+well as real topology changes; this is intentional and cheap, since
+`refreshTrust`'s own per-session mtime cache turns a no-op tick into one
+`fs.statSync` per listed job, not a config re-parse (per the review's own
+cost note).
+
+Red tests first (`test/extension.test.ts`, both failed for the right reason
+before the fix):
+- `closing the trust terminal re-reads trust for a ready job too, and
+  persists the flip` - schedules a job with `autoResume: false` so it fires
+  into `readyJobs` untrusted, opens the trust hotlink, flips
+  `trustedCwds`, closes the terminal, and asserts (a) the tooltip's "not
+  trusted" marker clears and (b) `store.get(READY_KEY)` becomes a
+  DIFFERENT array reference than before the close (not just an
+  in-place-mutated one - the fake's `globalState` never serialises, so a
+  stored array's elements are the exact same live objects `refreshTrust`
+  mutates regardless of whether anything re-persists; only a genuinely NEW
+  `persistReady()` call writes a new array reference, which is what (b)
+  actually distinguishes).
+- `a non-soonest counting job trusted externally clears on the next
+  scheduler change, not just the soonest` - two counting-down jobs
+  (SESSION sooner/current, SESSION_B later/never-current), trusts SESSION_B's
+  folder "externally" (no trust hotlink, no terminal close - just flips
+  `trustedCwds` and waits one ordinary tick via `oneTick()`), asserts
+  SESSION_B's persisted `folderTrusted` flips to `true`.
+
+Mutation table (`spec-5b-fix1.json`):
+
+| Mutation | Result |
+|---|---|
+| `trustCommandUri` drops the extra percent-encoding | CAUGHT |
+| `refreshAllTrust` never checks ready jobs | CAUGHT |
+| `refreshAllTrust` never checks `scheduler.jobs` (only ready) | CAUGHT |
+| a flipped ready job's trust is never re-persisted | CAUGHT |
+| `scheduler.onChange` reverts to refreshing only the soonest job | CAUGHT |
+| the trust-terminal close handler reverts to `scheduler.jobs` only | CAUGHT |
+
+All 6 CAUGHT, 0 SURVIVED, 0 SPEC ERROR.
+
+### Unit tests (fix round 1)
+
+`npm test > /tmp/t5b_fix1_final.log 2>&1; echo "exit=$?"` → **exit=0**, 609
+tests, 0 failures (600 from the original task-5b work + 9 net-new: 3 for
+issue 1, 2 for issue 2, plus 4 already covered in the earlier
+mutation-driven round of the original task).
+
+### Integration tests (fix round 1)
+
+`xvfb-run -a npm run test:integration > /tmp/it5b_fix1.log 2>&1; echo "exit=$?"`
+→ **exit=0**, 9 passing, 0 failing.
+
+### Commit (fix round 1)
+
+`836371a` fix(statusBar,extension): trust link truncation and stale trust
+markers.

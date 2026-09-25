@@ -153,3 +153,4 @@ Task 4b: complete (commits 10e897f..f1ce3df, 1 pre-review change + 1 fix round; 
   - Task 5b: minor (deferred): "$(...)" theme-icon syntax and "~~" are not neutralised in folder names (cosmetic; supportThemeIcons is on).
   - Task 5b: minor (deferred): harmless double render in rememberReady.
   - Task 5b: minor (deferred): a locale-fragile negative assertion; no escape test on a gave-up-only line.
+- Task 5b: fix round 1/5 (2 claimed addressed, awaiting re-review; commits a331e9e..836371a); 609/609 unit, 9/9 integration; 6/6 mutations caught. Scoped re-review dispatched (sonnet).
