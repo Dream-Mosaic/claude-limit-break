@@ -200,6 +200,33 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
   }
 });
 
+test('a wall-clock time inside a DST fall-back repeated hour resolves to the LATER instant (A7)', () => {
+  // America/Chicago falls back on 2026-11-01: the clock strikes 2:00am and is
+  // set back to 1:00am, so the wall-clock hour 01:00-01:59 happens twice -
+  // once on CDT (UTC-5), once on CST (UTC-6), an hour apart in real time.
+  // "resets 1:30am" is genuinely ambiguous between them. Before this fix,
+  // zonedWallClockToInstant's 2-pass convergence always lands on whichever
+  // offset applies AT the naive target instant - which is always the
+  // EARLIER (CDT) occurrence, confirmed by direct execution against the
+  // unmodified algorithm (2026-11-01T06:30:00.000Z, not the later
+  // 07:30:00.000Z). The brief requires the LATER instant: waking an hour
+  // late finds the banner (if any) still live and safe to re-check; waking
+  // an hour early risks resuming into a session that is still limited.
+  //
+  // `now` is 2026-11-01T05:30:00Z, which is 00:30 local in Chicago (still
+  // CDT, before the transition) - so "today" in the zone is Nov 1 and the
+  // dayOffset=0 candidate is the one under test.
+  const now = new Date('2026-11-01T05:30:00Z');
+  const text = "You've hit your session limit · resets 1:30am (America/Chicago)";
+  const hit = detectLimit(text, now, MAXW);
+  assert.ok(hit, 'not detected');
+  assert.equal(
+    hit.resumeAt.toISOString(),
+    '2026-11-01T07:30:00.000Z',
+    'must resolve to the LATER (CST) instant of the repeated hour, not the earlier (CDT) one',
+  );
+});
+
 // Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
 // deleted without any test failing - nothing pinned any one of them
 // individually. Each test below uses the exact input from the issue's table,

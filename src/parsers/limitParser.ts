@@ -104,8 +104,45 @@ function zoneToday(timeZone: string, at: Date): { y: number; m: number; d: numbe
     return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() };
 }
 /**
+ * The wall-clock date and time a named zone reads at a given instant, as a
+ * sortable string - used only to compare two instants for "same local
+ * reading", never parsed back into a Date.
+ */
+function renderedWallClock(timeZone: string, at: Date): string | undefined {
+    try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            hour12: false,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        }).formatToParts(at);
+        const get = (type: string) => parts.find((p) => p.type === type)?.value;
+        return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+    }
+    catch {
+        return undefined;
+    }
+}
+
+/**
  * The instant at which a named zone's wall clock reads the given date and time.
  * Iterates twice so a reading that lands on a DST transition still converges.
+ *
+ * A DST fall-back repeats one wall-clock hour twice, an hour apart in real
+ * time (issue A7). The 2-pass loop above always converges on whichever
+ * offset applies to the *naively guessed* instant - which is always the
+ * EARLIER of the two real instants that share that wall-clock reading,
+ * confirmed by direct execution against the unmodified algorithm. Detect
+ * that by checking whether stepping the candidate forward one hour still
+ * reads the same wall clock: if so, the candidate is the ambiguous hour's
+ * first pass, and the later occurrence - one hour on - is what
+ * nextZonedOccurrence's callers want. Resolving to the later instant is
+ * deliberate: waking an hour late finds a still-live limit safe to
+ * re-check; waking an hour early risks resuming into a session that has
+ * not actually reset yet.
  */
 function zonedWallClockToInstant(
     timeZone: string,
@@ -124,7 +161,12 @@ function zonedWallClockToInstant(
         }
         instant = target - offset;
     }
-    return new Date(instant);
+    const candidate = new Date(instant);
+    const oneHourLater = new Date(instant + HOUR_MS);
+    if (renderedWallClock(timeZone, candidate) === renderedWallClock(timeZone, oneHourLater)) {
+        return oneHourLater;
+    }
+    return candidate;
 }
 const RULES: Rule[] = [
     {
