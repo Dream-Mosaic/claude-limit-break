@@ -2858,6 +2858,7 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
 // ---------------------------------------------------------------------------
 
 const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
+const { escapeMarkdown } = require('../src/statusBar') as typeof import('../src/statusBar');
 
 const bar = () => vscodeFake.statusBarItems[0];
 const barTooltip = () => (bar()?.tooltip as { value: string } | undefined)?.value ?? '';
@@ -2888,7 +2889,11 @@ test('gave up: a missing folder shows the gave-up icon and names the session, fo
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have been refused');
     assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
     assert.ok(barTooltip().includes(SESSION.slice(0, 8)), barTooltip());
-    assert.ok(barTooltip().includes(MISSING_CWD), barTooltip());
+    // Task 5b: the unified session line shows the folder BASENAME, escaped
+    // (ruling 1/2) - not the full path. MISSING_CWD's own basename here
+    // happens to be SESSION itself (see its definition), so it is escaped
+    // too (a UUID is full of hyphens, one of the escaped characters).
+    assert.ok(barTooltip().includes(escapeMarkdown(path.basename(MISSING_CWD))), barTooltip());
     assert.match(barTooltip(), /no longer exists/);
     assert.equal(vscodeFake.errors.length, 1, 'warned once');
   } finally {

@@ -116,13 +116,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const gaveUp = new GaveUpState();
 
   /**
-   * The one place the status bar is drawn from. `job` defaults to the
-   * scheduler's soonest; scheduler.onChange passes the one it was fired
-   * with. The gave-up records ride along on every render, so a countdown
-   * tick cannot drop them from the tooltip.
+   * The one place the status bar is drawn from. Reads `scheduler.jobs` and
+   * `readyJobs` fresh every call, rather than taking either as a parameter,
+   * so every caller - a countdown tick, a ready-job change, a gave-up
+   * change, a trust change - draws the exact same picture. Task 5b: the
+   * tooltip now lists every one of them, not just the soonest.
    */
-  const render = (job: PendingJob | undefined = scheduler.current): void => {
-    status.update(job, scheduler.jobs.length, settings().statusBar, gaveUp.list());
+  const render = (): void => {
+    status.update(scheduler.jobs, readyJobs, settings().statusBar, gaveUp.list());
   };
   const watcher = new TranscriptWatcher(
     () => settings().maxWaitHours,
@@ -164,7 +165,12 @@ export function activate(context: vscode.ExtensionContext): void {
     void context.globalState.update(READY_KEY, readyJobs.length > 0 ? [...readyJobs] : undefined);
   };
 
-  /** Drop a remembered job. Reports whether it was still there to drop. */
+  /**
+   * Drop a remembered job. Reports whether it was still there to drop.
+   * Re-renders on an actual removal (Task 5b: the tooltip now lists ready
+   * jobs, so every change to this list must reach the status bar - not just
+   * the ones that happened to be followed by some other render() already).
+   */
   const forgetReady = (sessionId: string) => {
     const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
     if (at < 0) {
@@ -172,6 +178,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     readyJobs.splice(at, 1);
     persistReady();
+    render();
     return true;
   };
 
@@ -180,6 +187,7 @@ export function activate(context: vscode.ExtensionContext): void {
     forgetReady(job.sessionId);
     readyJobs.push(job);
     persistReady();
+    render();
   };
 
   // Restored before anything can add to the list. A job read back here is one
@@ -887,7 +895,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     scheduler.onChange((job) => {
       refreshTrust(job);
-      render(job);
+      render();
     }),
     scheduler.onFire((job) => {
       // Task 10: claim this reset before anything else. Every window watching
@@ -1152,12 +1160,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       scheduler.cancel();
       // Ruling 3: Cancel clears the gave-up state along with the jobs.
-      // Rendered here, not left to scheduler.onChange: with nothing pending
-      // the scheduler has nothing to cancel and does not fire it.
       if (gaveUp.clearAll()) {
         log.info('Cleared the gave-up state.');
-        render();
       }
+      // Rendered unconditionally, not left to scheduler.onChange or folded
+      // into the gaveUp.clearAll() branch above: with nothing pending the
+      // scheduler has nothing to cancel and does not fire onChange, and a
+      // readyJobs-only cancel (Task 5b: readyJobs now reach the tooltip)
+      // must still clear their lines even when nothing had given up.
+      render();
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
     /**
@@ -1281,6 +1292,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   scheduler.start();
+  // Unconditional, not left to scheduler.start()'s own onChange (which fires
+  // only when something is pending): readyJobs restored above can be
+  // non-empty with nothing pending, and before this the status bar simply
+  // never showed them - the marker stayed hidden until the next event. The
+  // "install from a VSIX and see nothing" doubt this class's own tooltip
+  // reasoning is about applies just as much to a ready session restored
+  // across a reload.
+  render();
   void watcher.start();
   log.info('Claude Limit Buster active.');
 }

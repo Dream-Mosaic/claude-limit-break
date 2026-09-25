@@ -1,10 +1,169 @@
 import * as vscode from 'vscode';
 import { formatDuration } from './parsers/limitParser';
 import type { PendingJob } from './scheduler';
-import { GAVE_UP_ICON, describeGaveUp, type GaveUpRecord } from './gaveUp';
+import { GAVE_UP_ICON, REASON, type GaveUpCause, type GaveUpRecord } from './gaveUp';
 
 /** What the item shows when no resume is counting down. */
 export type StatusBarMode = 'always' | 'pending' | 'never';
+
+/** The Task 5a command the trust hotlink points at. */
+const TRUST_COMMAND = 'claudeLimitBuster.openClaudeToTrust';
+
+/**
+ * Escape Markdown special characters in text this extension does not
+ * control (a folder name, taken from a transcript or the filesystem).
+ *
+ * Without this, a folder literally named `*x*` renders as italic text, and
+ * one named `[a](b)` renders as a link - or, worse, a folder name crafted to
+ * look like a command link could pose as this tooltip's own trust hotlink.
+ * The set covers every ASCII character CommonMark treats specially, per
+ * Task 5b ruling 2.
+ */
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[\\`*_{}[\]()#+\-.!<>|]/g, '\\$&');
+}
+
+/**
+ * The last path segment of `cwd`, split on both separators.
+ *
+ * Not `path.basename`: this extension's tooltip can describe a session
+ * recorded on a different OS than the one it is currently rendering on (a
+ * synced settings/state profile, or a transcript copied between machines),
+ * and POSIX `basename` does not split on `\`. Mirrors the same reasoning as
+ * `resolveSession`'s filename split in sessionResolver.ts.
+ */
+function folderBasename(cwd: string): string {
+  const segments = cwd.split(/[\\/]+/).filter((s) => s.length > 0);
+  return segments.length > 0 ? segments[segments.length - 1]! : cwd;
+}
+
+/**
+ * The command-URI for the trust hotlink (Task 5a's `openClaudeToTrust`),
+ * exactly the VS Code command-URI convention: `command:<id>?<args>`, args
+ * being `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
+ * array, since that command takes the cwd as its sole parameter.
+ */
+export function trustCommandUri(cwd: string): string {
+  return `command:${TRUST_COMMAND}?${encodeURIComponent(JSON.stringify([cwd]))}`;
+}
+
+/** One session's line, and whether it carries the trust hotlink. */
+interface SessionLine {
+  markdown: string;
+  hasTrustLink: boolean;
+}
+
+/**
+ * One Markdown line (no leading bullet) for a session: short id, escaped
+ * folder basename, its state (a formatted resume time, "ready", or neither
+ * for a gave-up-only session), its gave-up cause if it has one, and an
+ * untrusted-folder marker with the trust link if its folder is known
+ * untrusted. `state` is `undefined` for a gave-up-only session - see the
+ * "gave-up-only" handling in `buildSessionLines` below.
+ */
+function buildSessionLine(entry: {
+  sessionId: string;
+  cwd?: string;
+  folderTrusted?: boolean;
+  state?: 'counting' | 'ready';
+  resumeAtMs?: number;
+  gaveUpCause?: GaveUpCause;
+}): SessionLine {
+  const id = `\`${entry.sessionId.slice(0, 8)}\``;
+  const folder = entry.cwd ? escapeMarkdown(folderBasename(entry.cwd)) : '_no folder recorded_';
+  const bits = [`${id} in ${folder}`];
+  if (entry.state === 'counting' && entry.resumeAtMs !== undefined) {
+    bits.push(`resuming at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
+  } else if (entry.state === 'ready') {
+    bits.push('**ready**');
+  }
+  if (entry.gaveUpCause) {
+    bits.push(`**Gave up**: ${REASON[entry.gaveUpCause]}`);
+  }
+  let hasTrustLink = false;
+  if (entry.folderTrusted === false && entry.cwd) {
+    hasTrustLink = true;
+    bits.push(`$(warning) not trusted — [Trust this folder](${trustCommandUri(entry.cwd)})`);
+  }
+  return { markdown: bits.join(', '), hasTrustLink };
+}
+
+/**
+ * Build the tooltip's unified session list (controller ruling: "T5 tooltip
+ * lists gave-up sessions with their reason - one status-bar model, not
+ * two"): every counting-down job, every job waiting for "Resume Now", and
+ * every gave-up session, folded into one line each.
+ *
+ * A session present in more than one input (a launcher/cwd failure leaves
+ * the job in `ready` so it can be retried, and a failed manual retry on a
+ * counting-down job leaves it counting down - Task 4b implementer concern
+ * 4) gets exactly one line, carrying whichever pending state it has plus its
+ * gave-up cause. `ready` is only consulted for a session `jobs` does not
+ * already cover: a session can genuinely hold both a counting-down job and
+ * an unrelated stale ready job at once (Task 4b fix round 1, finding 1), and
+ * the countdown is what is actually going to happen next, so that is what
+ * the one line shows.
+ *
+ * Order: pending/ready lines first, soonest first (a ready job's own
+ * deadline already elapsed, so it sorts ahead of anything still counting
+ * down); gave-up-only lines after, oldest first (GaveUpState.list()'s own
+ * order).
+ */
+export function buildSessionLines(
+  jobs: readonly PendingJob[],
+  ready: readonly PendingJob[],
+  gaveUp: readonly GaveUpRecord[],
+): { lines: string[]; hasTrustLink: boolean; waitingCount: number } {
+  interface Entry {
+    sessionId: string;
+    cwd?: string;
+    folderTrusted?: boolean;
+    state?: 'counting' | 'ready';
+    resumeAtMs?: number;
+    gaveUpCause?: GaveUpCause;
+  }
+  const byId = new Map<string, Entry>();
+  for (const job of jobs) {
+    byId.set(job.sessionId, {
+      sessionId: job.sessionId,
+      cwd: job.cwd,
+      folderTrusted: job.folderTrusted,
+      state: 'counting',
+      resumeAtMs: job.resumeAtMs,
+    });
+  }
+  for (const job of ready) {
+    if (!byId.has(job.sessionId)) {
+      byId.set(job.sessionId, {
+        sessionId: job.sessionId,
+        cwd: job.cwd,
+        folderTrusted: job.folderTrusted,
+        state: 'ready',
+        resumeAtMs: job.resumeAtMs,
+      });
+    }
+  }
+  const waiting = [...byId.values()].sort((a, b) => (a.resumeAtMs ?? 0) - (b.resumeAtMs ?? 0));
+  const waitingCount = waiting.length;
+
+  const gaveUpOnly: Entry[] = [];
+  for (const record of gaveUp) {
+    const existing = byId.get(record.sessionId);
+    if (existing) {
+      existing.gaveUpCause = record.cause;
+    } else {
+      gaveUpOnly.push({ sessionId: record.sessionId, cwd: record.cwd, gaveUpCause: record.cause });
+    }
+  }
+
+  let hasTrustLink = false;
+  const lines = [...waiting, ...gaveUpOnly].map((entry) => {
+    const line = buildSessionLine(entry);
+    hasTrustLink = hasTrustLink || line.hasTrustLink;
+    return line.markdown;
+  });
+  return { lines, hasTrustLink, waitingCount };
+}
 
 /**
  * Countdown pill in the status bar, and — when nothing is counting down — a
@@ -30,13 +189,14 @@ export class CountdownStatusBar {
   }
 
   /**
-   * `waiting` is how many sessions have a resume pending. The pill shows the
-   * soonest; without the count, a second session's resume would be invisible,
-   * which reads exactly like it had been dropped.
+   * `jobs` are counting down, soonest first; `ready` are waiting for
+   * "Resume Now" (their own countdowns already elapsed); `gaveUp` are
+   * sessions this window has stopped retrying (Task 4b). Task 5b folds all
+   * three into the one tooltip list built by `buildSessionLines`.
    */
   update(
-    job: PendingJob | undefined,
-    waiting = 1,
+    jobs: readonly PendingJob[],
+    ready: readonly PendingJob[] = [],
     mode: StatusBarMode = 'always',
     gaveUp: readonly GaveUpRecord[] = [],
   ): void {
@@ -44,69 +204,47 @@ export class CountdownStatusBar {
       this.item.hide();
       return;
     }
-    if (!job && gaveUp.length > 0) {
-      // Shown under 'pending' too: that mode hides the idle marker, and a
-      // session this extension has stopped retrying is not idle - hiding it
-      // would be the silent failure the gave-up state exists to end (A8).
-      const count = gaveUp.length > 1 ? ` (${gaveUp.length} sessions)` : '';
-      this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
-      const tip = new vscode.MarkdownString(undefined, true);
-      tip.appendMarkdown(`**Claude Limit Buster**\n\n`);
-      appendGaveUp(tip, gaveUp);
-      tip.appendMarkdown(`_Click for actions._`);
-      this.item.tooltip = tip;
-      this.item.backgroundColor = undefined;
-      this.item.show();
-      return;
-    }
-    if (!job) {
-      if (mode === 'pending') {
-        this.item.hide();
+    const { lines, hasTrustLink, waitingCount } = buildSessionLines(jobs, ready, gaveUp);
+    const soonest = jobs[0];
+    const gaveUpCount = gaveUp.length;
+
+    if (!soonest) {
+      if (waitingCount === 0 && gaveUpCount === 0) {
+        if (mode === 'pending') {
+          this.item.hide();
+          return;
+        }
+        this.item.text = '$(eye)';
+        const idle = new vscode.MarkdownString(undefined, true);
+        idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
+        idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
+        idle.appendMarkdown(`_Click for actions._`);
+        this.item.tooltip = idle;
+        this.item.backgroundColor = undefined;
+        this.item.show();
         return;
       }
-      this.item.text = '$(eye)';
-      const idle = new vscode.MarkdownString(undefined, true);
-      idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
-      idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
-      idle.appendMarkdown(`_Click for actions._`);
-      this.item.tooltip = idle;
+      // Something to show even with nothing counting down: a gave-up
+      // session, a ready one, or (per buildSessionLines) both on one line.
+      // The gave-up icon wins when anything has given up - that is the more
+      // urgent signal - even if other sessions are merely ready.
+      if (gaveUpCount > 0) {
+        const count = gaveUpCount > 1 ? ` (${gaveUpCount} sessions)` : '';
+        this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
+      } else {
+        const count = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
+        this.item.text = `$(clock) Claude ready to resume${count}`;
+      }
+      this.renderTooltip(lines, hasTrustLink, gaveUpCount > 0);
       this.item.backgroundColor = undefined;
       this.item.show();
       return;
     }
-    const remaining = job.resumeAtMs - Date.now();
-    const at = new Date(job.resumeAtMs);
-    const others = waiting > 1 ? ` (${waiting} sessions)` : '';
-    this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
 
-    const tooltip = new vscode.MarkdownString(undefined, true);
-    tooltip.appendMarkdown(`**Claude Limit Buster**\n\n`);
-    tooltip.appendMarkdown(`Resuming at **${at.toLocaleString()}**\n\n`);
-    if (waiting > 1) {
-      tooltip.appendMarkdown(`**${waiting} sessions** are waiting to resume; this one is due first.\n\n`);
-    }
-    if (job.jitterMs > 0) {
-      tooltip.appendMarkdown(
-        `Padded by a random **${formatDuration(job.jitterMs)}** past the reset time\n\n`,
-      );
-    }
-    tooltip.appendMarkdown(`Reason: \`${job.reason}\`\n\n`);
-    tooltip.appendMarkdown(`Session: \`${job.sessionId}\`\n\n`);
-    if (job.cwd) {
-      tooltip.appendMarkdown(`Folder: \`${job.cwd}\`\n\n`);
-    }
-    if (job.folderTrusted === false) {
-      // Checked at schedule time, not here: by the time this tooltip is read
-      // the countdown may already be near zero, which is too late to trust
-      // the folder before Claude stalls at its trust prompt (#5).
-      tooltip.appendMarkdown(
-        `**This folder is not trusted for the CLI.** Claude will stop at its trust ` +
-          `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
-      );
-    }
-    appendGaveUp(tooltip, gaveUp);
-    tooltip.appendMarkdown(`_Click for actions._`);
-    this.item.tooltip = tooltip;
+    const remaining = soonest.resumeAtMs - Date.now();
+    const others = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
+    this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
+    this.renderTooltip(lines, hasTrustLink, gaveUpCount > 0);
 
     // Nudge the colour as the deadline approaches so it reads at a glance.
     this.item.backgroundColor =
@@ -114,23 +252,34 @@ export class CountdownStatusBar {
     this.item.show();
   }
 
+  /**
+   * The shared tooltip body for every non-idle state: header, one bullet per
+   * `buildSessionLines` line, a reminder of how to clear a gave-up notice
+   * when one is present, and the click-for-actions footer. `isTrusted` is
+   * set only when a line actually carries the trust command link (ruling 3)
+   * - an unconditional `true` would trust every link a folder name could be
+   * crafted to look like, not just this one command.
+   */
+  private renderTooltip(lines: readonly string[], hasTrustLink: boolean, hasGaveUp: boolean): void {
+    const tooltip = new vscode.MarkdownString(undefined, true);
+    tooltip.appendMarkdown(`**Claude Limit Buster**\n\n`);
+    for (const line of lines) {
+      tooltip.appendMarkdown(`- ${line}\n`);
+    }
+    if (lines.length > 0) {
+      tooltip.appendMarkdown(`\n`);
+    }
+    if (hasGaveUp) {
+      tooltip.appendMarkdown(`A new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
+    }
+    tooltip.appendMarkdown(`_Click for actions._`);
+    if (hasTrustLink) {
+      tooltip.isTrusted = { enabledCommands: [TRUST_COMMAND] };
+    }
+    this.item.tooltip = tooltip;
+  }
+
   dispose(): void {
     this.item.dispose();
   }
-}
-
-/**
- * The gave-up section of a tooltip: one line per session and its cause.
- * Deliberately a separate block rather than woven into the countdown text -
- * Task 5b folds it and the pending jobs into one list.
- */
-function appendGaveUp(tip: vscode.MarkdownString, gaveUp: readonly GaveUpRecord[]): void {
-  if (gaveUp.length === 0) {
-    return;
-  }
-  tip.appendMarkdown(`**Gave up** on ${gaveUp.length === 1 ? 'this session' : 'these sessions'}:\n\n`);
-  for (const r of gaveUp) {
-    tip.appendMarkdown(`- ${describeGaveUp(r)}\n`);
-  }
-  tip.appendMarkdown(`\nA new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
 }

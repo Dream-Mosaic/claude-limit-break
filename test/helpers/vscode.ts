@@ -81,6 +81,13 @@ export interface FakeStatusBarItem {
 
 class FakeMarkdownString {
   value: string;
+  /**
+   * Mirrors the real MarkdownString's mutable `isTrusted`: unset (falsy)
+   * means command/href links are inert, `{ enabledCommands }` allows exactly
+   * those. Task 5b sets this only when the tooltip actually contains a trust
+   * hotlink, never unconditionally (ruling: isTrusted only with a link).
+   */
+  isTrusted?: boolean | { readonly enabledCommands: readonly string[] };
   constructor(value?: string, readonly supportThemeIcons?: boolean) {
     this.value = value ?? '';
   }
