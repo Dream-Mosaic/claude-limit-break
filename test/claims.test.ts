@@ -11,6 +11,7 @@ import {
   claimKeyFor,
   claimsDir,
   claimOwner,
+  holdClaim,
   type ClaimFs,
 } from '../src/claims';
 
@@ -266,6 +267,49 @@ test('claimOwner is undefined for a missing claim or one written without an owne
   assert.equal(claimOwner(dir, 'missing', fs), undefined);
   fs.writeFileSync(path.join(dir, 'legacy.claim'), `${process.pid} ${Date.now()}`);
   assert.equal(claimOwner(dir, 'legacy', fs), undefined);
+});
+
+// --- holdClaim (final review I7) -------------------------------------------
+
+test('holdClaim writes a claim that stays fresh until the held deadline, not just for STALE_MS from now', () => {
+  // Cancel writes one for a job that may not fire for hours; another window
+  // firing the same reset then must still find it fresh.
+  const dir = tempDir();
+  const now = Date.now();
+  const until = now + 5 * HOUR_MS;
+  assert.equal(holdClaim(dir, 'k', now, until, fs, undefined, 'window-A'), 'claimed');
+  assert.equal(claimResume(dir, 'k', until + 30 * 60_000, fs), 'taken', 'still fresh half an hour after the deadline');
+  assert.equal(claimOwner(dir, 'k', fs), 'window-A');
+  assert.equal(claimResume(dir, 'k', until + 2 * HOUR_MS, fs), 'claimed', 'but it does age out like any claim');
+});
+
+test('holdClaim with a deadline already past is an ordinary claim', () => {
+  const dir = tempDir();
+  const now = Date.now();
+  assert.equal(holdClaim(dir, 'k', now, now - HOUR_MS, fs), 'claimed');
+  assert.equal(claimResume(dir, 'k', now + 30 * 60_000, fs), 'taken');
+});
+
+test('holdClaim leaves a claim another window holds alone', () => {
+  const dir = tempDir();
+  const now = Date.now();
+  assert.equal(claimResume(dir, 'k', now, fs, undefined, 'window-B'), 'claimed');
+  assert.equal(holdClaim(dir, 'k', now, now + 5 * HOUR_MS, fs, undefined, 'window-A'), 'taken');
+  assert.equal(claimOwner(dir, 'k', fs), 'window-B');
+  assert.equal(claimResume(dir, 'k', now + 2 * HOUR_MS, fs), 'claimed', 'nor is the other window\'s claim kept alive past its own life');
+});
+
+test('holdClaim fails soft when the deadline cannot be set: still claimed, and logged', () => {
+  const dir = tempDir();
+  const { log, lines } = logger();
+  const brokenFs = {
+    ...fs,
+    utimesSync: () => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    },
+  };
+  assert.equal(holdClaim(dir, 'k', Date.now(), Date.now() + HOUR_MS * 3, brokenFs, log), 'claimed');
+  assert.ok(lines.length > 0);
 });
 
 // --- claimsDir ---------------------------------------------------------------

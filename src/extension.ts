@@ -47,7 +47,15 @@ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
-import { claimsDir, claimKeyFor, claimResume, claimOwner, releaseClaim, cleanupStaleClaims } from './claims';
+import {
+  claimsDir,
+  claimKeyFor,
+  claimResume,
+  claimOwner,
+  holdClaim,
+  releaseClaim,
+  cleanupStaleClaims,
+} from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
 const NS = 'claudeLimitBreak';
@@ -1215,6 +1223,22 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
       // "Cancel Pending Resume" means all of it, but say how much it threw
       // away: a job dropped from readyJobs has no other trace.
+      //
+      // Final review, Important 7: with watchScope machine every window holds
+      // its own copy of the same pending job, and each would still fire it.
+      // Claiming each cancelled job's key here makes them drop it as taken
+      // when they do - held fresh until this job's own fire time (holdClaim),
+      // since a limit can count down for hours, far past an ordinary claim's
+      // one-hour life. Only the claim is shared: the job lists themselves
+      // live in each window's own state.
+      const cancelled = [...scheduler.jobs, ...readyJobs];
+      const nowMs = Date.now();
+      for (const job of cancelled) {
+        holdClaim(claimsDir(), claimKeyFor(job), nowMs, job.resumeAtMs, fs, log, vscode.env.sessionId);
+      }
+      if (cancelled.length > 0) {
+        log.info(`Claimed ${cancelled.length} cancelled resume(s) so other windows drop them too.`);
+      }
       if (readyJobs.length > 0) {
         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
         readyJobs.length = 0;

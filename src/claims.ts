@@ -193,6 +193,42 @@ export function claimResume(
 }
 
 /**
+ * Claim `key` and keep it fresh until `untilMs`, not just for STALE_MS from
+ * now. Used by Cancel (final review, Important 7): with watchScope machine
+ * every window holds its own copy of the same pending job, and cancelling in
+ * one window used to leave every other window to fire it anyway. A claim
+ * written at cancel time is what makes the others drop it - but a job can
+ * count down for hours, far past STALE_MS, so an ordinary claim would read as
+ * abandoned by the time it mattered. Staleness is measured from the file's
+ * mtime, so this sets the mtime to the deadline (the cancelled job's own
+ * fire time): another window's copy fires within its jitter of that
+ * deadline, well inside STALE_MS of it, and the 24h sweep still collects it.
+ *
+ * A claim someone else already holds is left alone ('taken'), and a failure
+ * to set the mtime is logged and otherwise ignored - the claim still exists,
+ * it just ages out at the ordinary time.
+ */
+export function holdClaim(
+  dir: string,
+  key: string,
+  nowMs: number,
+  untilMs: number,
+  fs: ClaimFs & { utimesSync(p: string, atime: number, mtime: number): void },
+  log: Logger = noopLog,
+  owner?: string,
+): ClaimResult {
+  const result = claimResume(dir, key, nowMs, fs, log, owner);
+  if (result === 'claimed' && untilMs > nowMs) {
+    try {
+      fs.utimesSync(claimPath(dir, key), untilMs / 1000, untilMs / 1000);
+    } catch (err) {
+      log.warn(`Claim ${key} could not be held until ${new Date(untilMs).toISOString()} (${String(err)}).`);
+    }
+  }
+  return result;
+}
+
+/**
  * The window identity recorded in `key`'s claim file by claimResume's
  * `owner`, or undefined when there is no such file, it cannot be read, or it
  * was written without one (an older build). Only ever used to word a log

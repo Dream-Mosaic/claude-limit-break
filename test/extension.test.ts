@@ -255,6 +255,7 @@ let realClaimsDir = '';
 const claimCalls: { dir: string; key: string; owner?: string }[] = [];
 const releasedKeys: string[] = [];
 const claimResultQueue: ('claimed' | 'taken')[] = [];
+const heldClaims: { key: string; untilMs: number; owner?: string }[] = [];
 
 stubModule('./claims', {
   ...(realClaims as unknown as Record<string, unknown>),
@@ -274,6 +275,16 @@ stubModule('./claims', {
     if (fakeClaimResult === 'real') {
       realClaims.releaseClaim(dir, key, fsArg as never, log as never);
     }
+  },
+  // Final review I7: Cancel's claims. Faked like claimResume, so a test
+  // never writes into the real machine-wide claims directory; delegates to
+  // the real implementation only in 'real' mode.
+  holdClaim: (dir: string, key: string, nowMs: number, untilMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
+    heldClaims.push({ key, untilMs, owner });
+    if (fakeClaimResult === 'real') {
+      return realClaims.holdClaim(dir, key, nowMs, untilMs, fsArg as never, log as never, owner);
+    }
+    return fakeClaimResult;
   },
   cleanupStaleClaims: () => {},
 });
@@ -1319,6 +1330,95 @@ test('cancelling clears the waiting jobs from storage too', async () => {
     vscodeFake.commands.get('claudeLimitBreak.cancel')!();
     await flush();
     assert.equal(store.get(READY_KEY), undefined, 'cancel must not leave it to come back on reload');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// Final review, Important 7: with watchScope machine every window holds its
+// own copy of the same pending job, so Cancel in one window used to leave
+// every other window to fire it. Cancel now claims each cancelled job's key,
+// held fresh until that job's own fire time.
+
+test('cancel claims every cancelled job, so another window firing the same reset drops it (final review I7)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-i7-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  heldClaims.length = 0;
+  const counting = { ...pastJob(), resumeAtMs: Date.now() + 5 * 3_600_000, baseResumeAtMs: Date.now() + 5 * 3_600_000 - 60_000 };
+  const ready = { ...pastJob(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl` };
+  vscodeFake.envSessionId = 'window-A';
+  const ctxA = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', counting], [READY_KEY, [ready]]]));
+  start(ctxA);
+  let aDown = false;
+  let ctxB: FakeContext | undefined;
+  try {
+    await flush();
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    assert.deepEqual(
+      heldClaims.map((h) => h.key).sort(),
+      [realClaims.claimKeyFor(counting), realClaims.claimKeyFor(ready)].sort(),
+      'every cancelled job - counting down and ready alike - must be claimed',
+    );
+    assert.equal(heldClaims.find((h) => h.key === realClaims.claimKeyFor(counting))?.untilMs, counting.resumeAtMs);
+    assert.ok(heldClaims.every((h) => h.owner === 'window-A'));
+    teardown(ctxA);
+    aDown = true;
+    // Window B: the same reset, its own jitter, fires hours from now - long
+    // after an ordinary claim would have gone stale.
+    vscodeFake.outputLines = [];
+    vscodeFake.envSessionId = 'window-B';
+    const later = { ...counting, resumeAtMs: Date.now() - 1000 };
+    ctxB = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', later]]));
+    assert.equal(
+      realClaims.claimResume(dir, realClaims.claimKeyFor(later), counting.resumeAtMs + 20 * 60_000, fs),
+      'taken',
+      'the cancel claim must still be fresh when another window fires, hours later',
+    );
+    start(ctxB);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'the other window must drop the cancelled resume');
+    assert.ok(vscodeFake.outputLines.some((l) => /claimed by another window/.test(l)));
+  } finally {
+    fakeClaimResult = 'claimed';
+    if (!aDown) {
+      teardown(ctxA);
+    }
+    if (ctxB) {
+      teardown(ctxB);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cancel from the status bar menu claims the cancelled job too (final review I7)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  heldClaims.length = 0;
+  const counting = futureJob();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', counting]]));
+  start(ctx);
+  try {
+    await flush();
+    vscodeFake.quickPickAnswer = 'Cancel Pending Resume';
+    await vscodeFake.commands.get('claudeLimitBreak.statusBarMenu')!();
+    assert.deepEqual(heldClaims.map((h) => h.key), [realClaims.claimKeyFor(counting)]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('Cancel with nothing waiting claims nothing', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  heldClaims.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    assert.deepEqual(heldClaims, []);
   } finally {
     teardown(ctx);
   }
