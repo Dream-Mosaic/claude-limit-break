@@ -85,7 +85,7 @@ test('a legacy stored job without baseResumeAtMs/jitterMs is migrated on reconst
     resumeAtMs,
     reason: 'limit',
   };
-  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': legacy }), silent);
+  const s = new ResumeScheduler(memento({ 'claudeLimitBreak.pending': legacy }), silent);
   assert.equal(s.current?.baseResumeAtMs, resumeAtMs);
   assert.equal(s.current?.jitterMs, 0);
 });
@@ -99,7 +99,7 @@ test('cancel clears the pending job', () => {
 
 test('a deadline that passed while VS Code was closed fires on the first tick', async () => {
   const past = job(Date.now() - 1000);
-  const s = new ResumeScheduler(memento({ 'claudeLimitBuster.pending': past }), silent);
+  const s = new ResumeScheduler(memento({ 'claudeLimitBreak.pending': past }), silent);
   const fired: PendingJob[] = [];
   s.onFire((j) => fired.push(j));
   s.start();
@@ -182,7 +182,7 @@ test('another session with a later deadline is kept, not ignored', (t) => {
 test('every due job fires once, whichever session it belongs to', async (t) => {
   const past = Date.now() - 1000;
   const s = new ResumeScheduler(
-    memento({ 'claudeLimitBuster.pending': [jobFor(SESSION_A, past), jobFor(SESSION_B, past)] }),
+    memento({ 'claudeLimitBreak.pending': [jobFor(SESSION_A, past), jobFor(SESSION_B, past)] }),
     silent,
   );
   t.after(() => s.dispose());
@@ -226,4 +226,60 @@ test('cancel with no session named clears every pending job', (t) => {
   s.cancel();
   assert.deepEqual(s.jobs, []);
   assert.equal(s.current, undefined);
+});
+
+// --- Same-reset re-detection (Task 10) --------------------------------------
+//
+// planResume rolls a fresh random jitter on every detection (randomDelay.ts),
+// so a repeated "usage limit" notice for the SAME un-jittered reset
+// (baseResumeAtMs) produces a DIFFERENT resumeAtMs each time. On 2026-09-24 a
+// re-detection re-rolled a smaller jitter and moved a window's resume from
+// 2:27:19 to 2:20:11 - the old dedupe only blocked a LATER resumeAtMs
+// replacing an earlier one, so a smaller re-roll for the same reset slipped
+// through and replaced it. The fix: once a job is scheduled for a reset,
+// SAME sessionId + SAME baseResumeAtMs must never be replaced by a
+// re-detection, whichever way its re-rolled jitter happens to move.
+
+const jobWithBase = (sessionId: string, baseResumeAtMs: number, resumeAtMs: number): PendingJob => ({
+  ...jobFor(sessionId, resumeAtMs),
+  baseResumeAtMs,
+});
+
+test('a re-detection of the same reset with a smaller re-rolled jitter does not move the resume earlier', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  const firstResumeAt = base + 20 * 60_000; // first jitter roll: +20m
+  s.schedule(jobWithBase(SESSION_A, base, firstResumeAt));
+  const secondResumeAt = base + 5 * 60_000; // re-detection, smaller re-roll: +5m
+  assert.equal(
+    s.schedule(jobWithBase(SESSION_A, base, secondResumeAt)),
+    false,
+    'a re-detection of the same reset must be dropped, not accepted',
+  );
+  assert.equal(s.current?.resumeAtMs, firstResumeAt, 'the original jitter roll must be kept');
+});
+
+test('a re-detection of the same reset with a larger re-rolled jitter also does not move the resume', (t) => {
+  // The pre-existing guard already caught the "later" direction (a strictly
+  // later resumeAtMs was already ignored) - this pins that it still holds
+  // once the fix is keyed on baseResumeAtMs rather than resumeAtMs alone.
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  const firstResumeAt = base + 5 * 60_000;
+  s.schedule(jobWithBase(SESSION_A, base, firstResumeAt));
+  const secondResumeAt = base + 20 * 60_000;
+  assert.equal(s.schedule(jobWithBase(SESSION_A, base, secondResumeAt)), false);
+  assert.equal(s.current?.resumeAtMs, firstResumeAt);
+});
+
+test('a genuinely new reset (different baseResumeAtMs) still replaces an earlier one, same as before', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const now = Date.now();
+  s.schedule(jobWithBase(SESSION_A, now + 600_000, now + 600_000));
+  const soonerBase = now + 60_000;
+  assert.equal(s.schedule(jobWithBase(SESSION_A, soonerBase, soonerBase)), true);
+  assert.equal(s.current?.resumeAtMs, soonerBase);
 });

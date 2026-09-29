@@ -1,0 +1,27 @@
+59:  - Task 6: minor (deferred): the commit trailer names Claude Sonnet 5, not the constraint's Opus 5.5.
+73:  - Task 5a: minor (deferred): no cwdExists check before opening the trust terminal (resume has one).
+74:  - Task 5a: minor (deferred): the "could not find the claude executable" string is now duplicated (~452, ~1128).
+75:  - Task 5a: minor (deferred): `void executeCommand(...)` inside the notification's .then has no .catch.
+76:  - Task 5a: minor (deferred): the trustTerminals Set is not cleared on dispose.
+119:  - Task 4a: minor (deferred): spring-forward east of UTC overshoots by an extra hour (London 01:30 → 03:30 BST); safe direction; only Chicago is tested.
+120:  - Task 4a: minor (deferred): the in-flight regex's narrowness is unpinned (no terminal case containing "attempt").
+121:  - Task 4a: minor (deferred, pre-existing): the old api-error-status rule fires on mid-sentence "API Error: 529" prose.
+122:  - ⚠️ open: whether Claude Code writes these renders into JSONL with the literal "API Error:" head, and whether a transient-429 entry carries quotaLimits — evidence covers the TUI render and CHANGELOG only. For NEXT.md.
+138:  - Task 4b: minor (deferred): the trust sentence is duplicated (stall log `trustFirst` vs gaveUpNotice).
+139:  - Task 4b: minor (deferred): a repeated limit notice that the scheduler drops as a duplicate still runs gaveUp.detected(), resetting warn-once (ruling 2 read literally).
+140:  - Task 4b: minor (deferred): a stall check armed before Cancel can record/notify just after Cancel.
+141:  - Task 4b: minor (→ 9b): package.json description for statusBar "pending" is stale (gave-up now shows in that mode).
+152:  - Task 5b: minor (deferred): a newline in a folder name breaks the one-line layout (still escaped text).
+153:  - Task 5b: minor (deferred): "$(...)" theme-icon syntax and "~~" are not neutralised in folder names (cosmetic; supportThemeIcons is on).
+154:  - Task 5b: minor (deferred): harmless double render in rememberReady.
+155:  - Task 5b: minor (deferred): a locale-fragile negative assertion; no escape test on a gave-up-only line.
+169:  - Task 9b: minor (deferred): test/readmeSettings.test.ts rejects column-padded table rows with a misleading "missing" message.
+170:  - Task 9b: minor (deferred): README "What you will see" quotes the tooltip link as "Open Claude to Trust"; the tooltip says "Trust this folder" (the notification button says "Open Claude to Trust").
+25:- Task 1 review: spec ✅, quality Approved; 2 Minor parked:
+26:  - Parked: a flagged entry whose resetsAt is stale returns early, skipping the overload check (transcriptWatcher.ts:452) - a rate-limit entry is not an overload banner - cost if wrong: one missed overload retry on a doubly-flagged entry.
+27:  - Parked: the MAX_OVERLOAD_AGE_MS edge is tested at ±5s, not pinned exactly - cost if wrong: an off-by-ms edge; revisit if extracted into a pure function in Task 4.
+80:  - Minor: 2 mutations claimed as compiler-rejected, unverified.
+84:- Task 2 re-review: all 4 findings ✅; no new issues. Parked Minor: no dedicated test for a failed launch with busy peers (rememberReady gets the original job); the logic was read and confirmed. Cost if wrong: a stale coordination sentence on a manual retry.
+95:- Task 10 fix round 1 DONE (a5534ac 3ebe73c 6ee702a; 456/456, 9/9). Parked the implementer's asymmetry concern: the off-autoResume Resume Now click doesn't refresh a stale claim. autoResume is a global setting, so no other window auto-fires in that mode; the only race is a user clicking in two windows. Cost if wrong: a rare double manual resume. Re-review dispatched.
+96:- Task 10 re-review 1: all 4 findings ✅. New: Important, a manual-bypass path can release another window's claim ('taken' is ignored, then an unconditional release on a failed launch). 2 Minor: stale 'claims' wording in the off-autoResume branch; the e2e temp dir is never removed. Fix round 2 sent.
+98:- Task 10 re-review 2: round-2 fixes ✅; sweep: :918/:965 safe (same tick), :847 (off-autoResume Resume Now) can still delete another window's claim after a stale takeover. Fix round 3 sent (re-claim at click, release only if claimed); also closes the parked round-1 asymmetry.

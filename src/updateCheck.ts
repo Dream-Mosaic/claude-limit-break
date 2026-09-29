@@ -14,7 +14,7 @@ import { URL } from 'node:url';
  * `/releases/latest` cannot be used: it excludes pre-releases, and every
  * release of this project so far is published as a pre-release (verified
  * against the live API on 2026-09-23 - `gh api
- * repos/Dream-Mosaic/claude-limit-buster/releases/latest` returns 404, while
+ * repos/Dream-Mosaic/claude-limit-break/releases/latest` returns 404, while
  * `.../releases` lists v0.1.2 and v0.1.1, both `"prerelease": true`). The
  * newest tag is derived from the releases list instead (see {@link newestTag}).
  */
@@ -103,13 +103,13 @@ export const DEFAULT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * `context.globalState` keys this module's cached state is expected to live
  * under. Exported so the wiring code and this module agree on names without
  * either side hard-coding the other's strings; namespaced under
- * `claudeLimitBuster.updateCheck.` to stay clear of scheduler.ts's
- * `claudeLimitBuster.pending` and extension.ts's `claudeLimitBuster.ready`.
+ * `claudeLimitBreak.updateCheck.` to stay clear of scheduler.ts's
+ * `claudeLimitBreak.pending` and extension.ts's `claudeLimitBreak.ready`.
  */
-export const LAST_CHECKED_KEY = 'claudeLimitBuster.updateCheck.lastCheckedMs';
-export const LATEST_TAG_KEY = 'claudeLimitBuster.updateCheck.latestTag';
-export const DISMISSED_VERSION_KEY = 'claudeLimitBuster.updateCheck.dismissedVersion';
-export const FIRST_RUN_PROMPT_KEY = 'claudeLimitBuster.updateCheck.firstRunPromptAnswer';
+export const LAST_CHECKED_KEY = 'claudeLimitBreak.updateCheck.lastCheckedMs';
+export const LATEST_TAG_KEY = 'claudeLimitBreak.updateCheck.latestTag';
+export const DISMISSED_VERSION_KEY = 'claudeLimitBreak.updateCheck.dismissedVersion';
+export const FIRST_RUN_PROMPT_KEY = 'claudeLimitBreak.updateCheck.firstRunPromptAnswer';
 
 /**
  * What to do this activation, given the cached state and the clock.
@@ -152,14 +152,14 @@ export function decideUpdateCheck(input: UpdateCheckInput): UpdateCheckAction {
 // Fetching the releases list
 // ---------------------------------------------------------------------------
 
-export const RELEASES_URL = 'https://api.github.com/repos/Dream-Mosaic/claude-limit-buster/releases';
+export const RELEASES_URL = 'https://api.github.com/repos/Dream-Mosaic/claude-limit-break/releases';
 
 /** Where a human reads about a release, as opposed to where the API lists it. */
 export const RELEASE_TAG_URL = (tag: string): string =>
-  `https://github.com/Dream-Mosaic/claude-limit-buster/releases/tag/${encodeURIComponent(tag)}`;
+  `https://github.com/Dream-Mosaic/claude-limit-break/releases/tag/${encodeURIComponent(tag)}`;
 
 /** GitHub returns 403 for an unauthenticated request with no User-Agent at all - verified live. */
-const USER_AGENT = 'claude-limit-buster-update-check';
+const USER_AGENT = 'claude-limit-break-update-check';
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -284,7 +284,7 @@ export function fetchLatestReleaseTag(
 // ---------------------------------------------------------------------------
 
 /**
- * `claudeLimitBuster.checkForUpdates` defaults to false - a network call the
+ * `claudeLimitBreak.checkForUpdates` defaults to false - a network call the
  * user did not ask for is a surprise. To make the feature discoverable
  * without nagging, the user is offered a one-time choice on first activation
  * after install: Enable / Not now / Never ask.
@@ -306,7 +306,7 @@ export function shouldOfferFirstRunPrompt(storedAnswer: FirstRunPromptChoice | u
   return storedAnswer === undefined;
 }
 
-/** What the wiring code should write to `claudeLimitBuster.checkForUpdates` after the prompt is answered. */
+/** What the wiring code should write to `claudeLimitBreak.checkForUpdates` after the prompt is answered. */
 export function shouldEnableUpdateChecks(choice: FirstRunPromptChoice): boolean {
   return choice === 'enable';
 }

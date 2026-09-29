@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectOverload } from '../../src/parsers/overloadParser';
+import { detectLimit } from '../../src/parsers/limitParser';
 
 test('detects transient server failures', () => {
   const positives = [
@@ -51,4 +52,225 @@ test('recognises a bare socket hang up, which is how Node prints it', () => {
 
 test('the added marker does not admit prose about sockets', () => {
   assert.equal(detectOverload('the socket layer hangs up on idle connections'), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a (synthesis A5): Claude Code's own in-flight retry must not also be
+// scheduled - acting on it would interrupt Claude's own backoff. The PARENS
+// form carrying a "Retrying in"/"attempt k/n" suffix is that in-flight retry;
+// the COLON form with no such suffix is terminal and stays actionable.
+// Source: prior-art/1-autoretry-detection.md "Three gaps" #1 (line ~30) and
+// the fixture table near line 230; overload.test.js:83-85 ("Acting on it
+// would interrupt Claude's own backoff").
+// ---------------------------------------------------------------------------
+
+test('an in-flight retry (parens form, "Retrying in"/"attempt k/n") must not schedule anything', () => {
+  const positives = [
+    // Exact spec string.
+    'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
+    // Close variants: other codes, other second counts, attempt 10/10, no JSON body.
+    'API Error (500) · Retrying in 30s · attempt 10/10',
+    'API Error (503 {"type":"error","message":"Service Unavailable"}) · Retrying in 12s · attempt 1/5',
+  ];
+  for (const text of positives) {
+    assert.equal(detectOverload(text), undefined, text);
+  }
+});
+
+test('the colon form with no retry suffix stays terminal and actionable', () => {
+  assert.ok(detectOverload('API Error: 529 Overloaded'), 'colon form with no suffix must still fire');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a: the transient-429 render disclaims being a usage limit in its own
+// text and must route to overload instead of being dropped by both parsers.
+// Source: prior-art/1-autoretry-detection.md "Three gaps" #3 (line ~37-48)
+// and the fixture table near line 230.
+// ---------------------------------------------------------------------------
+
+const TRANSIENT_429 = 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited';
+
+test('a transient 429 that disclaims being a usage limit routes to overload', () => {
+  const hit = detectOverload(TRANSIENT_429);
+  assert.ok(hit, 'must be detected as overload');
+  assert.equal(hit.rule, 'transient-429');
+});
+
+test('the transient-429 render never arms a usage-limit timer, trusted or not', () => {
+  assert.equal(detectLimit(TRANSIENT_429, new Date(), 24, { trusted: false }), undefined, 'untrusted path');
+  assert.equal(detectLimit(TRANSIENT_429, new Date(), 24, { trusted: true }), undefined, 'trusted (flagged) path');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a: "computer went to sleep mid-response" and its sibling renders
+// (dropped connection, stalled stream) must route to overload as a
+// retry-class interruption. Anchored on the "API Error:" head so prose that
+// merely mentions sleep never matches.
+// Sources: prior-art/1-autoretry-detection.md line 80-81 (six of the seven
+// variants, verbatim from claude-auto-retry's own fixture, tmux pane %111);
+// prior-art/2-autoretry-resume.md line 296-297 (the "before a response was
+// produced" sleep variant, config.js:89-90); prior-art/5-history-issues.md
+// bug entry #3 ("all seven render variants... suspend, dropped connection,
+// stalled stream, mid-response server error in two forms").
+// ---------------------------------------------------------------------------
+
+test('sleep/stream-interruption renders route to overload', () => {
+  const positives: [string, string][] = [
+    // Exact spec string.
+    ['API Error: Your computer went to sleep mid-response. The response above may be incomplete.', 'spec string'],
+    ['API Error: Your computer went to sleep before a response was produced. Try again.', '2-autoretry-resume.md:296-297'],
+    ['API Error: The response stopped arriving. The response above may be incomplete.', '1-autoretry-detection.md:81 (stalled stream)'],
+    ['API Error: Connection lost mid-response. The response above may be incomplete.', '1-autoretry-detection.md:81 (dropped connection)'],
+    ['API Error: Connection lost before a response was produced. Try again.', '1-autoretry-detection.md:81 (dropped connection)'],
+    ['API Error: Server error mid-response. The response above may be incomplete.', '1-autoretry-detection.md:81'],
+    ['API Error: The response stalled before a response was produced. Try again.', '1-autoretry-detection.md:81 (stalled stream)'],
+  ];
+  for (const [text, source] of positives) {
+    const hit = detectOverload(text);
+    assert.ok(hit, `${source}: ${text}`);
+    assert.equal(hit.rule, 'stream-interrupted', source);
+  }
+});
+
+test('prose merely mentioning sleep, without the API Error: head, never matches', () => {
+  assert.equal(
+    detectOverload('My computer went to sleep mid-response earlier today, is that a problem?'),
+    undefined,
+  );
+});
+
+test('the exact stream-interruption wording without the API Error: head does not match, even when other overload vocabulary is present', () => {
+  // Isolates the head anchor itself: this text carries an ERROR_MARKERS word
+  // ("error") so it clears looksLikeOverloadMessage and actually reaches the
+  // RULES loop, and it carries the literal "your computer went to sleep
+  // mid-response" phrase the rule matches - but with a bare "error:", not
+  // "API Error:", ahead of it. Only the head anchor stands between this and
+  // a false positive.
+  assert.equal(
+    detectOverload('There was an error: your computer went to sleep mid-response, apparently.'),
+    undefined,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Task 4a fix round 1 (review finding #2, Important): the transient-429 and
+// stream-interrupted RULES entries were not anchored to a line start, so
+// "API Error:" turning up mid-sentence in model prose - or inside a quoted
+// shell argument - fired both on the untrusted path. Anchored per physical
+// line of the raw text (matchesApiErrorLine), the same technique
+// looksLikeQuotedNotice (limitParser.ts) already uses, since normalize()
+// collapses every real newline before the RULES loop ever sees the text.
+// Sources: prior-art/1-autoretry-detection.md:82 ("NOT just 'API Error
+// nearby'... these are ordinary-English causes... that get quoted in prose
+// easily"); 5-history-issues.md:55, :174.
+// ---------------------------------------------------------------------------
+
+test('mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)', () => {
+  // Verbatim from the review finding.
+  assert.equal(
+    detectOverload(
+      'Added a rule so API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+    ),
+    undefined,
+  );
+});
+
+test('mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)', () => {
+  assert.equal(
+    detectOverload(
+      'When Claude Code prints API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited we should back off.',
+    ),
+    undefined,
+  );
+});
+
+test('a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)', () => {
+  // The Bash tool_use `command` shape: a shell string literal, not a banner
+  // line of its own.
+  assert.equal(detectOverload('echo "API Error: Your computer went to sleep mid-response."'), undefined);
+});
+
+test('the verbatim renders still fire at the true start of the string', () => {
+  assert.equal(detectOverload(TRANSIENT_429)?.rule, 'transient-429');
+  assert.equal(
+    detectOverload('API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
+      ?.rule,
+    'stream-interrupted',
+  );
+});
+
+test('the verbatim renders still fire on their own physical line, after a real newline', () => {
+  const preceded = (banner: string) => `Some preceding context.\n${banner}`;
+  assert.equal(detectOverload(preceded(TRANSIENT_429))?.rule, 'transient-429');
+  assert.equal(
+    detectOverload(
+      preceded('API Error: Your computer went to sleep mid-response. The response above may be incomplete.'),
+    )?.rule,
+    'stream-interrupted',
+  );
+});
+
+test('the message glyph Claude Code prefixes a banner line with is still accepted', () => {
+  assert.equal(
+    detectOverload('⏺ API Error: Your computer went to sleep mid-response. The response above may be incomplete.')
+      ?.rule,
+    'stream-interrupted',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Final review, Important 4: on the UNFLAGGED path (`anchored: true`) every
+// overload rule - not just transient-429 and stream-interrupted - requires a
+// physical line that starts with "API Error". Each of these short assistant
+// prose blocks armed an overload retry before, and a resume 5-30 minutes
+// later then fired with the "I hit my usage limit" prompt.
+// ---------------------------------------------------------------------------
+
+const UNFLAGGED_PROSE: [string, string][] = [
+  ['connection-error', 'npm install failed: fetch failed (proxy). I will retry with the registry mirror.'],
+  ['timeout', 'All the tests pass except one case where the request timed out.'],
+  ['server-error', 'The staging endpoint returned Internal server error for the upload, so I skipped it.'],
+  ['api-error-status', 'Earlier we saw API Error: 529 Overloaded, but the retry succeeded.'],
+];
+
+for (const [rule, prose] of UNFLAGGED_PROSE) {
+  test(`unflagged prose that used to fire ${rule} does not arm an overload when anchored (final review I4)`, () => {
+    assert.equal(detectOverload(prose)?.rule, rule, 'setup: the unanchored (flagged) path still recognises it');
+    assert.equal(detectOverload(prose, { anchored: true }), undefined, prose);
+  });
+}
+
+/** Each rule's real render, one per rule - the render Claude Code writes on a line of its own. */
+const REAL_RENDERS: [string, string][] = [
+  ['api-error-status', 'API Error: 529 Overloaded'],
+  ['api-error-status', 'API Error (500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}})'],
+  ['overloaded', 'API Error: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'],
+  ['server-error', 'API Error: Internal server error'],
+  ['connection-error', 'API Error: Connection error.'],
+  ['timeout', 'API Error: Request timed out.'],
+  ['transient-429', TRANSIENT_429],
+  ['stream-interrupted', 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.'],
+];
+
+for (const [rule, render] of REAL_RENDERS) {
+  test(`the real ${rule} render fires flagged, and unflagged at a line start (final review I4): ${render.slice(0, 40)}`, () => {
+    assert.equal(detectOverload(render)?.rule, rule, 'flagged (unanchored)');
+    assert.equal(detectOverload(render, { anchored: true })?.rule, rule, 'unflagged, at the start of the text');
+    assert.equal(
+      detectOverload(`Some preceding context.\n⏺ ${render}`, { anchored: true })?.rule,
+      rule,
+      'unflagged, on its own line behind the message glyph',
+    );
+  });
+}
+
+test('anchored: the status comes from the API Error line itself', () => {
+  assert.equal(detectOverload('API Error: 503 Service Unavailable', { anchored: true })?.status, 503);
+});
+
+test('anchored: the parens form still reaches the in-flight exclusion', () => {
+  assert.equal(
+    detectOverload('API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10', { anchored: true }),
+    undefined,
+  );
 });

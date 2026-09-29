@@ -114,10 +114,38 @@ export function buildTerminalOptions(
   claudeArgs: string[] = buildResumeArgs(session.sessionId, prompt),
 ): TerminalOptionsLike {
   return {
-    name: `Limit Buster: ${session.sessionId.slice(0, 8)}`,
+    name: `Limit Break: ${session.sessionId.slice(0, 8)}`,
     cwd: session.cwd,
     shellPath: launcher.file,
     shellArgs: [...launcher.args, ...claudeArgs],
+    isTransient: true,
+    env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
+  };
+}
+
+/**
+ * Terminal options for a plain `claude` launch in `cwd`, with no `--resume`
+ * and no prompt (Task 5a: Trust hotlink).
+ *
+ * This terminal exists only so a human can answer Claude's own trust dialog
+ * themselves - constraint 2 forbids the extension from answering it or
+ * writing `~/.claude.json`, so nothing here sends any input into the
+ * terminal it opens. The environment is stripped exactly as
+ * buildTerminalOptions strips it: a window opened from inside a running
+ * Claude session must not hand this new `claude` process that session's
+ * identity either.
+ *
+ * Not built by calling buildTerminalOptions with a fake ResolvedSession:
+ * that function's name embeds a session id this launch does not have, and
+ * threading an empty claudeArgs list through its session-shaped signature
+ * would be more confusing than a second, smaller function.
+ */
+export function buildTrustTerminalOptions(cwd: string, launcher: Launcher): TerminalOptionsLike {
+  return {
+    name: `Limit Break: Trust ${path.basename(cwd)}`,
+    cwd,
+    shellPath: launcher.file,
+    shellArgs: [...launcher.args],
     isTransient: true,
     env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
   };

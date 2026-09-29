@@ -27,7 +27,10 @@ test('a limit hit schedules a job for the stated time plus jitter', () => {
   assert.equal(p.job.resumeAtMs, at.getTime() + 600_000);
   assert.equal(p.job.jitterMs, 600_000);
   assert.equal(p.job.cwd, '/projects/example');
-  assert.equal(p.job.prompt, 'Continue where you left off.');
+  assert.equal(
+    p.job.prompt,
+    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+  );
 });
 
 test('a transcript that is not a session is ignored, not guessed at', () => {
@@ -40,6 +43,16 @@ test('a session too expensive to resume is refused with the numbers', () => {
   const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);
   assert.equal(p.kind, 'refuse');
   assert.match(p.reason, /token/i);
+});
+
+test('a refusal names the session and folder it refused, so a dismissal can be recorded against them', () => {
+  // Task 4b: a dismissed refusal puts that session into the gave-up state,
+  // which is per session - the refusal has to say which one.
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);
+  assert.equal(p.kind, 'refuse');
+  if (p.kind !== 'refuse') return;
+  assert.equal(p.sessionId, ID);
+  assert.equal(p.cwd, '/projects/example');
 });
 
 test('the budget check can be disabled', () => {
@@ -89,4 +102,41 @@ test('a reset time already in the past still schedules rather than being ignored
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
   assert.equal(p.job.resumeAtMs, past.getTime() + 600_000);
+});
+
+test('an overload job carries the detection entry timestamp it was planned from (final review I3)', () => {
+  const p = planResume(
+    { detection: { text: 'API Error: 529 Overloaded' }, cwd: '/projects/example', file: FILE, entryTimestampMs: 1_234_567 },
+    'overload',
+    settings(),
+    small,
+    NOW,
+    noJitter,
+  );
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.entryTimestampMs, 1_234_567);
+});
+
+test('a hit with no entry timestamp plans a job without one', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.entryTimestampMs, undefined);
+});
+
+test('a planned job records the transcript size at detection, the baseline for the native-continue check (final review I6)', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 123_456, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.transcriptBytesAtDetection, 123_456);
+});
+
+test('an unreadable transcript size is left off the job rather than recorded as zero', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => {
+    throw new Error('ENOENT');
+  }, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.transcriptBytesAtDetection, undefined);
 });

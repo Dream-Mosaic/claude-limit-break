@@ -44,6 +44,18 @@ test('a non-string claudeCommand falls back to the default, a valid string passe
   assert.equal(passthrough, '/opt/claude/bin/claude');
 });
 
+test('a non-string resumePrompt falls back to the default prompt', () => {
+  // str() has two fallback arguments for resumePrompt - one for c.get() itself
+  // and one for when a malformed settings.json hands back a non-string. Both
+  // must agree, so pin the second path explicitly rather than only the
+  // no-override case every other test exercises.
+  const fallback = readSettings(source({ resumePrompt: 42 })).resumePrompt;
+  assert.equal(
+    fallback,
+    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+  );
+});
+
 test('every setting the code reads is declared in the manifest, and every declared setting is read', () => {
   // Upstream read claudeTimeout.soundCommand without declaring it, which left
   // it with no scope - so a workspace could set it. This test is that finding,
@@ -60,12 +72,12 @@ test('every setting the code reads is declared in the manifest, and every declar
     assert.ok(key, 'regex capture group must have matched something');
     read.add(key);
     assert.ok(
-      declared.has(`claudeLimitBuster.${key}`),
+      declared.has(`claudeLimitBreak.${key}`),
       `config.ts reads '${key}' but package.json does not declare it`,
     );
   }
   for (const declaredKey of declared) {
-    const shortKey = declaredKey.replace('claudeLimitBuster.', '');
+    const shortKey = declaredKey.replace('claudeLimitBreak.', '');
     assert.ok(
       read.has(shortKey),
       `package.json declares '${declaredKey}' but config.ts never reads it`,
@@ -112,7 +124,7 @@ test('execution-adjacent settings are machine-scoped', () => {
     'resumePrompt',
   ]) {
     assert.equal(
-      props[`claudeLimitBuster.${key}`].scope,
+      props[`claudeLimitBreak.${key}`].scope,
       'machine',
       `${key} influences what gets executed and must not be workspace-settable`,
     );

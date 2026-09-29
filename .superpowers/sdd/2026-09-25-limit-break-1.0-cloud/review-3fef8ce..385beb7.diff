@@ -1,0 +1,195 @@
+## Commits
+385beb7 feat(config): default resumePrompt to the Limit Break resume message
+
+## Files changed
+ package.json                        |  2 +-
+ src/config.ts                       |  5 ++++-
+ test/config.test.ts                 | 12 ++++++++++++
+ test/extension.test.ts              |  3 ++-
+ test/integration/extension.itest.ts |  5 ++++-
+ test/policy.test.ts                 |  5 ++++-
+ 6 files changed, 27 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/package.json b/package.json
+index 698ba60..6c2b01a 100644
+--- a/package.json
++++ b/package.json
+@@ -95,21 +95,21 @@
+           "markdownDescription": "Permission mode passed to headless resumes. Empty means none, so tool calls are denied. Machine-scoped: a workspace must not be able to grant autonomy."
+         },
+         "claudeLimitBuster.claudeCommand": {
+           "type": "string",
+           "default": "",
+           "scope": "machine",
+           "markdownDescription": "Path to the `claude` executable. Empty auto-detects from PATH. Machine-scoped: this names the program that gets run."
+         },
+         "claudeLimitBuster.resumePrompt": {
+           "type": "string",
+-          "default": "Continue where you left off.",
++          "default": "[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.",
+           "scope": "machine",
+           "description": "Prompt sent when resuming. Passed as a single argument, never through a shell. Machine-scoped: this is the instruction a tool-using agent acts on, so a workspace must not be able to set it."
+         },
+         "claudeLimitBuster.maxResumeTokens": {
+           "type": "number",
+           "default": 500000,
+           "scope": "window",
+           "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - and falls back to a byte count only when there is none. Set to `0` to never refuse."
+         },
+         "claudeLimitBuster.maxWaitHours": {
+diff --git a/src/config.ts b/src/config.ts
+index 1ca4509..5472880 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -38,21 +38,24 @@ const atLeast = (value: unknown, floor: number, fallback: number): number =>
+ const str = (value: unknown, fallback: string): string =>
+   typeof value === 'string' ? value : fallback;
+ 
+ export function readSettings(c: ConfigSource): Settings {
+   return {
+     enabled: c.get('enabled', true),
+     autoResume: c.get('autoResume', true),
+     resumeMode: oneOf(RESUME_MODES, c.get('resumeMode', 'interactive'), 'interactive'),
+     headlessPermissionMode: oneOf(PERMISSION_MODES, c.get('headlessPermissionMode', ''), ''),
+     claudeCommand: str(c.get('claudeCommand', ''), ''),
+-    resumePrompt: str(c.get('resumePrompt', 'Continue where you left off.'), 'Continue where you left off.'),
++    resumePrompt: str(
++      c.get('resumePrompt', '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.'),
++      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
++    ),
+     maxResumeTokens: atLeast(c.get('maxResumeTokens', 500_000), 0, 500_000),
+     maxWaitHours: atLeast(c.get('maxWaitHours', 24), 1, 24),
+     transcriptPollSeconds: atLeast(c.get('transcriptPollSeconds', 5), 1, 5),
+     randomDelayMinMinutes: atLeast(c.get('randomDelayMinMinutes', 5), 0, 5),
+     randomDelayMaxMinutes: atLeast(c.get('randomDelayMaxMinutes', 30), 0, 30),
+     notify: c.get('notify', true),
+     alertSound: c.get('alertSound', true),
+     alertSoundFile: str(c.get('alertSoundFile', ''), ''),
+     onStale: oneOf(STALE_ACTIONS, c.get('onStale', 'notify'), 'notify'),
+     statusBar: oneOf(STATUS_BAR_MODES, c.get('statusBar', 'always'), 'always'),
+diff --git a/test/config.test.ts b/test/config.test.ts
+index 5f6b6ac..02f2279 100644
+--- a/test/config.test.ts
++++ b/test/config.test.ts
+@@ -37,20 +37,32 @@ test('negative numbers are clamped rather than trusted', () => {
+   assert.equal(s.maxResumeTokens, 0, 'a negative cap means disabled, not inverted');
+ });
+ 
+ test('a non-string claudeCommand falls back to the default, a valid string passes through', () => {
+   const fallback = readSettings(source({ claudeCommand: 42 })).claudeCommand;
+   assert.equal(fallback, '', 'a non-string value must not reach resolveClaudeLauncher, which calls .trim() on it');
+   const passthrough = readSettings(source({ claudeCommand: '/opt/claude/bin/claude' })).claudeCommand;
+   assert.equal(passthrough, '/opt/claude/bin/claude');
+ });
+ 
++test('a non-string resumePrompt falls back to the default prompt', () => {
++  // str() has two fallback arguments for resumePrompt - one for c.get() itself
++  // and one for when a malformed settings.json hands back a non-string. Both
++  // must agree, so pin the second path explicitly rather than only the
++  // no-override case every other test exercises.
++  const fallback = readSettings(source({ resumePrompt: 42 })).resumePrompt;
++  assert.equal(
++    fallback,
++    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
++  );
++});
++
+ test('every setting the code reads is declared in the manifest, and every declared setting is read', () => {
+   // Upstream read claudeTimeout.soundCommand without declaring it, which left
+   // it with no scope - so a workspace could set it. This test is that finding,
+   // frozen. The reverse direction catches a declared-but-dead setting: one
+   // that shows up in the settings UI but nothing in config.ts ever reads.
+   const manifest = JSON.parse(
+     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
+   );
+   const declared = new Set(Object.keys(manifest.contributes.configuration.properties));
+   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'config.ts'), 'utf8');
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 7322af2..503bd15 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -257,21 +257,22 @@ stubModule('./claims', {
+ // compiled `import` would hoist its require() above them.
+ const { activate, isInsideWorkspace } =
+   require('../src/extension') as typeof import('../src/extension');
+ 
+ // A path with a separator and no .cmd/.bat/.ps1 extension resolves as-is on
+ // every platform, so the resume path never touches PATH or the filesystem.
+ const LAUNCHER = '/opt/claude/bin/claude';
+ const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
+ /** The pid the fake terminal reports, i.e. the resume this extension launched. */
+ const TERMINAL_PID = 4242;
+-const PROMPT = 'Continue where you left off.';
++const PROMPT =
++  '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.';
+ 
+ // resume() now checks the cwd on the real filesystem before launching, so
+ // fixtures that expect a launch need a directory that is actually there.
+ // os.tmpdir() always exists; the "missing" one is a path under it that is
+ // never created.
+ const REAL_CWD = os.tmpdir();
+ const MISSING_CWD = path.join(os.tmpdir(), 'clb-does-not-exist', SESSION);
+ 
+ interface FakeContext {
+   subscriptions: { dispose(): void }[];
+diff --git a/test/integration/extension.itest.ts b/test/integration/extension.itest.ts
+index decfa55..9284897 100644
+--- a/test/integration/extension.itest.ts
++++ b/test/integration/extension.itest.ts
+@@ -60,21 +60,24 @@ suite('claude-limit-buster activation', () => {
+   test('the declared settings reach the configuration API with their declared defaults', () => {
+     const config = vscode.workspace.getConfiguration(NS);
+     // Values chosen to match package.json. A default that disagrees between the
+     // manifest and src/config.ts is invisible to the unit suite, which injects
+     // its own ConfigSource rather than reading VS Code's.
+     assert.equal(config.get('enabled'), true);
+     assert.equal(config.get('autoResume'), true);
+     assert.equal(config.get('resumeMode'), 'interactive');
+     assert.equal(config.get('headlessPermissionMode'), '');
+     assert.equal(config.get('claudeCommand'), '');
+-    assert.equal(config.get('resumePrompt'), 'Continue where you left off.');
++    assert.equal(
++      config.get('resumePrompt'),
++      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
++    );
+     assert.equal(config.get('maxResumeTokens'), 500000);
+     assert.equal(config.get('maxWaitHours'), 24);
+     // Added for 1.0. Each is a default someone would notice if it drifted:
+     // the marker is the only sign the extension loaded, the scope decides
+     // which sessions are seen at all, and the update check is an outbound
+     // request that must stay off until asked for.
+     assert.equal(config.get('statusBar'), 'always');
+     assert.equal(config.get('onStale'), 'notify');
+     assert.equal(config.get('watchScope'), 'machine');
+     assert.equal(config.get('checkForUpdates'), false);
+diff --git a/test/policy.test.ts b/test/policy.test.ts
+index c0009b3..346e31e 100644
+--- a/test/policy.test.ts
++++ b/test/policy.test.ts
+@@ -20,21 +20,24 @@ const hit = (resumeAt: Date, file = FILE) => ({
+ test('a limit hit schedules a job for the stated time plus jitter', () => {
+   const at = new Date('2026-08-03T17:00:00Z');
+   const p = planResume(hit(at), 'limit', settings(), small, NOW, () => 600_000);
+   assert.equal(p.kind, 'schedule');
+   if (p.kind !== 'schedule') return;
+   assert.equal(p.job.sessionId, ID);
+   assert.equal(p.job.baseResumeAtMs, at.getTime());
+   assert.equal(p.job.resumeAtMs, at.getTime() + 600_000);
+   assert.equal(p.job.jitterMs, 600_000);
+   assert.equal(p.job.cwd, '/projects/example');
+-  assert.equal(p.job.prompt, 'Continue where you left off.');
++  assert.equal(
++    p.job.prompt,
++    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
++  );
+ });
+ 
+ test('a transcript that is not a session is ignored, not guessed at', () => {
+   const p = planResume(hit(new Date('2026-08-03T17:00:00Z'), '/h/p/summary.jsonl'), 'limit', settings(), small, NOW, noJitter);
+   assert.equal(p.kind, 'ignore');
+   assert.match(p.reason, /session/i);
+ });
+ 
+ test('a session too expensive to resume is refused with the numbers', () => {
+   const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);

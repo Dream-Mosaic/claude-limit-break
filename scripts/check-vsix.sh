@@ -71,6 +71,28 @@ else
   echo "ok: .superpowers is absent from the .vsix"
 fi
 
+# The Marketplace icon is the only brand asset users need at install time; it
+# is what package.json's "icon" field points at, so it must ship.
+if printf '%s\n' "$names" | grep -qE "^extension/media/icon\.png$"; then
+  echo "ok: media/icon.png ships inside the .vsix"
+else
+  echo "::error::media/icon.png is missing from the .vsix"
+  failed=1
+fi
+
+# The other brand assets (high-res logo, README banner, mono variants) are not
+# needed inside the package: the README banner is pulled from its GitHub URL,
+# and the mono assets are for a future status-bar icon font and a v1.1
+# sidebar icon that do not exist yet. Shipping them just bloats the VSIX.
+for f in logo.png banner.png logo-mono.png logo-mono.svg; do
+  if printf '%s\n' "$names" | grep -qE "^extension/media/${f//./\\.}$"; then
+    echo "::error::media/$f is present in the .vsix and should not be"
+    failed=1
+  else
+    echo "ok: media/$f is absent from the .vsix"
+  fi
+done
+
 if [ "$failed" -ne 0 ]; then
   exit 1
 fi

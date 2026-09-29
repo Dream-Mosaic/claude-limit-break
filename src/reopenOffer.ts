@@ -68,13 +68,13 @@ export function buildReopenOffer(
   if (action === 'reopen' && canReopen) {
     return {
       message:
-        `Claude Limit Buster: session ${short} was resumed, and its panel tab has been ` +
+        `Limit Break: session ${short} was resumed, and its panel tab has been ` +
         `reopened so it shows the new turn.`,
       reopen: true,
     };
   }
   const warning =
-    `Claude Limit Buster: session ${short} was resumed in a terminal, but its panel tab is ` +
+    `Limit Break: session ${short} was resumed in a terminal, but its panel tab is ` +
     `still on the conversation as it was before. Reopen that tab before you type in it, or ` +
     `your message will start a branch that drops the resumed turn.`;
   return canReopen ? { message: warning, button: BUTTON_LABEL, reopen: false } : { message: warning, reopen: false };

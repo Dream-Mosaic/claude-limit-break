@@ -5,11 +5,13 @@ import type { PendingJob } from './scheduler';
 
 export type Plan =
   | { kind: 'schedule'; job: PendingJob; estimate: number }
-  | { kind: 'refuse'; reason: string }
+  // The session is named so a dismissed refusal can be recorded against it
+  // (the gave-up state, gaveUp.ts, is per session).
+  | { kind: 'refuse'; reason: string; sessionId: string; cwd?: string }
   | { kind: 'ignore'; reason: string };
 
 export function planResume(
-  hit: { detection: { resumeAt?: Date; text: string }; cwd?: string; file: string },
+  hit: { detection: { resumeAt?: Date; text: string }; cwd?: string; file: string; entryTimestampMs?: number },
   reason: 'limit' | 'overload',
   settings: Settings,
   statBytes: (p: string) => number,
@@ -33,7 +35,12 @@ export function planResume(
   }
   const verdict = checkBudget(session.bytes, settings.maxResumeTokens, readUsage?.(session.transcript));
   if (!verdict.allowed) {
-    return { kind: 'refuse', reason: verdict.reason ?? 'Over the token budget.' };
+    return {
+      kind: 'refuse',
+      reason: verdict.reason ?? 'Over the token budget.',
+      sessionId: session.sessionId,
+      cwd: session.cwd,
+    };
   }
   // An overload has no stated reset time, so the jitter *is* the backoff.
   const base = hit.detection.resumeAt?.getTime() ?? now.getTime();
@@ -50,6 +57,14 @@ export function planResume(
       resumeAtMs: base + jitterMs,
       jitterMs,
       reason,
+      // Only set when the watcher had one: an absent key, not `undefined`,
+      // keeps the persisted job (globalState) exactly as it was for a hit
+      // without it.
+      ...(hit.entryTimestampMs !== undefined ? { entryTimestampMs: hit.entryTimestampMs } : {}),
+      // The native auto-continue check's baseline (final review, Important
+      // 6). resolveSession reports 0 for a size it could not read; that is
+      // "unknown", not a baseline every transcript has grown past.
+      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
     },
   };
 }

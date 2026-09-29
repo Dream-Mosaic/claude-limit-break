@@ -1,0 +1,427 @@
+## Commits
+836371a fix(statusBar,extension): trust link truncation and stale trust markers
+ src/extension.ts       | 65 ++++++++++++++++++++++++++--------
+ src/statusBar.ts       | 27 ++++++++++++---
+ test/extension.test.ts | 94 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ test/statusBar.test.ts | 44 +++++++++++++++++++++++
+ 4 files changed, 212 insertions(+), 18 deletions(-)
+## Diff
+diff --git a/src/extension.ts b/src/extension.ts
+index 015082f..e8e0410 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -343,45 +343,78 @@ export function activate(context: vscode.ExtensionContext): void {
+    * discover. Keyed on the config file's mtime so the common case - nothing
+    * changed - is a stat rather than a parse of a file that grows with every
+    * project the user opens. An unreadable mtime falls through to re-reading,
+    * which is the safe direction: the read itself is the thing that answers.
+    */
+   // Keyed by session, not one scalar for the window. onChange only ever
+   // reports the soonest job, so a second session's first check can land on an
+   // mtime a different session's check already recorded - and then its trust is
+   // never re-read at all, which is the bug this function exists to fix.
+   const trustStamps = new Map<string, number>();
+-  const refreshTrust = (job: PendingJob | undefined): void => {
++  /** Returns whether this call actually flipped `job.folderTrusted` to true. */
++  const refreshTrust = (job: PendingJob | undefined): boolean => {
+     if (!job || job.folderTrusted !== false || !job.cwd) {
+-      return;
++      return false;
+     }
+     const configPath = defaultClaudeConfigPath();
+     let stamp: number | undefined;
+     try {
+       stamp = fs.statSync(configPath).mtimeMs;
+     } catch {
+       stamp = undefined;
+     }
+     if (stamp !== undefined && stamp === trustStamps.get(job.sessionId)) {
+-      return;
++      return false;
+     }
+     if (stamp !== undefined) {
+       trustStamps.set(job.sessionId, stamp);
+     }
+     const trusted = isFolderTrusted(
+       job.cwd,
+       readClaudeUserConfig(configPath, (p) => fs.readFileSync(p, 'utf8')),
+       process.platform,
+     );
+     if (trusted) {
+       job.folderTrusted = true;
+       log.info(`Folder ${job.cwd} is now trusted by the Claude CLI; the resume will not stall at its prompt.`);
++      return true;
++    }
++    return false;
++  };
++
++  /**
++   * Re-check trust for every session the tooltip can currently show a
++   * marker for: every counting-down job AND every job waiting for
++   * "Resume Now" (review 1, Important 2 - the tooltip lists both since Task
++   * 5b, but this used to refresh only `scheduler.current`, or only
++   * `scheduler.jobs`). Each check is `refreshTrust`'s own cheap mtime-cached
++   * stat - no config parse unless the file actually changed - so looping
++   * the whole set on a scheduler change or a trust-terminal close costs at
++   * most one stat per listed job, not a re-parse.
++   *
++   * A ready job's flip is written back to `readyJobs`' own persistence:
++   * without this, a ready job trusted right before a reload would come back
++   * with the stale `folderTrusted: false` it was persisted with, and the
++   * tooltip would call it untrusted again despite nothing having changed.
++   */
++  const refreshAllTrust = (): void => {
++    for (const job of scheduler.jobs) {
++      refreshTrust(job);
++    }
++    let readyChanged = false;
++    for (const job of readyJobs) {
++      if (refreshTrust(job)) {
++        readyChanged = true;
++      }
++    }
++    if (readyChanged) {
++      persistReady();
+     }
+   };
+ 
+   /** Transcript size, or undefined when it cannot be read at all. */
+   const transcriptBytes = (p: string): number | undefined => {
+     try {
+       return fs.statSync(p).size;
+     } catch {
+       return undefined;
+     }
+@@ -886,22 +919,26 @@ export function activate(context: vscode.ExtensionContext): void {
+         return;
+       }
+       // alertSound gates the chime alone. The stale-tab warning has its own
+       // gates - this extension resumed the session, and a panel still holds
+       // it - and must not go quiet because someone turned the sound off.
+       if (s.alertSound) {
+         playAlertSound({ file: s.alertSoundFile });
+       }
+       void handleStalePanel(hit);
+     }),
+-    scheduler.onChange((job) => {
+-      refreshTrust(job);
++    scheduler.onChange(() => {
++      // Every listed job/ready session, not just the soonest (review 1,
++      // Important 2) - this fires every countdown tick too, which is fine:
++      // refreshTrust's own mtime cache keeps a no-op tick to a bare stat
++      // per listed job.
++      refreshAllTrust();
+       render();
+     }),
+     scheduler.onFire((job) => {
+       // Task 10: claim this reset before anything else. Every window watching
+       // this account can independently detect and schedule the SAME reset -
+       // watchScope: machine means every copy of the extension watches every
+       // transcript - and two windows have been seen firing within a second or
+       // two of each other, too close for Task 2's holder check (which reads
+       // `claude agents`) to have caught the first window's child yet. A
+       // machine-wide file claim is first-past-the-post across windows in a way
+@@ -1271,29 +1308,29 @@ export function activate(context: vscode.ExtensionContext): void {
+       const opts = buildTrustTerminalOptions(onRecord ?? cwd, launcher);
+       const terminal = vscode.window.createTerminal(opts);
+       trustTerminals.add(terminal);
+       terminal.show();
+       log.info(`Opened a terminal at ${opts.cwd} to trust it with the Claude CLI.`);
+     }),
+     vscode.window.onDidCloseTerminal((terminal) => {
+       if (!trustTerminals.delete(terminal)) {
+         return;
+       }
+-      // Ruling 2: re-check EVERY pending job, not just the one the terminal
+-      // was opened for - refreshTrust is mtime-cached per session, so this is
+-      // cheap, and it is what catches a job whose cwd is a different spelling
+-      // of the same folder the user just trusted. Then force the same render
+-      // call scheduler.onChange uses (above), so the tooltip's marker clears
+-      // now instead of waiting for the next countdown tick.
+-      for (const job of scheduler.jobs) {
+-        refreshTrust(job);
+-      }
++      // Ruling 2: re-check EVERY pending job AND ready job (review 1,
++      // Important 2 - a ready job's marker used to never clear at all), not
++      // just the one the terminal was opened for - refreshTrust is
++      // mtime-cached per session, so this is cheap, and it is what catches a
++      // job whose cwd is a different spelling of the same folder the user
++      // just trusted. Then force the same render call scheduler.onChange
++      // uses (above), so the tooltip's marker clears now instead of waiting
++      // for the next countdown tick.
++      refreshAllTrust();
+       render();
+     }),
+   );
+ 
+   scheduler.start();
+   // Unconditional, not left to scheduler.start()'s own onChange (which fires
+   // only when something is pending): readyJobs restored above can be
+   // non-empty with nothing pending, and before this the status bar simply
+   // never showed them - the marker stayed hidden until the next event. The
+   // "install from a VSIX and see nothing" doubt this class's own tooltip
+diff --git a/src/statusBar.ts b/src/statusBar.ts
+index c24aa00..aa40143 100644
+--- a/src/statusBar.ts
++++ b/src/statusBar.ts
+@@ -30,28 +30,47 @@ export function escapeMarkdown(text: string): string {
+  * recorded on a different OS than the one it is currently rendering on (a
+  * synced settings/state profile, or a transcript copied between machines),
+  * and POSIX `basename` does not split on `\`. Mirrors the same reasoning as
+  * `resolveSession`'s filename split in sessionResolver.ts.
+  */
+ function folderBasename(cwd: string): string {
+   const segments = cwd.split(/[\\/]+/).filter((s) => s.length > 0);
+   return segments.length > 0 ? segments[segments.length - 1]! : cwd;
+ }
+ 
++/**
++ * `encodeURIComponent` leaves `( ) ! ' *` raw - RFC 3986 calls them
++ * "unreserved", which is exactly wrong here: the query sits inside a
++ * Markdown inline link's `(...)` target, and a renderer reads that target
++ * only up to the first UNESCAPED ")". A cwd containing any of these -
++ * an unbalanced ")" is enough (`/home/me/foo)`, or an ordinary
++ * "(copy)" folder) - closed the link target early: `openClaudeToTrust` ran
++ * with no arguments and silently no-opped (review 1, Important 1). Percent-
++ * encoded by hand, after `encodeURIComponent`, since that is the only gap
++ * it leaves for a Markdown link target specifically.
++ */
++const LEFT_RAW_BY_ENCODE_URI_COMPONENT = /[()!'*]/g;
++
+ /**
+  * The command-URI for the trust hotlink (Task 5a's `openClaudeToTrust`),
+- * exactly the VS Code command-URI convention: `command:<id>?<args>`, args
+- * being `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
+- * array, since that command takes the cwd as its sole parameter.
++ * the VS Code command-URI convention: `command:<id>?<args>`, args being
++ * `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
++ * array, since that command takes the cwd as its sole parameter - with the
++ * characters above additionally escaped so the result is safe as a Markdown
++ * link target, not just as a URI.
+  */
+ export function trustCommandUri(cwd: string): string {
+-  return `command:${TRUST_COMMAND}?${encodeURIComponent(JSON.stringify([cwd]))}`;
++  const args = encodeURIComponent(JSON.stringify([cwd])).replace(
++    LEFT_RAW_BY_ENCODE_URI_COMPONENT,
++    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
++  );
++  return `command:${TRUST_COMMAND}?${args}`;
+ }
+ 
+ /** One session's line, and whether it carries the trust hotlink. */
+ interface SessionLine {
+   markdown: string;
+   hasTrustLink: boolean;
+ }
+ 
+ /**
+  * One Markdown line (no leading bullet) for a session: short id, escaped
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index af60e90..da3e7eb 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -1651,20 +1651,114 @@ test('closing the trust terminal re-reads trust for every pending job, not just
+       true,
+       'the non-current job must have its trust re-checked too, not just scheduler.current',
+     );
+   } finally {
+     trustedCwds = 'all';
+     fs.rmSync(dirB, { recursive: true, force: true });
+     teardown(ctx);
+   }
+ });
+ 
++// ---------------------------------------------------------------------------
++// Review 1, Important 2. Now that EVERY listed session shows the untrusted
++// marker (Task 5b), a marker that never re-checks for a ready job - or for
++// a counting-down job that was never `scheduler.current` - stays wrong
++// forever, including across a reload (a ready job's folderTrusted is
++// persisted).
++// ---------------------------------------------------------------------------
++
++test('closing the trust terminal re-reads trust for a ready job too, and persists the flip', async () => {
++  resetVscodeFake();
++  vscodeFake.config = manualConfig(); // autoResume off, so the fired job becomes "ready"
++  trustedCwds = new Set(); // nothing trusted yet
++  const store = new Map<string, unknown>();
++  const ctx = contextOver(store);
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000)); // already past -> fires on the first tick
++    await oneTick();
++    const readyStored = () =>
++      (store.get(READY_KEY) as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
++    assert.equal(readyStored()[0]?.folderTrusted, false, 'setup: the ready job must start out untrusted');
++    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.match(tooltip(), /not trusted/i, 'setup: the tooltip warns about the ready session too');
++
++    // The fake globalState never serialises - a stored array's ELEMENTS are
++    // the exact same live objects refreshTrust mutates in place, so they
++    // would read as trusted here even if the flip were never written back.
++    // The array reference itself is the only thing that tells the two apart:
++    // persistReady() always stores a fresh `[...readyJobs]` array, so a
++    // second persistReady() call after the flip is the only way this
++    // reference can change.
++    const storedBeforeClose = store.get(READY_KEY);
++
++    await trustCommand()!(REAL_CWD);
++    assert.equal(vscodeFake.terminals.length, 1, 'setup: the trust terminal must have opened');
++    trustedCwds = 'all';
++    fireTerminalClose(vscodeFake.terminals[0]!);
++    await flush();
++
++    assert.ok(!/not trusted/i.test(tooltip()), `the ready session's marker must clear too: ${tooltip()}`);
++    assert.equal(
++      readyStored()[0]?.folderTrusted,
++      true,
++      'the flip must be written back to the persisted ready list, or a reload shows "not trusted" again',
++    );
++    assert.notEqual(
++      store.get(READY_KEY),
++      storedBeforeClose,
++      'the ready list must actually be re-persisted (a new array written), not just mutated in memory',
++    );
++  } finally {
++    trustedCwds = 'all';
++    teardown(ctx);
++  }
++});
++
++test('a non-soonest counting job trusted externally clears on the next scheduler change, not just the soonest', async () => {
++  // "Externally" here means without ever using this extension's own trust
++  // hotlink or closing a terminal it opened - e.g. trusted from an ordinary
++  // terminal, or the CLI's own trust prompt answered directly. Nothing here
++  // fires onDidCloseTerminal at all: only an ordinary scheduler tick, which
++  // fires scheduler.onChange with `current` still SESSION, never SESSION_B.
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
++  trustedCwds = new Set(); // nothing trusted yet
++  const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-nonsoonest-'));
++  const store = new Map<string, unknown>();
++  const ctx = contextOver(store);
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000), REAL_CWD); // sooner: stays scheduler.current
++    FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_200_000), dirB); // later: never current
++    await flush();
++
++    const pendingJobs = () =>
++      (store.get('claudeLimitBuster.pending') as { sessionId: string; folderTrusted?: boolean }[] | undefined) ?? [];
++    const jobB = () => pendingJobs().find((j) => j.sessionId === SESSION_B);
++    assert.equal(jobB()?.folderTrusted, false, 'setup: the non-soonest job starts out untrusted');
++
++    trustedCwds = new Set([dirB]);
++    await oneTick(); // an ordinary countdown tick - no detection, no terminal close
++
++    assert.equal(
++      jobB()?.folderTrusted,
++      true,
++      'an ordinary scheduler.onChange must re-check every job, not just scheduler.current',
++    );
++  } finally {
++    trustedCwds = 'all';
++    fs.rmSync(dirB, { recursive: true, force: true });
++    teardown(ctx);
++  }
++});
++
+ test('closing an unrelated terminal does not re-read trust', async () => {
+   resetVscodeFake();
+   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
+   trustedCwds = new Set(); // nothing trusted yet
+   const ctx = contextOver(new Map());
+   start(ctx);
+   try {
+     FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
+     await flush();
+     const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+diff --git a/test/statusBar.test.ts b/test/statusBar.test.ts
+index 384b32f..4babb12 100644
+--- a/test/statusBar.test.ts
++++ b/test/statusBar.test.ts
+@@ -77,20 +77,40 @@ test('trustCommandUri encodes a Windows path with a backslash, a space and a #',
+   const query = uri.slice(uri.indexOf('?') + 1);
+   // None of these may appear raw in the query: a raw '#' would be read as a
+   // URI fragment (or end the Markdown link early), a raw space would break
+   // the query, and a raw backslash is meaningless in a URI.
+   assert.ok(!query.includes('#'), query);
+   assert.ok(!query.includes(' '), query);
+   assert.ok(!query.includes('\\'), query);
+   assert.deepEqual(JSON.parse(decodeURIComponent(query)), [cwd], 'must decode back to the exact cwd');
+ });
+ 
++// Review 1, Important 1: encodeURIComponent leaves `( ) ! ' *` raw (they are
++// "unreserved" per RFC 3986's own definition, which encodeURIComponent
++// follows). A cwd containing any of them - an unbalanced ")" is enough -
++// otherwise sits raw inside the Markdown link's `(...)` target, and a
++// Markdown renderer reads a link target only up to the first unescaped ")":
++// the rest of the encoded JSON (and the folder name after it) spills out as
++// literal tooltip text, and the truncated command runs with no arguments.
++test('trustCommandUri also percent-encodes the characters encodeURIComponent leaves raw: ( ) ! \' *', () => {
++  for (const cwd of ['/home/me/foo)', '/home/me/project (copy)', "/home/me/it's-mine", '/home/me/*star*', '/home/me/a!b']) {
++    const uri = trustCommandUri(cwd);
++    const query = uri.slice(uri.indexOf('?') + 1);
++    assert.ok(!/[()!'*]/.test(query), `raw special character leaked into the query for ${JSON.stringify(cwd)}: ${query}`);
++    assert.deepEqual(
++      JSON.parse(decodeURIComponent(query)),
++      [cwd],
++      `must still decode back to exactly [cwd] for ${JSON.stringify(cwd)}`,
++    );
++  }
++});
++
+ // ---------------------------------------------------------------------------
+ // buildSessionLines - the pure line-builder behind the tooltip. One line per
+ // session: pending/ready first (soonest first), gave-up-only sessions after.
+ // ---------------------------------------------------------------------------
+ 
+ const gaveUpRec = (over: Partial<import('../src/gaveUp').GaveUpRecord> = {}) => ({
+   sessionId: job().sessionId,
+   cwd: '/projects/example',
+   cause: 'stall' as const,
+   atMs: Date.now(),
+@@ -168,20 +188,44 @@ test('the folder is escaped before it reaches the line', () => {
+   assert.ok(!lines[0]!.includes('*x*'), lines[0]);
+ });
+ 
+ test('an untrusted job gets a warning marker and a trust link, and reports hasTrustLink', () => {
+   const { lines, hasTrustLink } = buildSessionLines([job({ folderTrusted: false, cwd: '/projects/example' })], [], []);
+   assert.match(lines[0]!, /not trusted/i);
+   assert.ok(lines[0]!.includes('command:claudeLimitBuster.openClaudeToTrust'), lines[0]);
+   assert.ok(hasTrustLink);
+ });
+ 
++/**
++ * Extracts a Markdown inline link's target the way a renderer does: up to
++ * the first UNESCAPED ")" after the opening "(" - the exact mechanism
++ * review 1's Important 1 exploited (an unbalanced ")" in the cwd, left raw
++ * by `encodeURIComponent`, closed the link target early).
++ */
++const linkTarget = (line: string): string | undefined => line.match(/\[Trust this folder\]\(([^)]*)\)/)?.[1];
++
++const UNBALANCED_PAREN_CWDS = ['/home/me/foo)', '/home/me/project (copy)'];
++for (const cwd of UNBALANCED_PAREN_CWDS) {
++  test(`the trust link target is not truncated by an unbalanced paren in the cwd (${JSON.stringify(cwd)}) (review 1, Important 1)`, () => {
++    const { lines } = buildSessionLines([job({ folderTrusted: false, cwd })], [], []);
++    const href = linkTarget(lines[0]!);
++    assert.ok(href, lines[0]);
++    assert.ok(href!.startsWith('command:claudeLimitBuster.openClaudeToTrust?'), href);
++    const query = href!.slice(href!.indexOf('?') + 1);
++    assert.deepEqual(
++      JSON.parse(decodeURIComponent(query)),
++      [cwd],
++      `a naive link-target extraction must still decode back to exactly [cwd]; got line: ${lines[0]}`,
++    );
++  });
++}
++
+ test('a trusted or unknown-trust job gets no marker, and hasTrustLink stays false', () => {
+   const trusted = buildSessionLines([job({ folderTrusted: true })], [], []);
+   assert.ok(!/not trusted/i.test(trusted.lines[0]!), trusted.lines[0]);
+   assert.ok(!trusted.hasTrustLink);
+ 
+   const unknown = buildSessionLines([job({ folderTrusted: undefined })], [], []);
+   assert.ok(!/not trusted/i.test(unknown.lines[0]!), unknown.lines[0]);
+   assert.ok(!unknown.hasTrustLink);
+ });
+ 

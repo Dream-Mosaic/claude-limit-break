@@ -23,6 +23,13 @@ export interface SessionRecord {
   sessionId: string;
   /** Absent in records written by a version that did not record it. */
   entrypoint: string | undefined;
+  /**
+   * Present only when Remote Control has bridged this session, i.e. Claude
+   * Code web can drive it too. The key is omitted rather than set to
+   * `undefined` when absent, so a record with no bridge looks exactly like it
+   * did before this field existed.
+   */
+  bridgeSessionId?: string;
 }
 
 export function sessionRegistryDir(): string {
@@ -45,8 +52,12 @@ export function readSessionRecord(
   if (parsed.pid !== pid || typeof parsed.sessionId !== 'string') {
     return undefined;
   }
-  return {
+  const record: SessionRecord = {
     sessionId: parsed.sessionId,
     entrypoint: typeof parsed.entrypoint === 'string' ? parsed.entrypoint : undefined,
   };
+  if (typeof parsed.bridgeSessionId === 'string' && parsed.bridgeSessionId.length > 0) {
+    record.bridgeSessionId = parsed.bridgeSessionId;
+  }
+  return record;
 }

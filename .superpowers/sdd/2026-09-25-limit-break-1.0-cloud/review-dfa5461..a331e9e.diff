@@ -1,0 +1,1244 @@
+## Commits
+a331e9e test(statusBar,extension): mutation-driven coverage for Task 5b's new branches
+73b7daa feat(statusBar): unified tooltip session list with the trust hotlink (Task 5b)
+ src/extension.ts       |  41 +++++--
+ src/gaveUp.ts          |  10 +-
+ src/statusBar.ts       | 299 +++++++++++++++++++++++++++++++++------------
+ test/extension.test.ts |  46 ++++++-
+ test/helpers/vscode.ts |   7 ++
+ test/statusBar.test.ts | 323 ++++++++++++++++++++++++++++++++++++++++++-------
+ 6 files changed, 591 insertions(+), 135 deletions(-)
+## Diff
+diff --git a/src/extension.ts b/src/extension.ts
+index 138a386..015082f 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -109,27 +109,28 @@ export function activate(context: vscode.ExtensionContext): void {
+   const status = new CountdownStatusBar();
+ 
+   /**
+    * Sessions this window has stopped trying to resume, and why (Task 4b -
+    * see gaveUp.ts). In memory only: a reload starts clean, which the brief
+    * allows, and the ready-job persistence (#11) is a separate mechanism.
+    */
+   const gaveUp = new GaveUpState();
+ 
+   /**
+-   * The one place the status bar is drawn from. `job` defaults to the
+-   * scheduler's soonest; scheduler.onChange passes the one it was fired
+-   * with. The gave-up records ride along on every render, so a countdown
+-   * tick cannot drop them from the tooltip.
++   * The one place the status bar is drawn from. Reads `scheduler.jobs` and
++   * `readyJobs` fresh every call, rather than taking either as a parameter,
++   * so every caller - a countdown tick, a ready-job change, a gave-up
++   * change, a trust change - draws the exact same picture. Task 5b: the
++   * tooltip now lists every one of them, not just the soonest.
+    */
+-  const render = (job: PendingJob | undefined = scheduler.current): void => {
+-    status.update(job, scheduler.jobs.length, settings().statusBar, gaveUp.list());
++  const render = (): void => {
++    status.update(scheduler.jobs, readyJobs, settings().statusBar, gaveUp.list());
+   };
+   const watcher = new TranscriptWatcher(
+     () => settings().maxWaitHours,
+     () => settings().transcriptPollSeconds,
+     log,
+     // The watcher discards out-of-scope entries before parsing them, rather
+     // than every consumer filtering afterwards (#2). Read per call, so
+     // changing the setting or opening a folder takes effect without a reload.
+     () => ({
+       mode: settings().watchScope,
+@@ -157,36 +158,43 @@ export function activate(context: vscode.ExtensionContext): void {
+    * Without this a reload silently destroyed a job waiting to be started by
+    * hand: the scheduler clears its own state before firing, so this list was
+    * the only thing holding it, and it lived in memory alone (#11). That
+    * matters more since #7, where reopening the window is the remedy offered
+    * for a stale panel tab — the advice would otherwise take the job with it.
+    */
+   const persistReady = () => {
+     void context.globalState.update(READY_KEY, readyJobs.length > 0 ? [...readyJobs] : undefined);
+   };
+ 
+-  /** Drop a remembered job. Reports whether it was still there to drop. */
++  /**
++   * Drop a remembered job. Reports whether it was still there to drop.
++   * Re-renders on an actual removal (Task 5b: the tooltip now lists ready
++   * jobs, so every change to this list must reach the status bar - not just
++   * the ones that happened to be followed by some other render() already).
++   */
+   const forgetReady = (sessionId: string) => {
+     const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
+     if (at < 0) {
+       return false;
+     }
+     readyJobs.splice(at, 1);
+     persistReady();
++    render();
+     return true;
+   };
+ 
+   /** Remember a job for manual resume, replacing any earlier one for the same session. */
+   const rememberReady = (job: PendingJob) => {
+     forgetReady(job.sessionId);
+     readyJobs.push(job);
+     persistReady();
++    render();
+   };
+ 
+   // Restored before anything can add to the list. A job read back here is one
+   // the previous window offered and nobody answered; it stays claimable from
+   // "Resume Now", which is what the setting's description promises.
+   const restoredReady = context.globalState.get<PendingJob[]>(READY_KEY) ?? [];
+   if (restoredReady.length > 0) {
+     readyJobs.push(...restoredReady);
+     log.info(`Restored ${restoredReady.length} resume(s) still waiting to be started by hand.`);
+   }
+@@ -880,21 +888,21 @@ export function activate(context: vscode.ExtensionContext): void {
+       // alertSound gates the chime alone. The stale-tab warning has its own
+       // gates - this extension resumed the session, and a panel still holds
+       // it - and must not go quiet because someone turned the sound off.
+       if (s.alertSound) {
+         playAlertSound({ file: s.alertSoundFile });
+       }
+       void handleStalePanel(hit);
+     }),
+     scheduler.onChange((job) => {
+       refreshTrust(job);
+-      render(job);
++      render();
+     }),
+     scheduler.onFire((job) => {
+       // Task 10: claim this reset before anything else. Every window watching
+       // this account can independently detect and schedule the SAME reset -
+       // watchScope: machine means every copy of the extension watches every
+       // transcript - and two windows have been seen firing within a second or
+       // two of each other, too close for Task 2's holder check (which reads
+       // `claude agents`) to have caught the first window's child yet. A
+       // machine-wide file claim is first-past-the-post across windows in a way
+       // an in-memory guard inside one extension host cannot be. 'taken' means
+@@ -1145,26 +1153,29 @@ export function activate(context: vscode.ExtensionContext): void {
+     vscode.commands.registerCommand(`${NS}.cancel`, () => {
+       // "Cancel Pending Resume" means all of it, but say how much it threw
+       // away: a job dropped from readyJobs has no other trace.
+       if (readyJobs.length > 0) {
+         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
+         readyJobs.length = 0;
+         persistReady();
+       }
+       scheduler.cancel();
+       // Ruling 3: Cancel clears the gave-up state along with the jobs.
+-      // Rendered here, not left to scheduler.onChange: with nothing pending
+-      // the scheduler has nothing to cancel and does not fire it.
+       if (gaveUp.clearAll()) {
+         log.info('Cleared the gave-up state.');
+-        render();
+       }
++      // Rendered unconditionally, not left to scheduler.onChange or folded
++      // into the gaveUp.clearAll() branch above: with nothing pending the
++      // scheduler has nothing to cancel and does not fire onChange, and a
++      // readyJobs-only cancel (Task 5b: readyJobs now reach the tooltip)
++      // must still clear their lines even when nothing had given up.
++      render();
+     }),
+     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
+     /**
+      * What a click on the status bar opens (#3).
+      *
+      * It used to run Cancel directly: a countdown invites a click to look at
+      * it, and the only warning that the click destroyed the pending resume
+      * was the last line of a six-line tooltip. Every other status-bar item in
+      * VS Code that shows state opens something. Cancel is still here, one
+      * deliberate keystroke further away, and dismissing the menu does nothing
+@@ -1274,17 +1285,25 @@ export function activate(context: vscode.ExtensionContext): void {
+       // call scheduler.onChange uses (above), so the tooltip's marker clears
+       // now instead of waiting for the next countdown tick.
+       for (const job of scheduler.jobs) {
+         refreshTrust(job);
+       }
+       render();
+     }),
+   );
+ 
+   scheduler.start();
++  // Unconditional, not left to scheduler.start()'s own onChange (which fires
++  // only when something is pending): readyJobs restored above can be
++  // non-empty with nothing pending, and before this the status bar simply
++  // never showed them - the marker stayed hidden until the next event. The
++  // "install from a VSIX and see nothing" doubt this class's own tooltip
++  // reasoning is about applies just as much to a ready session restored
++  // across a reload.
++  render();
+   void watcher.start();
+   log.info('Claude Limit Buster active.');
+ }
+ 
+ export function deactivate(): void {
+   /* subscriptions handle teardown */
+ }
+diff --git a/src/gaveUp.ts b/src/gaveUp.ts
+index 29a501b..a6a10b5 100644
+--- a/src/gaveUp.ts
++++ b/src/gaveUp.ts
+@@ -130,22 +130,28 @@ export class GaveUpState {
+     this.warned.clear();
+     return had;
+   }
+ 
+   /** Every gave-up session, oldest first, as copies. */
+   list(): GaveUpRecord[] {
+     return [...this.records.values()].sort((a, b) => a.atMs - b.atMs).map((r) => ({ ...r }));
+   }
+ }
+ 
+-/** Short, per-cause reason for a tooltip line. Each cause reads differently. */
+-const REASON: Record<GaveUpCause, string> = {
++/**
++ * Short, per-cause reason for a tooltip line. Each cause reads differently.
++ * Exported for Task 5b's unified session-list tooltip (statusBar.ts), which
++ * annotates a pending/ready line with just the reason - describeGaveUp below
++ * builds a whole standalone line, which is redundant once the id and folder
++ * are already on that line from the pending/ready side.
++ */
++export const REASON: Record<GaveUpCause, string> = {
+   stall: 'resume stalled: its transcript did not grow after launch',
+   launcher: 'could not find the claude executable',
+   cwd: 'its folder no longer exists',
+   budget: 'over the token budget, and the refusal was dismissed',
+ };
+ 
+ /**
+  * One tooltip line (Markdown) for a gave-up session: short id, folder, cause
+  * and time. Task 5b folds this into its single list; it will need to escape
+  * the folder, which is user-controlled text, when it does.
+diff --git a/src/statusBar.ts b/src/statusBar.ts
+index 20391fa..c24aa00 100644
+--- a/src/statusBar.ts
++++ b/src/statusBar.ts
+@@ -1,18 +1,177 @@
+ import * as vscode from 'vscode';
+ import { formatDuration } from './parsers/limitParser';
+ import type { PendingJob } from './scheduler';
+-import { GAVE_UP_ICON, describeGaveUp, type GaveUpRecord } from './gaveUp';
++import { GAVE_UP_ICON, REASON, type GaveUpCause, type GaveUpRecord } from './gaveUp';
+ 
+ /** What the item shows when no resume is counting down. */
+ export type StatusBarMode = 'always' | 'pending' | 'never';
+ 
++/** The Task 5a command the trust hotlink points at. */
++const TRUST_COMMAND = 'claudeLimitBuster.openClaudeToTrust';
++
++/**
++ * Escape Markdown special characters in text this extension does not
++ * control (a folder name, taken from a transcript or the filesystem).
++ *
++ * Without this, a folder literally named `*x*` renders as italic text, and
++ * one named `[a](b)` renders as a link - or, worse, a folder name crafted to
++ * look like a command link could pose as this tooltip's own trust hotlink.
++ * The set covers every ASCII character CommonMark treats specially, per
++ * Task 5b ruling 2.
++ */
++export function escapeMarkdown(text: string): string {
++  return text.replace(/[\\`*_{}[\]()#+\-.!<>|]/g, '\\$&');
++}
++
++/**
++ * The last path segment of `cwd`, split on both separators.
++ *
++ * Not `path.basename`: this extension's tooltip can describe a session
++ * recorded on a different OS than the one it is currently rendering on (a
++ * synced settings/state profile, or a transcript copied between machines),
++ * and POSIX `basename` does not split on `\`. Mirrors the same reasoning as
++ * `resolveSession`'s filename split in sessionResolver.ts.
++ */
++function folderBasename(cwd: string): string {
++  const segments = cwd.split(/[\\/]+/).filter((s) => s.length > 0);
++  return segments.length > 0 ? segments[segments.length - 1]! : cwd;
++}
++
++/**
++ * The command-URI for the trust hotlink (Task 5a's `openClaudeToTrust`),
++ * exactly the VS Code command-URI convention: `command:<id>?<args>`, args
++ * being `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
++ * array, since that command takes the cwd as its sole parameter.
++ */
++export function trustCommandUri(cwd: string): string {
++  return `command:${TRUST_COMMAND}?${encodeURIComponent(JSON.stringify([cwd]))}`;
++}
++
++/** One session's line, and whether it carries the trust hotlink. */
++interface SessionLine {
++  markdown: string;
++  hasTrustLink: boolean;
++}
++
++/**
++ * One Markdown line (no leading bullet) for a session: short id, escaped
++ * folder basename, its state (a formatted resume time, "ready", or neither
++ * for a gave-up-only session), its gave-up cause if it has one, and an
++ * untrusted-folder marker with the trust link if its folder is known
++ * untrusted. `state` is `undefined` for a gave-up-only session - see the
++ * "gave-up-only" handling in `buildSessionLines` below.
++ */
++function buildSessionLine(entry: {
++  sessionId: string;
++  cwd?: string;
++  folderTrusted?: boolean;
++  state?: 'counting' | 'ready';
++  resumeAtMs?: number;
++  gaveUpCause?: GaveUpCause;
++}): SessionLine {
++  const id = `\`${entry.sessionId.slice(0, 8)}\``;
++  const folder = entry.cwd ? escapeMarkdown(folderBasename(entry.cwd)) : '_no folder recorded_';
++  const bits = [`${id} in ${folder}`];
++  if (entry.state === 'counting' && entry.resumeAtMs !== undefined) {
++    bits.push(`resuming at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
++  } else if (entry.state === 'ready') {
++    bits.push('**ready**');
++  }
++  if (entry.gaveUpCause) {
++    bits.push(`**Gave up**: ${REASON[entry.gaveUpCause]}`);
++  }
++  let hasTrustLink = false;
++  if (entry.folderTrusted === false && entry.cwd) {
++    hasTrustLink = true;
++    bits.push(`$(warning) not trusted — [Trust this folder](${trustCommandUri(entry.cwd)})`);
++  }
++  return { markdown: bits.join(', '), hasTrustLink };
++}
++
++/**
++ * Build the tooltip's unified session list (controller ruling: "T5 tooltip
++ * lists gave-up sessions with their reason - one status-bar model, not
++ * two"): every counting-down job, every job waiting for "Resume Now", and
++ * every gave-up session, folded into one line each.
++ *
++ * A session present in more than one input (a launcher/cwd failure leaves
++ * the job in `ready` so it can be retried, and a failed manual retry on a
++ * counting-down job leaves it counting down - Task 4b implementer concern
++ * 4) gets exactly one line, carrying whichever pending state it has plus its
++ * gave-up cause. `ready` is only consulted for a session `jobs` does not
++ * already cover: a session can genuinely hold both a counting-down job and
++ * an unrelated stale ready job at once (Task 4b fix round 1, finding 1), and
++ * the countdown is what is actually going to happen next, so that is what
++ * the one line shows.
++ *
++ * Order: pending/ready lines first, soonest first (a ready job's own
++ * deadline already elapsed, so it sorts ahead of anything still counting
++ * down); gave-up-only lines after, oldest first (GaveUpState.list()'s own
++ * order).
++ */
++export function buildSessionLines(
++  jobs: readonly PendingJob[],
++  ready: readonly PendingJob[],
++  gaveUp: readonly GaveUpRecord[],
++): { lines: string[]; hasTrustLink: boolean; waitingCount: number } {
++  interface Entry {
++    sessionId: string;
++    cwd?: string;
++    folderTrusted?: boolean;
++    state?: 'counting' | 'ready';
++    resumeAtMs?: number;
++    gaveUpCause?: GaveUpCause;
++  }
++  const byId = new Map<string, Entry>();
++  for (const job of jobs) {
++    byId.set(job.sessionId, {
++      sessionId: job.sessionId,
++      cwd: job.cwd,
++      folderTrusted: job.folderTrusted,
++      state: 'counting',
++      resumeAtMs: job.resumeAtMs,
++    });
++  }
++  for (const job of ready) {
++    if (!byId.has(job.sessionId)) {
++      byId.set(job.sessionId, {
++        sessionId: job.sessionId,
++        cwd: job.cwd,
++        folderTrusted: job.folderTrusted,
++        state: 'ready',
++        resumeAtMs: job.resumeAtMs,
++      });
++    }
++  }
++  const waiting = [...byId.values()].sort((a, b) => (a.resumeAtMs ?? 0) - (b.resumeAtMs ?? 0));
++  const waitingCount = waiting.length;
++
++  const gaveUpOnly: Entry[] = [];
++  for (const record of gaveUp) {
++    const existing = byId.get(record.sessionId);
++    if (existing) {
++      existing.gaveUpCause = record.cause;
++    } else {
++      gaveUpOnly.push({ sessionId: record.sessionId, cwd: record.cwd, gaveUpCause: record.cause });
++    }
++  }
++
++  let hasTrustLink = false;
++  const lines = [...waiting, ...gaveUpOnly].map((entry) => {
++    const line = buildSessionLine(entry);
++    hasTrustLink = hasTrustLink || line.hasTrustLink;
++    return line.markdown;
++  });
++  return { lines, hasTrustLink, waitingCount };
++}
++
+ /**
+  * Countdown pill in the status bar, and — when nothing is counting down — a
+  * bare marker saying the extension is running.
+  *
+  * It used to hide entirely when idle, on the reasoning that an extension
+  * should be invisible until it has something to say. That reads differently
+  * from the user's side: this extension is installed from a VSIX to wait for an
+  * event that may be hours away, and a window showing nothing at all is
+  * indistinguishable from one where the install silently failed. `pending`
+  * restores the old behaviour for anyone who prefers it.
+@@ -23,114 +182,104 @@ export class CountdownStatusBar {
+   constructor() {
+     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+     // A menu, not the cancel command. A single click used to destroy the
+     // pending resume with no confirmation and no undo, while the only warning
+     // sat at the bottom of a six-line tooltip (#3).
+     this.item.command = 'claudeLimitBuster.statusBarMenu';
+     this.item.name = 'Claude Limit Buster';
+   }
+ 
+   /**
+-   * `waiting` is how many sessions have a resume pending. The pill shows the
+-   * soonest; without the count, a second session's resume would be invisible,
+-   * which reads exactly like it had been dropped.
++   * `jobs` are counting down, soonest first; `ready` are waiting for
++   * "Resume Now" (their own countdowns already elapsed); `gaveUp` are
++   * sessions this window has stopped retrying (Task 4b). Task 5b folds all
++   * three into the one tooltip list built by `buildSessionLines`.
+    */
+   update(
+-    job: PendingJob | undefined,
+-    waiting = 1,
++    jobs: readonly PendingJob[],
++    ready: readonly PendingJob[] = [],
+     mode: StatusBarMode = 'always',
+     gaveUp: readonly GaveUpRecord[] = [],
+   ): void {
+     if (mode === 'never') {
+       this.item.hide();
+       return;
+     }
+-    if (!job && gaveUp.length > 0) {
+-      // Shown under 'pending' too: that mode hides the idle marker, and a
+-      // session this extension has stopped retrying is not idle - hiding it
+-      // would be the silent failure the gave-up state exists to end (A8).
+-      const count = gaveUp.length > 1 ? ` (${gaveUp.length} sessions)` : '';
+-      this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
+-      const tip = new vscode.MarkdownString(undefined, true);
+-      tip.appendMarkdown(`**Claude Limit Buster**\n\n`);
+-      appendGaveUp(tip, gaveUp);
+-      tip.appendMarkdown(`_Click for actions._`);
+-      this.item.tooltip = tip;
+-      this.item.backgroundColor = undefined;
+-      this.item.show();
+-      return;
+-    }
+-    if (!job) {
+-      if (mode === 'pending') {
+-        this.item.hide();
++    const { lines, hasTrustLink, waitingCount } = buildSessionLines(jobs, ready, gaveUp);
++    const soonest = jobs[0];
++    const gaveUpCount = gaveUp.length;
++
++    if (!soonest) {
++      if (waitingCount === 0 && gaveUpCount === 0) {
++        if (mode === 'pending') {
++          this.item.hide();
++          return;
++        }
++        this.item.text = '$(eye)';
++        const idle = new vscode.MarkdownString(undefined, true);
++        idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
++        idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
++        idle.appendMarkdown(`_Click for actions._`);
++        this.item.tooltip = idle;
++        this.item.backgroundColor = undefined;
++        this.item.show();
+         return;
+       }
+-      this.item.text = '$(eye)';
+-      const idle = new vscode.MarkdownString(undefined, true);
+-      idle.appendMarkdown(`**Claude Limit Buster**\n\n`);
+-      idle.appendMarkdown(`Watching for usage limits. Nothing pending.\n\n`);
+-      idle.appendMarkdown(`_Click for actions._`);
+-      this.item.tooltip = idle;
++      // Something to show even with nothing counting down: a gave-up
++      // session, a ready one, or (per buildSessionLines) both on one line.
++      // The gave-up icon wins when anything has given up - that is the more
++      // urgent signal - even if other sessions are merely ready.
++      if (gaveUpCount > 0) {
++        const count = gaveUpCount > 1 ? ` (${gaveUpCount} sessions)` : '';
++        this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
++      } else {
++        const count = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
++        this.item.text = `$(clock) Claude ready to resume${count}`;
++      }
++      this.renderTooltip(lines, hasTrustLink, gaveUpCount > 0);
+       this.item.backgroundColor = undefined;
+       this.item.show();
+       return;
+     }
+-    const remaining = job.resumeAtMs - Date.now();
+-    const at = new Date(job.resumeAtMs);
+-    const others = waiting > 1 ? ` (${waiting} sessions)` : '';
++
++    const remaining = soonest.resumeAtMs - Date.now();
++    const others = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
+     this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
++    this.renderTooltip(lines, hasTrustLink, gaveUpCount > 0);
+ 
++    // Nudge the colour as the deadline approaches so it reads at a glance.
++    this.item.backgroundColor =
++      remaining <= 60_000 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
++    this.item.show();
++  }
++
++  /**
++   * The shared tooltip body for every non-idle state: header, one bullet per
++   * `buildSessionLines` line, a reminder of how to clear a gave-up notice
++   * when one is present, and the click-for-actions footer. `isTrusted` is
++   * set only when a line actually carries the trust command link (ruling 3)
++   * - an unconditional `true` would trust every link a folder name could be
++   * crafted to look like, not just this one command.
++   */
++  private renderTooltip(lines: readonly string[], hasTrustLink: boolean, hasGaveUp: boolean): void {
+     const tooltip = new vscode.MarkdownString(undefined, true);
+     tooltip.appendMarkdown(`**Claude Limit Buster**\n\n`);
+-    tooltip.appendMarkdown(`Resuming at **${at.toLocaleString()}**\n\n`);
+-    if (waiting > 1) {
+-      tooltip.appendMarkdown(`**${waiting} sessions** are waiting to resume; this one is due first.\n\n`);
+-    }
+-    if (job.jitterMs > 0) {
+-      tooltip.appendMarkdown(
+-        `Padded by a random **${formatDuration(job.jitterMs)}** past the reset time\n\n`,
+-      );
++    for (const line of lines) {
++      tooltip.appendMarkdown(`- ${line}\n`);
+     }
+-    tooltip.appendMarkdown(`Reason: \`${job.reason}\`\n\n`);
+-    tooltip.appendMarkdown(`Session: \`${job.sessionId}\`\n\n`);
+-    if (job.cwd) {
+-      tooltip.appendMarkdown(`Folder: \`${job.cwd}\`\n\n`);
++    if (lines.length > 0) {
++      tooltip.appendMarkdown(`\n`);
+     }
+-    if (job.folderTrusted === false) {
+-      // Checked at schedule time, not here: by the time this tooltip is read
+-      // the countdown may already be near zero, which is too late to trust
+-      // the folder before Claude stalls at its trust prompt (#5).
+-      tooltip.appendMarkdown(
+-        `**This folder is not trusted for the CLI.** Claude will stop at its trust ` +
+-          `prompt and wait for a keypress. Trust it now if you plan to be away when this fires.\n\n`,
+-      );
++    if (hasGaveUp) {
++      tooltip.appendMarkdown(`A new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
+     }
+-    appendGaveUp(tooltip, gaveUp);
+     tooltip.appendMarkdown(`_Click for actions._`);
++    if (hasTrustLink) {
++      tooltip.isTrusted = { enabledCommands: [TRUST_COMMAND] };
++    }
+     this.item.tooltip = tooltip;
+-
+-    // Nudge the colour as the deadline approaches so it reads at a glance.
+-    this.item.backgroundColor =
+-      remaining <= 60_000 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+-    this.item.show();
+   }
+ 
+   dispose(): void {
+     this.item.dispose();
+   }
+ }
+-
+-/**
+- * The gave-up section of a tooltip: one line per session and its cause.
+- * Deliberately a separate block rather than woven into the countdown text -
+- * Task 5b folds it and the pending jobs into one list.
+- */
+-function appendGaveUp(tip: vscode.MarkdownString, gaveUp: readonly GaveUpRecord[]): void {
+-  if (gaveUp.length === 0) {
+-    return;
+-  }
+-  tip.appendMarkdown(`**Gave up** on ${gaveUp.length === 1 ? 'this session' : 'these sessions'}:\n\n`);
+-  for (const r of gaveUp) {
+-    tip.appendMarkdown(`- ${describeGaveUp(r)}\n`);
+-  }
+-  tip.appendMarkdown(`\nA new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
+-}
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 8ed65b2..af60e90 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -1303,20 +1303,59 @@ test('cancelling clears the waiting jobs from storage too', async () => {
+     await oneTick();
+     assert.ok(store.get(READY_KEY), 'setup: the waiting job must have been persisted');
+     vscodeFake.commands.get('claudeLimitBuster.cancel')!();
+     await flush();
+     assert.equal(store.get(READY_KEY), undefined, 'cancel must not leave it to come back on reload');
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
++// ---------------------------------------------------------------------------
++// Task 5b: readyJobs reaching the tooltip. rememberReady/forgetReady must
++// re-render on every change, not rely on some other event to happen to
++// follow them - otherwise the tooltip is stale until the next unrelated
++// render.
++// ---------------------------------------------------------------------------
++
++test('a session becoming ready is reflected in the tooltip immediately, without any other event', async () => {
++  resetVscodeFake();
++  vscodeFake.config = manualConfig();
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const tooltip = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.match(tooltip, /ready/i, `the ready session must already be in the tooltip: ${tooltip}`);
++    assert.ok(tooltip.includes(SESSION.slice(0, 8)), tooltip);
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('a session resumed by hand from the ready list drops off the tooltip immediately', async () => {
++  resetVscodeFake();
++  vscodeFake.config = manualConfig();
++  const ctx = contextOver(new Map([['claudeLimitBuster.pending', pastJob()]]));
++  start(ctx);
++  try {
++    await oneTick();
++    const tooltipBefore = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.ok(tooltipBefore.includes(SESSION.slice(0, 8)), 'setup: the ready session is listed');
++    await vscodeFake.commands.get('claudeLimitBuster.resumeNow')!();
++    const tooltipAfter = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.ok(!tooltipAfter.includes(SESSION.slice(0, 8)), `must drop off once resumed: ${tooltipAfter}`);
++  } finally {
++    teardown(ctx);
++  }
++});
++
+ test('the status bar menu offers the three commands and runs the one picked', async () => {
+   // Issue #3: the click used to be a bare destructive action.
+   resetVscodeFake();
+   vscodeFake.config = manualConfig();
+   const ctx = contextOver(new Map());
+   start(ctx);
+   try {
+     const menu = vscodeFake.commands.get('claudeLimitBuster.statusBarMenu');
+     assert.ok(menu, 'the menu command must be registered');
+     vscodeFake.quickPickAnswer = 'Show Log';
+@@ -2851,20 +2890,21 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
+ // ---------------------------------------------------------------------------
+ // Task 4b: the gave-up state. A resume that fails in a way this extension
+ // stops retrying on must leave the status bar saying so - its own icon, and a
+ // tooltip naming the session and cause - instead of going back to looking
+ // idle. Four causes: stall, launcher missing, cwd missing, budget refusal
+ // dismissed. Warned once per session per cause (ruling 1); cleared by a new
+ // detection or a resume that launches (ruling 2), or by Cancel (ruling 3).
+ // ---------------------------------------------------------------------------
+ 
+ const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
++const { escapeMarkdown } = require('../src/statusBar') as typeof import('../src/statusBar');
+ 
+ const bar = () => vscodeFake.statusBarItems[0];
+ const barTooltip = () => (bar()?.tooltip as { value: string } | undefined)?.value ?? '';
+ const showsGaveUp = () => Boolean(bar()?.visible && bar()?.text.startsWith(GAVE_UP_ICON));
+ 
+ const autoConfig = () => ({
+   autoResume: true,
+   claudeCommand: LAUNCHER,
+   randomDelayMinMinutes: 0,
+   randomDelayMaxMinutes: 0,
+@@ -2881,21 +2921,25 @@ test('gave up: a missing folder shows the gave-up icon and names the session, fo
+   resetVscodeFake();
+   vscodeFake.config = autoConfig();
+   const ctx = contextOver(new Map());
+   start(ctx);
+   try {
+     FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() - 1000), MISSING_CWD);
+     await oneTick();
+     assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have been refused');
+     assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
+     assert.ok(barTooltip().includes(SESSION.slice(0, 8)), barTooltip());
+-    assert.ok(barTooltip().includes(MISSING_CWD), barTooltip());
++    // Task 5b: the unified session line shows the folder BASENAME, escaped
++    // (ruling 1/2) - not the full path. MISSING_CWD's own basename here
++    // happens to be SESSION itself (see its definition), so it is escaped
++    // too (a UUID is full of hyphens, one of the escaped characters).
++    assert.ok(barTooltip().includes(escapeMarkdown(path.basename(MISSING_CWD))), barTooltip());
+     assert.match(barTooltip(), /no longer exists/);
+     assert.equal(vscodeFake.errors.length, 1, 'warned once');
+   } finally {
+     teardown(ctx);
+   }
+ });
+ 
+ test('gave up: a missing claude executable is recorded, named distinctly, and logged every time', async () => {
+   resetVscodeFake();
+   // A bare name goes through PATH (resolveClaudeLauncher); this one is on nobody's PATH.
+diff --git a/test/helpers/vscode.ts b/test/helpers/vscode.ts
+index 27110f1..5db85c3 100644
+--- a/test/helpers/vscode.ts
++++ b/test/helpers/vscode.ts
+@@ -74,20 +74,27 @@ export interface FakeStatusBarItem {
+   tooltip?: unknown;
+   backgroundColor?: unknown;
+   visible: boolean;
+   show(): void;
+   hide(): void;
+   dispose(): void;
+ }
+ 
+ class FakeMarkdownString {
+   value: string;
++  /**
++   * Mirrors the real MarkdownString's mutable `isTrusted`: unset (falsy)
++   * means command/href links are inert, `{ enabledCommands }` allows exactly
++   * those. Task 5b sets this only when the tooltip actually contains a trust
++   * hotlink, never unconditionally (ruling: isTrusted only with a link).
++   */
++  isTrusted?: boolean | { readonly enabledCommands: readonly string[] };
+   constructor(value?: string, readonly supportThemeIcons?: boolean) {
+     this.value = value ?? '';
+   }
+   appendMarkdown(text: string): FakeMarkdownString {
+     this.value += text;
+     return this;
+   }
+ }
+ 
+ class FakeThemeColor {
+diff --git a/test/statusBar.test.ts b/test/statusBar.test.ts
+index 9cb15a0..384b32f 100644
+--- a/test/statusBar.test.ts
++++ b/test/statusBar.test.ts
+@@ -1,243 +1,474 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { installVscodeStub, resetVscodeFake, vscodeFake } from './helpers/vscode';
+ 
+ installVscodeStub();
+ 
+-const { CountdownStatusBar } = require('../src/statusBar') as typeof import('../src/statusBar');
++const {
++  CountdownStatusBar,
++  escapeMarkdown,
++  trustCommandUri,
++  buildSessionLines,
++} = require('../src/statusBar') as typeof import('../src/statusBar');
+ import type { PendingJob } from '../src/scheduler';
+ 
+ const job = (over: Partial<PendingJob> = {}): PendingJob => ({
+   sessionId: '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234',
+   transcript: '/h/p/0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl',
+   cwd: '/projects/example',
+   prompt: 'continue',
+   resumeAtMs: Date.now() + 60_000,
+   baseResumeAtMs: Date.now() + 60_000,
+   jitterMs: 0,
+   reason: 'limit',
+   ...over,
+ });
+ 
+ const tooltipText = () => {
+   const item = vscodeFake.statusBarItems[0];
+   const tooltip = item?.tooltip as { value: string } | undefined;
+   return tooltip?.value ?? '';
+ };
+ 
+-test('the tooltip warns when the folder is not trusted for the CLI', () => {
++// ---------------------------------------------------------------------------
++// escapeMarkdown - Task 5b ruling 2. User-controlled text (folder names) must
++// render literally and never as Markdown syntax or an injected link.
++// ---------------------------------------------------------------------------
++
++test('escapeMarkdown neutralises emphasis markers', () => {
++  assert.equal(escapeMarkdown('*x*'), '\\*x\\*');
++});
++
++test('escapeMarkdown neutralises a link-shaped string', () => {
++  assert.equal(escapeMarkdown('[a](b)'), '\\[a\\]\\(b\\)');
++});
++
++test('escapeMarkdown neutralises a backtick', () => {
++  assert.equal(escapeMarkdown('a`b'), 'a\\`b');
++});
++
++test('escapeMarkdown neutralises an <img>-looking name', () => {
++  // Escaping precedes each special character with a backslash rather than
++  // removing it, so "<img" is still there as text - CommonMark just stops
++  // reading "<" as the start of an HTML tag once it is "\<".
++  const escaped = escapeMarkdown('<img src=x onerror=alert(1)>');
++  assert.equal(escaped, '\\<img src=x onerror=alert\\(1\\)\\>');
++});
++
++test('escapeMarkdown leaves text with no special characters alone', () => {
++  assert.equal(escapeMarkdown('plainName123'), 'plainName123');
++});
++
++// ---------------------------------------------------------------------------
++// trustCommandUri - the command-URI convention from Task 5b's brief: exactly
++// `command:<id>?<encodeURIComponent(JSON.stringify([cwd]))>`.
++// ---------------------------------------------------------------------------
++
++test('trustCommandUri targets the Task 5a command with the cwd as its sole argument', () => {
++  const uri = trustCommandUri('/projects/example');
++  assert.equal(uri, `command:claudeLimitBuster.openClaudeToTrust?${encodeURIComponent(JSON.stringify(['/projects/example']))}`);
++  const query = uri.slice(uri.indexOf('?') + 1);
++  assert.deepEqual(JSON.parse(decodeURIComponent(query)), ['/projects/example']);
++});
++
++test('trustCommandUri encodes a Windows path with a backslash, a space and a #', () => {
++  const cwd = 'C:\\Users\\a b\\proj#1';
++  const uri = trustCommandUri(cwd);
++  const query = uri.slice(uri.indexOf('?') + 1);
++  // None of these may appear raw in the query: a raw '#' would be read as a
++  // URI fragment (or end the Markdown link early), a raw space would break
++  // the query, and a raw backslash is meaningless in a URI.
++  assert.ok(!query.includes('#'), query);
++  assert.ok(!query.includes(' '), query);
++  assert.ok(!query.includes('\\'), query);
++  assert.deepEqual(JSON.parse(decodeURIComponent(query)), [cwd], 'must decode back to the exact cwd');
++});
++
++// ---------------------------------------------------------------------------
++// buildSessionLines - the pure line-builder behind the tooltip. One line per
++// session: pending/ready first (soonest first), gave-up-only sessions after.
++// ---------------------------------------------------------------------------
++
++const gaveUpRec = (over: Partial<import('../src/gaveUp').GaveUpRecord> = {}) => ({
++  sessionId: job().sessionId,
++  cwd: '/projects/example',
++  cause: 'stall' as const,
++  atMs: Date.now(),
++  ...over,
++});
++
++test('a counting-down job renders its id, folder and formatted resume time', () => {
++  const at = Date.now() + 90_000;
++  const { lines, waitingCount } = buildSessionLines([job({ resumeAtMs: at })], [], []);
++  assert.equal(lines.length, 1);
++  assert.ok(lines[0]!.includes('0b3d1f66'), lines[0]);
++  assert.ok(lines[0]!.includes('example'), lines[0]);
++  assert.ok(lines[0]!.includes(new Date(at).toLocaleString()), lines[0]);
++  assert.ok(!/ready/i.test(lines[0]!), lines[0]);
++  assert.equal(waitingCount, 1);
++});
++
++test('a ready job says "ready", not a time', () => {
++  const { lines } = buildSessionLines([], [job()], []);
++  assert.equal(lines.length, 1);
++  assert.match(lines[0]!, /ready/i);
++  assert.ok(!lines[0]!.includes(new Date(job().resumeAtMs).toLocaleString().slice(0, 4)), lines[0]);
++});
++
++test('ordering: a ready job (already elapsed) sorts before one still counting down', () => {
++  const ready = job({ sessionId: 'aaaaaaaa-0000-0000-0000-000000000000', cwd: '/p/ready', resumeAtMs: Date.now() - 5000 });
++  const counting = job({ sessionId: 'bbbbbbbb-0000-0000-0000-000000000000', cwd: '/p/counting', resumeAtMs: Date.now() + 90_000 });
++  const { lines } = buildSessionLines([counting], [ready], []);
++  assert.equal(lines.length, 2);
++  assert.ok(lines[0]!.includes('aaaaaaaa'), lines[0]);
++  assert.ok(lines[1]!.includes('bbbbbbbb'), lines[1]);
++});
++
++test('ordering: two counting-down jobs sort soonest first regardless of input order', () => {
++  const soon = job({ sessionId: 'cccccccc-0000-0000-0000-000000000000', resumeAtMs: Date.now() + 10_000 });
++  const later = job({ sessionId: 'dddddddd-0000-0000-0000-000000000000', resumeAtMs: Date.now() + 90_000 });
++  const { lines } = buildSessionLines([later, soon], [], []);
++  assert.ok(lines[0]!.includes('cccccccc'), lines[0]);
++  assert.ok(lines[1]!.includes('dddddddd'), lines[1]);
++});
++
++test('gave-up-only sessions come after every pending/ready line', () => {
++  const { lines } = buildSessionLines([job()], [], [gaveUpRec({ sessionId: 'ffffffff-0000-0000-0000-000000000000', cause: 'cwd' })]);
++  assert.equal(lines.length, 2);
++  assert.ok(lines[0]!.includes('0b3d1f66'), lines[0]);
++  assert.ok(lines[1]!.includes('ffffffff'), lines[1]);
++});
++
++test('a session that only gave up gets a line with its cause, and no resuming/ready wording', () => {
++  const { lines, waitingCount } = buildSessionLines([], [], [gaveUpRec({ cause: 'launcher' })]);
++  assert.equal(lines.length, 1);
++  assert.match(lines[0]!, /claude executable/);
++  assert.ok(!/ready/i.test(lines[0]!), lines[0]);
++  assert.equal(waitingCount, 0, 'a gave-up-only session is not "waiting"');
++});
++
++test('both pending and gave up: a counting-down job with a matching gave-up record is ONE line with both', () => {
++  const { lines } = buildSessionLines([job()], [], [gaveUpRec({ cause: 'stall' })]);
++  assert.equal(lines.length, 1);
++  assert.match(lines[0]!, /resum/i);
++  assert.match(lines[0]!, /stall/i);
++});
++
++test('both ready and gave up: a ready job with a matching gave-up record is ONE line with both', () => {
++  const { lines, waitingCount } = buildSessionLines([], [job()], [gaveUpRec({ cause: 'launcher' })]);
++  assert.equal(lines.length, 1);
++  assert.match(lines[0]!, /ready/i);
++  assert.match(lines[0]!, /claude executable/i);
++  assert.equal(waitingCount, 1, 'still one waiting session, not two');
++});
++
++test('the folder is escaped before it reaches the line', () => {
++  const { lines } = buildSessionLines([job({ cwd: '/projects/*x*' })], [], []);
++  assert.ok(lines[0]!.includes('\\*x\\*'), lines[0]);
++  assert.ok(!lines[0]!.includes('*x*'), lines[0]);
++});
++
++test('an untrusted job gets a warning marker and a trust link, and reports hasTrustLink', () => {
++  const { lines, hasTrustLink } = buildSessionLines([job({ folderTrusted: false, cwd: '/projects/example' })], [], []);
++  assert.match(lines[0]!, /not trusted/i);
++  assert.ok(lines[0]!.includes('command:claudeLimitBuster.openClaudeToTrust'), lines[0]);
++  assert.ok(hasTrustLink);
++});
++
++test('a trusted or unknown-trust job gets no marker, and hasTrustLink stays false', () => {
++  const trusted = buildSessionLines([job({ folderTrusted: true })], [], []);
++  assert.ok(!/not trusted/i.test(trusted.lines[0]!), trusted.lines[0]);
++  assert.ok(!trusted.hasTrustLink);
++
++  const unknown = buildSessionLines([job({ folderTrusted: undefined })], [], []);
++  assert.ok(!/not trusted/i.test(unknown.lines[0]!), unknown.lines[0]);
++  assert.ok(!unknown.hasTrustLink);
++});
++
++test('waitingCount counts a session once even if it were somehow in both lists', () => {
++  const same = job();
++  const { waitingCount } = buildSessionLines([same], [same], []);
++  assert.equal(waitingCount, 1);
++});
++
++test('a session in both jobs and ready keeps its counting-down line, not "ready" (Task 4b fix round 1, finding 1)', () => {
++  // One session can genuinely hold a counting-down job and an unrelated
++  // stale ready job at once. `ready` must defer to `jobs` for that session,
++  // not silently overwrite the soon-to-happen countdown with "ready".
++  const at = Date.now() + 45_000;
++  const counting = job({ resumeAtMs: at });
++  const staleReady = job({ resumeAtMs: Date.now() - 99_000 });
++  const { lines, waitingCount } = buildSessionLines([counting], [staleReady], []);
++  assert.equal(lines.length, 1, 'one line per session, even here');
++  assert.match(lines[0]!, /resum/i, lines[0]);
++  assert.ok(!/ready/i.test(lines[0]!), `must not read as ready: ${lines[0]}`);
++  assert.equal(waitingCount, 1);
++});
++
++// ---------------------------------------------------------------------------
++// CountdownStatusBar.update - end to end through the fake vscode item.
++// ---------------------------------------------------------------------------
++
++test('the tooltip warns when the folder is not trusted for the CLI, and marks the string trusted for the link only', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+   try {
+-    bar.update(job({ folderTrusted: false }));
+-    assert.match(
+-      tooltipText(),
+-      /not trusted/i,
+-      `expected an untrusted-folder note in the tooltip; got ${JSON.stringify(tooltipText())}`,
+-    );
++    bar.update([job({ folderTrusted: false })]);
++    assert.match(tooltipText(), /not trusted/i, `expected an untrusted-folder note; got ${JSON.stringify(tooltipText())}`);
++    const tooltip = vscodeFake.statusBarItems[0]?.tooltip as { isTrusted?: unknown } | undefined;
++    assert.deepEqual(tooltip?.isTrusted, { enabledCommands: ['claudeLimitBuster.openClaudeToTrust'] });
+   } finally {
+     bar.dispose();
+   }
+ });
+ 
+-test('the tooltip says nothing about trust when the folder is trusted', () => {
++test('the tooltip says nothing about trust when the folder is trusted, and isTrusted is not set', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+   try {
+-    bar.update(job({ folderTrusted: true }));
++    bar.update([job({ folderTrusted: true })]);
+     assert.doesNotMatch(tooltipText(), /not trusted/i);
++    const tooltip = vscodeFake.statusBarItems[0]?.tooltip as { isTrusted?: unknown } | undefined;
++    assert.equal(tooltip?.isTrusted, undefined, 'isTrusted must stay unset with no link in the tooltip');
+   } finally {
+     bar.dispose();
+   }
+ });
+ 
+ test('the tooltip says nothing about trust when trust is unknown', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+   try {
+-    bar.update(job({ folderTrusted: undefined }));
++    bar.update([job({ folderTrusted: undefined })]);
+     assert.doesNotMatch(tooltipText(), /not trusted/i);
+   } finally {
+     bar.dispose();
+   }
+ });
+ 
+ test('the pill says how many sessions are waiting when there is more than one', () => {
+-  // Without this, a second session's resume is invisible: the pill shows the
+-  // soonest one only, which reads exactly like the other one was dropped.
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+   try {
+-    bar.update(job(), 2);
++    bar.update([job(), job({ sessionId: '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b' })]);
++    assert.match(vscodeFake.statusBarItems[0]?.text ?? '', /2 sessions/);
++  } finally {
++    bar.dispose();
++  }
++});
++
++test('a counting-down job and a ready job together still count as 2 sessions on the pill', () => {
++  resetVscodeFake();
++  const bar = new CountdownStatusBar();
++  try {
++    bar.update([job()], [job({ sessionId: '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b' })]);
+     assert.match(vscodeFake.statusBarItems[0]?.text ?? '', /2 sessions/);
+   } finally {
+     bar.dispose();
+   }
+ });
+ 
+ test('the pill does not mention a count for a single session', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+   try {
+-    bar.update(job(), 1);
++    bar.update([job()]);
+     assert.doesNotMatch(vscodeFake.statusBarItems[0]?.text ?? '', /sessions/);
+   } finally {
+     bar.dispose();
+   }
+ });
+ 
+ // ---------------------------------------------------------------------------
+-// Idle presence. A background extension that shows nothing is indistinguishable
+-// from one that failed to load, which is exactly the doubt a freshly installed
+-// VSIX creates - so when nothing is pending the item stays as a bare marker
+-// rather than disappearing.
++// Idle presence.
+ // ---------------------------------------------------------------------------
+ 
+ test('with nothing pending the item still shows a marker', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'always');
++  bar.update([], [], 'always');
+   const item = vscodeFake.statusBarItems[0];
+   assert.ok(item?.visible, 'the item must be visible when idle');
+   assert.match(item.text, /\$\(.+\)/, 'an icon, so it reads as a marker rather than a label');
+   assert.ok(!/resumes in/.test(item.text), 'and no countdown, because nothing is counting down');
+ });
+ 
+ test('the idle tooltip says it is watching and nothing is pending', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'always');
++  bar.update([], [], 'always');
+   assert.match(tooltipText(), /watching/i);
+   assert.match(tooltipText(), /nothing pending/i);
+ });
+ 
+ test('statusBar "pending" keeps the item hidden until there is a countdown', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'pending');
++  bar.update([], [], 'pending');
+   assert.equal(vscodeFake.statusBarItems[0]?.visible, false);
+-  bar.update(job(), 1, 'pending');
++  bar.update([job()], [], 'pending');
+   assert.equal(vscodeFake.statusBarItems[0]?.visible, true);
+ });
+ 
+ test('statusBar "never" hides the item even while a resume is counting down', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job(), 1, 'never');
++  bar.update([job()], [], 'never');
+   assert.equal(vscodeFake.statusBarItems[0]?.visible, false);
+ });
+ 
+ test('a pending job still shows the countdown, not the idle marker', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job(), 1, 'always');
++  bar.update([job()], [], 'always');
+   const item = vscodeFake.statusBarItems[0];
+   assert.match(item!.text, /resumes in/);
+ });
+ 
+ test('clicking opens the menu rather than cancelling outright', () => {
+-  // Issue #3: a single click used to destroy the pending resume, with the only
+-  // warning at the bottom of the tooltip. Every other status-bar item in VS
+-  // Code that shows state opens something on click.
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job(), 1, 'always');
++  bar.update([job()], [], 'always');
+   assert.equal(vscodeFake.statusBarItems[0]?.command, 'claudeLimitBuster.statusBarMenu');
+ });
+ 
+ test('the tooltip no longer promises that clicking cancels', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job(), 1, 'always');
++  bar.update([job()], [], 'always');
+   assert.ok(!/click to cancel/i.test(tooltipText()), tooltipText());
+ });
+ 
+ // ---------------------------------------------------------------------------
+-// The gave-up state (Task 4b). A session this extension has stopped retrying
+-// must not leave the item looking idle: it gets its own icon, and the tooltip
+-// names each such session and why.
++// Sessions waiting to be started by hand (Task 5b): nothing counting down,
++// but a session is ready. It must not read as idle.
++// ---------------------------------------------------------------------------
++
++test('with nothing counting down but a session ready, the item is not the idle eye', () => {
++  resetVscodeFake();
++  const bar = new CountdownStatusBar();
++  bar.update([], [job()], 'always');
++  const item = vscodeFake.statusBarItems[0];
++  assert.ok(item?.visible);
++  assert.ok(!item.text.includes('$(eye)'), `must not read as idle; got ${item.text}`);
++  assert.match(item.text, /ready to resume/i, item.text);
++  assert.doesNotMatch(tooltipText(), /nothing pending/i);
++  assert.match(tooltipText(), /ready/i);
++  assert.ok(tooltipText().includes('0b3d1f66'), tooltipText());
++});
++
++test('the ready pill counts sessions when more than one is ready', () => {
++  resetVscodeFake();
++  const bar = new CountdownStatusBar();
++  bar.update([], [job(), job({ sessionId: '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b' })], 'always');
++  assert.match(vscodeFake.statusBarItems[0]?.text ?? '', /2 sessions/);
++});
++
++test('statusBar "pending" still shows a ready-only session: it is not idle', () => {
++  resetVscodeFake();
++  const bar = new CountdownStatusBar();
++  bar.update([], [job()], 'pending');
++  assert.equal(vscodeFake.statusBarItems[0]?.visible, true);
++});
++
++// ---------------------------------------------------------------------------
++// The gave-up state (Task 4b/5b). A session this extension has stopped
++// retrying must not leave the item looking idle: it gets its own icon, and
++// the unified tooltip names each such session and why.
+ // ---------------------------------------------------------------------------
+ 
+ const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
+ import type { GaveUpRecord } from '../src/gaveUp';
+ 
+ const OTHER = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
+ const gaveUp = (over: Partial<GaveUpRecord> = {}): GaveUpRecord => ({
+   sessionId: '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234',
+   cwd: '/projects/example',
+   cause: 'stall',
+   atMs: Date.now(),
+   ...over,
+ });
+ 
+ test('with nothing pending and a session given up, the item shows the gave-up icon, not the idle eye', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'always', [gaveUp()]);
++  bar.update([], [], 'always', [gaveUp()]);
+   const item = vscodeFake.statusBarItems[0];
+   assert.ok(item?.visible);
+   assert.ok(item.text.startsWith(GAVE_UP_ICON), `expected the gave-up icon; got ${item.text}`);
+   assert.ok(!item.text.includes('$(eye)'), 'it must not read as idle');
+ });
+ 
+-test('the gave-up tooltip names each session, its folder and its cause', () => {
++test('the gave-up tooltip names each session, its folder basename and its cause', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'always', [
++  bar.update([], [], 'always', [
+     gaveUp({ cause: 'cwd' }),
+     gaveUp({ sessionId: OTHER, cwd: '/projects/other', cause: 'launcher' }),
+   ]);
+   const text = tooltipText();
+   assert.ok(text.includes('0b3d1f66') && text.includes('7f2a9c41'), text);
+-  assert.ok(text.includes('/projects/example') && text.includes('/projects/other'), text);
++  assert.ok(text.includes('example') && text.includes('other'), text);
+   assert.match(text, /no longer exists/);
+   assert.match(text, /claude executable/);
+   assert.doesNotMatch(text, /nothing pending/i, 'something did happen');
+   assert.match(text, /Cancel/, 'the tooltip says how to clear it');
+ });
+ 
+ test('the gave-up text counts sessions when more than one gave up', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'always', [gaveUp(), gaveUp({ sessionId: OTHER })]);
++  bar.update([], [], 'always', [gaveUp(), gaveUp({ sessionId: OTHER })]);
+   assert.match(vscodeFake.statusBarItems[0]?.text ?? '', /2 sessions/);
+-  bar.update(undefined, 0, 'always', [gaveUp()]);
++  bar.update([], [], 'always', [gaveUp()]);
+   assert.doesNotMatch(vscodeFake.statusBarItems[0]?.text ?? '', /sessions/);
+ });
+ 
+ test('statusBar "pending" still shows a gave-up session: it is not idle', () => {
+-  // "pending" hides the idle marker only. A failure it would hide is the
+-  // silent-failure case the gave-up state exists to end.
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'pending', [gaveUp()]);
++  bar.update([], [], 'pending', [gaveUp()]);
+   assert.equal(vscodeFake.statusBarItems[0]?.visible, true);
+ });
+ 
+ test('statusBar "never" hides the gave-up state too', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(undefined, 0, 'never', [gaveUp()]);
++  bar.update([], [], 'never', [gaveUp()]);
+   assert.equal(vscodeFake.statusBarItems[0]?.visible, false);
+ });
+ 
+ test('a pending countdown still wins the text, and the tooltip still mentions the gave-up session', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job({ sessionId: OTHER }), 1, 'always', [gaveUp({ cause: 'budget' })]);
++  bar.update([job({ sessionId: OTHER })], [], 'always', [gaveUp({ cause: 'budget' })]);
+   const item = vscodeFake.statusBarItems[0];
+   assert.match(item!.text, /resumes in/);
+   assert.ok(!item!.text.includes(GAVE_UP_ICON));
+   assert.ok(tooltipText().includes('0b3d1f66'), tooltipText());
+   assert.match(tooltipText(), /budget/);
+ });
+ 
+ test('no gave-up section when nothing gave up', () => {
+   resetVscodeFake();
+   const bar = new CountdownStatusBar();
+-  bar.update(job(), 1, 'always', []);
++  bar.update([job()], [], 'always', []);
+   assert.doesNotMatch(tooltipText(), /gave up/i);
+-  bar.update(undefined, 0, 'always', []);
++  assert.doesNotMatch(tooltipText(), /Cancel Pending Resume/, 'no reminder with nothing to clear');
++  bar.update([], [], 'always', []);
+   assert.doesNotMatch(tooltipText(), /gave up/i);
+   assert.ok(vscodeFake.statusBarItems[0]?.text.includes('$(eye)'));
+ });
++
++test('a session both ready and given up (a launcher/cwd failure) is one line, shown with the gave-up icon', () => {
++  resetVscodeFake();
++  const bar = new CountdownStatusBar();
++  bar.update([], [job()], 'always', [gaveUp({ cause: 'launcher' })]);
++  const item = vscodeFake.statusBarItems[0];
++  assert.ok(item?.text.startsWith(GAVE_UP_ICON));
++  const text = tooltipText();
++  assert.match(text, /ready/i);
++  assert.match(text, /claude executable/i);
++  // One line, not two: the session's short id must appear exactly once.
++  assert.equal(text.split('0b3d1f66').length - 1, 1, text);
++});

@@ -4,9 +4,13 @@ import {
   detectLimit,
   looksLikeCode,
   looksLikeLimitMessage,
+  looksLikePercentageUsage,
+  looksLikeQuotedNotice,
   normalize,
   formatDuration,
   MAX_NOTICE_LENGTH,
+  RESET_GRACE_MS,
+  resolveStructuredReset,
 } from '../../src/parsers/limitParser';
 
 const NOW = new Date('2026-08-03T12:00:00Z');
@@ -196,6 +200,71 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
   }
 });
 
+test('a wall-clock time inside a DST fall-back repeated hour resolves to the LATER instant (A7)', () => {
+  // America/Chicago falls back on 2026-11-01: the clock strikes 2:00am and is
+  // set back to 1:00am, so the wall-clock hour 01:00-01:59 happens twice -
+  // once on CDT (UTC-5), once on CST (UTC-6), an hour apart in real time.
+  // "resets 1:30am" is genuinely ambiguous between them. Before this fix,
+  // zonedWallClockToInstant's 2-pass convergence always lands on whichever
+  // offset applies AT the naive target instant - which is always the
+  // EARLIER (CDT) occurrence, confirmed by direct execution against the
+  // unmodified algorithm (2026-11-01T06:30:00.000Z, not the later
+  // 07:30:00.000Z). The brief requires the LATER instant: waking an hour
+  // late finds the banner (if any) still live and safe to re-check; waking
+  // an hour early risks resuming into a session that is still limited.
+  //
+  // `now` is 2026-11-01T05:30:00Z, which is 00:30 local in Chicago (still
+  // CDT, before the transition) - so "today" in the zone is Nov 1 and the
+  // dayOffset=0 candidate is the one under test.
+  const now = new Date('2026-11-01T05:30:00Z');
+  const text = "You've hit your session limit · resets 1:30am (America/Chicago)";
+  const hit = detectLimit(text, now, MAXW);
+  assert.ok(hit, 'not detected');
+  assert.equal(
+    hit.resumeAt.toISOString(),
+    '2026-11-01T07:30:00.000Z',
+    'must resolve to the LATER (CST) instant of the repeated hour, not the earlier (CDT) one',
+  );
+});
+
+test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the safe, LATER side of the gap (A7)', () => {
+  // America/Chicago springs forward on 2026-03-08: the clock strikes 2:00am
+  // and immediately jumps to 3:00am, so the wall-clock hour 02:00-02:59
+  // never happens at all. "resets 2:30am" names a reading that does not
+  // exist.
+  //
+  // Direct execution against the code as bbff534 left it (the 2-pass
+  // fall-back fix, with no gap-specific handling) showed it resolves this to
+  // 2026-03-08T07:30:00.000Z - which reads back as 01:30 CST, an hour
+  // EARLIER than the literal (nonexistent) 02:30 reading asked for. That
+  // happens because the 2-pass loop's second pass re-resolves the offset at
+  // its own first-pass candidate (already past the transition, so CDT),
+  // overshooting onto the early side of the jump. This is the unsafe
+  // direction the brief warns about: waking early risks resuming into a
+  // session that has not actually reset. So this is a case where the test
+  // shows the (unmodified) code wrong, per the brief's "change the
+  // implementation only if a test shows it is wrong" - the implementation
+  // was changed to detect a resolved instant that does not read back the
+  // requested hour:minute (proof the reading fell in a skipped hour) and
+  // step forward one hour onto the safe side instead: 2026-03-08T08:30:00Z,
+  // which reads 03:30 CDT - the first real instant on the other side of the
+  // jump. Late is safe (a still-live limit is simply re-checked); early is
+  // not (it resumes a session mid-limit).
+  //
+  // `now` is 2026-03-08T06:30:00Z, which is 00:30 local in Chicago (still
+  // CST, before the 08:00Z transition) - so "today" in the zone is Mar 8 and
+  // the dayOffset=0 candidate is the one under test.
+  const now = new Date('2026-03-08T06:30:00Z');
+  const text = "You've hit your session limit · resets 2:30am (America/Chicago)";
+  const hit = detectLimit(text, now, MAXW);
+  assert.ok(hit, 'not detected');
+  assert.equal(
+    hit.resumeAt.toISOString(),
+    '2026-03-08T08:30:00.000Z',
+    'must resolve to the safe, LATER side of the spring-forward gap (03:30 CDT), not the early side (01:30 CST)',
+  );
+});
+
 // Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
 // deleted without any test failing - nothing pinned any one of them
 // individually. Each test below uses the exact input from the issue's table,
@@ -278,4 +347,176 @@ test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
   const hit = detectLimit('Usage limit reached. Try again in 24 hours', NOW, MAXW);
   assert.ok(hit, 'a resume landing exactly on the wait horizon must still be accepted');
   assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
+});
+
+// ---------------------------------------------------------------------------
+// RESET_GRACE_MS: a resolved reset in the past is still due now within the
+// window, and history just beyond it. `readAt` - the real current time - is
+// deliberately distinct from `now` - the basis a relative notice is resolved
+// against - to pin that the grace check is decided against the former, not
+// the latter (transcriptWatcher passes the entry's own timestamp as `now`
+// and the actual wall clock as `readAt`).
+// ---------------------------------------------------------------------------
+
+test('detectLimit: RESET_GRACE_MS boundary, decided against readAt rather than the resolving basis', () => {
+  const readAt = new Date('2026-08-03T12:00:00Z');
+  // 25 minutes before readAt, so "in 10 minutes" resolves to 15 minutes
+  // (RESET_GRACE_MS) before readAt - exactly the edge of the window.
+  const basis = new Date(readAt.getTime() - RESET_GRACE_MS - 10 * 60_000);
+  const text = 'Claude AI usage limit reached. Try again in 10 minutes';
+
+  const atEdge = detectLimit(text, basis, MAXW, { readAt });
+  assert.ok(atEdge, 'exactly RESET_GRACE_MS old (by readAt) is "at most" the grace, not history');
+  assert.equal(atEdge.resumeAt.getTime(), readAt.getTime() - RESET_GRACE_MS);
+
+  const pastEdge = detectLimit(text, basis, MAXW, { readAt: new Date(readAt.getTime() + 1) });
+  assert.equal(pastEdge, undefined, 'one millisecond further back (by readAt) must tip it into history');
+});
+
+test('detectLimit: omitting readAt keeps every existing caller unaffected (readAt defaults to now)', () => {
+  // Every caller before readAt existed passed a single time reference for
+  // both roles; the default must reproduce that.
+  const past = 'Claude AI usage limit reached. Try again in 10 minutes';
+  assert.ok(detectLimit(past, new Date(NOW.getTime() - 20 * 60_000), MAXW), 'still within grace of its own basis');
+});
+
+// ---------------------------------------------------------------------------
+// resolveStructuredReset: quotaLimits.resetsAt, an already-absolute instant.
+// Same grace and horizon rules as detectLimit, but only one time reference -
+// there is no separate "written at" basis for an absolute value to resolve
+// against.
+// ---------------------------------------------------------------------------
+
+test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
+  const now = new Date('2026-08-03T12:00:00Z');
+  const atEdge = Math.floor((now.getTime() - RESET_GRACE_MS) / 1000);
+  assert.ok(resolveStructuredReset(atEdge, now, MAXW), 'exactly RESET_GRACE_MS old is still due now');
+  assert.equal(
+    resolveStructuredReset(atEdge - 1, now, MAXW),
+    undefined,
+    'a further second back is history',
+  );
+});
+
+test('resolveStructuredReset: wait-horizon boundary accepts an exact tie, rejects beyond it', () => {
+  const now = new Date('2026-08-03T12:00:00Z');
+  const atHorizon = Math.floor((now.getTime() + MAXW * 3_600_000) / 1000);
+  assert.ok(resolveStructuredReset(atHorizon, now, MAXW), 'exactly at the horizon must still be accepted');
+  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW), undefined, 'an hour beyond the horizon is rejected');
+});
+
+test('resolveStructuredReset: a non-finite value is rejected outright', () => {
+  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The clock-reset rollover, made grace-aware so a notice read moments after
+// its own clock time struck is not skipped forward a full day.
+// ---------------------------------------------------------------------------
+
+test('the clock-reset rollover accepts a today occurrence still inside the grace window', () => {
+  // 1:05am America/Chicago (CST, UTC-6): five minutes after the target clock
+  // time, inside RESET_GRACE_MS. Without the grace-aware rollover this would
+  // be judged "already past" and rolled a full day forward, to tomorrow's
+  // 1am - a ~24h miss for a limit that lifted five minutes ago.
+  const now = new Date('2026-01-15T07:05:00Z');
+  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
+  assert.ok(hit, "today's occurrence, five minutes gone, must still be picked");
+  assert.equal(hit.resumeAt.toISOString(), '2026-01-15T07:00:00.000Z', "today's 1am CST, not tomorrow's");
+});
+
+test('the clock-reset rollover still rolls to tomorrow once the grace window has passed', () => {
+  // Same notice, twenty minutes past 1am CST - past RESET_GRACE_MS, so
+  // today's occurrence is history and the next real occurrence is tomorrow.
+  const now = new Date('2026-01-15T07:20:00Z');
+  const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
+  assert.ok(hit, 'a genuinely missed reset still resolves to the next occurrence');
+  assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
+});
+
+// ---------------------------------------------------------------------------
+// Task 3 (synthesis A3): text that merely LOOKS like a limit banner - a
+// percentage-usage status line, or text someone else is visibly quoting -
+// must not arm a timer on the untrusted path. A flagged entry (Claude Code's
+// own rate-limit marker) is unaffected, exactly like the existing
+// looksLikeCode guard.
+// ---------------------------------------------------------------------------
+
+test('a percentage-usage status line does not arm untrusted, but does trusted (real false positive)', () => {
+  // Captured verbatim, 2026-09-23: "You've used 91% of your session limit ·
+  // resets 12:40pm" armed a timer from an untrusted entry.
+  const text = "You've used 91% of your session limit · resets 12:40pm";
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a usage-percentage line must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a line prefixed with `>` does not arm untrusted, but does trusted', () => {
+  const text = '> Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a blockquoted line must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a grep-style "file.ext:line:" prefix does not arm untrusted, but does trusted', () => {
+  const text = 'docs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a grep citation must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('a bare "path:line-" grep prefix (no file extension) is still recognised', () => {
+  const text = 'notes:42-Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined);
+});
+
+test('fix round 1: an absolute Windows path with a drive letter is still recognised as a grep prefix', () => {
+  const text = 'C:\\Users\\x\\y.ts:12:Claude AI usage limit reached. Try again in 5 hours';
+  assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a drive-letter grep citation must not arm');
+  assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
+});
+
+test('fix round 1: drive-letter support does not open a hole for real banners', () => {
+  // "12:40pm" must not itself be read as a drive letter + path.
+  const cases = [
+    "You've hit your session limit · resets 12:40am (America/Chicago)",
+    "You've hit your session limit · resets 2am (America/Chicago)",
+    'Claude usage limit reached, resets at 12:00 (UTC+3)',
+    'Claude AI usage limit reached. Try again in 5 hours',
+  ];
+  for (const text of cases) {
+    assert.ok(detectLimit(text, NOW, MAXW), `real banner must still arm: ${text}`);
+  }
+});
+
+test('a real banner with no quoting marks still arms untrusted (positive control)', () => {
+  // The new vetoes must not catch an ordinary, unquoted banner - the whole
+  // point of the guard is to stay narrow.
+  const text = "You've hit your session limit · resets 2am (America/Chicago)";
+  assert.ok(detectLimit(text, NOW, MAXW), 'a genuine unquoted banner must still arm');
+});
+
+test('looksLikePercentageUsage flags a "used N%" status line and nothing else', () => {
+  assert.ok(looksLikePercentageUsage("You've used 91% of your session limit"));
+  assert.equal(looksLikePercentageUsage('Claude AI usage limit reached. Try again in 5 hours'), false);
+});
+
+test('looksLikeQuotedNotice recognises backtick, blockquote and grep-prefix forms', () => {
+  assert.ok(looksLikeQuotedNotice('`Claude AI usage limit reached`'), 'backtick-fenced');
+  assert.ok(looksLikeQuotedNotice('> Claude AI usage limit reached'), 'blockquoted');
+  assert.ok(looksLikeQuotedNotice('src/x.ts:12:Claude AI usage limit reached'), 'grep-prefixed');
+  assert.equal(
+    looksLikeQuotedNotice('Claude AI usage limit reached. Try again in 5 hours'),
+    false,
+    'a plain banner is not quoted',
+  );
+});
+
+test('looksLikeQuotedNotice checks each physical line, since normalize() collapses newlines', () => {
+  // A multi-line grep dump where only the second line carries the citation
+  // prefix - the veto must still catch it even though it is not on line one.
+  const text = 'Found 2 matches:\ndocs/PRIOR-ART.md:277:Claude AI usage limit reached. Try again in 5 hours';
+  assert.ok(looksLikeQuotedNotice(text));
+});
+
+test('fix round 1: looksLikeQuotedNotice recognises an absolute Windows path with a drive letter', () => {
+  assert.ok(looksLikeQuotedNotice('C:\\Users\\x\\y.ts:12: Claude AI usage limit reached'), 'drive-letter grep prefix');
+  assert.equal(looksLikeQuotedNotice("You've hit your session limit \u00b7 resets 12:40pm"), false, '"12:40pm" is not a drive letter');
 });

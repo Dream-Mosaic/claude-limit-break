@@ -35,6 +35,23 @@ export interface FakeTerminal {
 }
 
 /**
+ * A single, module-level emitter for `vscode.window.onDidCloseTerminal`.
+ *
+ * Unlike FakeWatcher's emitters (recreated per activate() call, since a real
+ * TranscriptWatcher is per-window), `window.onDidCloseTerminal` is part of
+ * the shared fake `vscode` API surface itself - one global, exactly like real
+ * VS Code. A test's `finally { teardown(ctx) }` disposes the extension's own
+ * subscription (removing its listener), so this can be reused across tests
+ * without a reset.
+ */
+const closeTerminalEmitter = new FakeEventEmitter<FakeTerminal>();
+
+/** Fire a terminal-closed event, as if the user closed `terminal`'s tab. */
+export function fireTerminalClose(terminal: FakeTerminal): void {
+  closeTerminalEmitter.fire(terminal);
+}
+
+/**
  * One recorded information message. `answer` settles the promise the extension
  * is awaiting, so a test can leave an offer open - firing other events while it
  * hangs - and accept it later, which is the only way to reproduce a second
@@ -44,6 +61,8 @@ export interface FakeInfoMessage {
   message: string;
   items: string[];
   answer(item?: string): void;
+  /** True when shown with `{ modal: true }`, as the live-holder fork warning is. */
+  modal?: boolean;
 }
 
 export interface FakeStatusBarItem {
@@ -62,6 +81,13 @@ export interface FakeStatusBarItem {
 
 class FakeMarkdownString {
   value: string;
+  /**
+   * Mirrors the real MarkdownString's mutable `isTrusted`: unset (falsy)
+   * means command/href links are inert, `{ enabledCommands }` allows exactly
+   * those. Task 5b sets this only when the tooltip actually contains a trust
+   * hotlink, never unconditionally (ruling: isTrusted only with a link).
+   */
+  isTrusted?: boolean | { readonly enabledCommands: readonly string[] };
   constructor(value?: string, readonly supportThemeIcons?: boolean) {
     this.value = value ?? '';
   }
@@ -125,6 +151,10 @@ export const vscodeFake = {
   shownChannels: 0,
   /** Tabs `tabGroups.close` has removed, in call order, for assertions. */
   closedTabs: [] as FakeTab[],
+  /** What `vscode.env.sessionId` reports: this fake window's identity. */
+  envSessionId: 'fake-window-session',
+  /** Extension ids `vscode.extensions.getExtension` reports as installed. */
+  installedExtensions: new Set<string>(),
 };
 
 export function resetVscodeFake(): void {
@@ -146,6 +176,8 @@ export function resetVscodeFake(): void {
   vscodeFake.shownChannels = 0;
   vscodeFake.tabs = [];
   vscodeFake.closedTabs = [];
+  vscodeFake.envSessionId = 'fake-window-session';
+  vscodeFake.installedExtensions = new Set();
 }
 
 const fakeVscode = {
@@ -156,12 +188,19 @@ const fakeVscode = {
   MarkdownString: FakeMarkdownString,
   TabInputWebview: FakeTabInputWebview,
   env: {
+    /** One fixed identity per fake "window"; claims.ts records it (final review I3). */
+    get sessionId() {
+      return vscodeFake.envSessionId;
+    },
     openExternal: (uri: unknown) => {
       vscodeFake.openedExternal.push(String((uri as { value?: string }).value ?? uri));
       return Promise.resolve(true);
     },
   },
   Uri: { parse: (value: string) => ({ value }) },
+  extensions: {
+    getExtension: (id: string) => (vscodeFake.installedExtensions.has(id) ? { id } : undefined),
+  },
   window: {
     tabGroups: {
       get all() {
@@ -207,6 +246,7 @@ const fakeVscode = {
       vscodeFake.statusBarItems.push(item);
       return item;
     },
+    onDidCloseTerminal: closeTerminalEmitter.event,
     createTerminal: (options: unknown): FakeTerminal => {
       const terminal: FakeTerminal = {
         options,
@@ -231,13 +271,24 @@ const fakeVscode = {
     // Mirrors showInformationMessage: a warning can carry action buttons
     // too, and the budget refusal offers one. `warnings` stays a string
     // array so the tests that only read messages keep working.
-    showWarningMessage: (message: string, ...items: string[]) => {
+    //
+    // Real VS Code overloads this with an optional MessageOptions object
+    // ({modal?: boolean}) ahead of the button labels - the live-holder fork
+    // warning uses it. Accepted here as `...args` rather than a fixed
+    // `options?` parameter so a plain string-only call (every other existing
+    // caller) is not forced to pass one.
+    showWarningMessage: (message: string, ...args: unknown[]) => {
+      const modal =
+        args.length > 0 && typeof args[0] === 'object' && args[0] !== null
+          ? Boolean((args[0] as { modal?: boolean }).modal)
+          : undefined;
+      const items = (modal === undefined ? args : args.slice(1)) as string[];
       vscodeFake.warnings.push(message);
       let settle: (item: string | undefined) => void = () => {};
       const answered = new Promise<string | undefined>((r) => {
         settle = r;
       });
-      vscodeFake.warningOffers.push({ message, items, answer: (item?: string) => settle(item) });
+      vscodeFake.warningOffers.push({ message, items, modal, answer: (item?: string) => settle(item) });
       return answered;
     },
     showErrorMessage: (message: string) => {

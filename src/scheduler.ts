@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { Logger } from './log';
 
-const STATE_KEY = 'claudeLimitBuster.pending';
+const STATE_KEY = 'claudeLimitBreak.pending';
 const TICK_MS = 1000;
 
 export interface PendingJob {
@@ -27,6 +27,23 @@ export interface PendingJob {
    * one persisted by a version that predates this field.
    */
   folderTrusted?: boolean;
+  /**
+   * The `timestamp` of the transcript entry this job was detected from, in
+   * ms, when it had one (overload hits only, today). Identifies an overload
+   * event across windows for the cross-window claim (claims.ts claimKeyFor;
+   * final review, Important 3). Absent on a job persisted by an older build,
+   * which falls back to the old 10-minute bucket.
+   */
+  entryTimestampMs?: number;
+  /**
+   * The transcript's size when the job was planned (at detection), when it
+   * could be read. The baseline for the native auto-continue check (final
+   * review, Important 6): a fire is padded 5-30 minutes past the reset, so
+   * Claude Code's own auto-continue has usually written - and often finished
+   * - its turn before this window fires, and growth has to be measured from
+   * before the reset, not from the fire.
+   */
+  transcriptBytesAtDetection?: number;
 }
 
 export interface MementoLike {
@@ -112,15 +129,33 @@ export class ResumeScheduler {
    * earlier one still counting down for the same session: repeated limit
    * notices for one cooldown would otherwise keep pushing that resume further
    * out. Deadlines belonging to other sessions are never compared at all.
+   *
+   * Task 10 fix (2026-09-24): `baseResumeAtMs` - the un-jittered reset - is
+   * also compared, not just `resumeAtMs`. planResume rolls a fresh random
+   * jitter on every detection, so a REPEAT notice for the identical reset
+   * produces a different `resumeAtMs` each time; a re-detection that happened
+   * to re-roll a SMALLER jitter has an earlier `resumeAtMs` than the job
+   * already scheduled, which slipped past the check above (only a strictly
+   * LATER resumeAtMs was ever blocked) and replaced it - on 2026-09-24 this
+   * moved a window's resume from 2:27:19 to 2:20:11 on a re-detection. Same
+   * `baseResumeAtMs` means the same reset no matter which way the new jitter
+   * roll moved it, so it is dropped either way, keeping the first schedule.
    */
   schedule(job: PendingJob): boolean {
     const existing = this.pending.get(job.sessionId);
-    if (existing && existing.resumeAtMs >= Date.now() && job.resumeAtMs > existing.resumeAtMs) {
-      this.log.info(
-        `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
-          `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
-      );
-      return false;
+    if (existing && existing.resumeAtMs >= Date.now()) {
+      const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
+      if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
+        this.log.info(
+          sameReset
+            ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +
+                `${new Date(job.baseResumeAtMs).toISOString()}); keeping the resume already scheduled for ` +
+                `${new Date(existing.resumeAtMs).toISOString()}.`
+            : `Ignoring later deadline ${new Date(job.resumeAtMs).toISOString()} for ${job.sessionId}; ` +
+                `already waiting until ${new Date(existing.resumeAtMs).toISOString()}`,
+        );
+        return false;
+      }
     }
     this.pending.set(job.sessionId, job);
     this.persist();

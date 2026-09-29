@@ -1,0 +1,700 @@
+## Commits
+9b44133 test: cover the dismiss path of the trust-hotlink notice button
+d70840d feat: add openClaudeToTrust command (Task 5a trust hotlink)
+69ad673 feat(resumer): add buildTrustTerminalOptions for the trust hotlink
+
+## Files changed
+ package.json           |  12 +++
+ src/extension.ts       |  86 +++++++++++++++++++-
+ src/resumer.ts         |  28 +++++++
+ test/extension.test.ts | 215 +++++++++++++++++++++++++++++++++++++++++++++++++
+ test/helpers/vscode.ts |  18 +++++
+ test/resumer.test.ts   |  30 +++++++
+ 6 files changed, 386 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/package.json b/package.json
+index c5605e4..d8c1a54 100644
+--- a/package.json
++++ b/package.json
+@@ -39,22 +39,34 @@
+         "command": "claudeLimitBuster.cancel",
+         "title": "Claude Limit Buster: Cancel Pending Resume"
+       },
+       {
+         "command": "claudeLimitBuster.showLog",
+         "title": "Claude Limit Buster: Show Log"
+       },
+       {
+         "command": "claudeLimitBuster.statusBarMenu",
+         "title": "Claude Limit Buster: Status Bar Menu"
++      },
++      {
++        "command": "claudeLimitBuster.openClaudeToTrust",
++        "title": "Claude Limit Buster: Open Claude to Trust"
+       }
+     ],
++    "menus": {
++      "commandPalette": [
++        {
++          "command": "claudeLimitBuster.openClaudeToTrust",
++          "when": "false"
++        }
++      ]
++    },
+     "configuration": {
+       "title": "Claude Limit Buster",
+       "properties": {
+         "claudeLimitBuster.enabled": {
+           "type": "boolean",
+           "default": true,
+           "scope": "window",
+           "description": "Watch Claude Code transcripts for usage limits and server errors."
+         },
+         "claudeLimitBuster.autoResume": {
+diff --git a/src/extension.ts b/src/extension.ts
+index b0f277d..376d4cf 100644
+--- a/src/extension.ts
++++ b/src/extension.ts
+@@ -4,20 +4,21 @@ import * as path from 'node:path';
+ import { createLogger } from './log';
+ import { readSettings, type Settings } from './config';
+ import { TranscriptWatcher } from './transcriptWatcher';
+ import { ResumeScheduler, type PendingJob } from './scheduler';
+ import { CountdownStatusBar } from './statusBar';
+ import { planResume } from './policy';
+ import { randomJitterMs } from './randomDelay';
+ import { playAlertSound } from './sound';
+ import {
+   buildTerminalOptions,
++  buildTrustTerminalOptions,
+   buildResumeArgs,
+   buildHeadlessArgs,
+   resolveClaudeLauncher,
+   cwdExists,
+ } from './resumer';
+ import { isFolderTrusted, trustedSpelling, readClaudeUserConfig, defaultClaudeConfigPath } from './trust';
+ import { GRACE_MS, stallVerdict } from './stallWatch';
+ import { parseLastUsage, type UsageRecord } from './budget';
+ import {
+   decideUpdateCheck,
+@@ -43,20 +44,23 @@ import {
+ import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
+ import { autoContinueEnabled } from './autoContinue';
+ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
+ import { selectClaudePanelTab, type WebviewTab } from './panelTab';
+ import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
+ import { execFileSync } from 'node:child_process';
+ import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
+ 
+ const NS = 'claudeLimitBuster';
+ 
++/** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
++const TRUST_BUTTON = 'Open Claude to Trust';
++
+ /**
+  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
+  * the scheduler's own `claudeLimitBuster.pending`: these have already fired,
+  * and putting them back there would leave the scheduler counting down to a
+  * deadline that has passed.
+  */
+ const READY_KEY = 'claudeLimitBuster.ready';
+ 
+ /**
+  * How much of a transcript's end to read when looking for its newest usage
+@@ -221,23 +225,34 @@ export function activate(context: vscode.ExtensionContext): void {
+       log.warn(
+         `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
+       );
+     }
+     if (s.notify) {
+       const at = new Date(job.resumeAtMs).toLocaleTimeString();
+       const trustNote =
+         folderTrusted === false
+           ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
+           : '';
+-      void vscode.window.showInformationMessage(
+-        `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`,
+-      );
++      const message = `Claude Limit Buster: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
++      if (folderTrusted === false) {
++        // A one-click way to answer the trust dialog ahead of the resume,
++        // right when the user is at the keyboard to see this notice (Task
++        // 5a). The button only ever opens a terminal - see
++        // openClaudeToTrust below - never answers the dialog itself (#2).
++        void Promise.resolve(vscode.window.showInformationMessage(message, TRUST_BUTTON)).then((choice) => {
++          if (choice === TRUST_BUTTON) {
++            void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
++          }
++        });
++      } else {
++        void vscode.window.showInformationMessage(message);
++      }
+     }
+   };
+ 
+   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
+     const s = settings();
+     const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage);
+     if (plan.kind === 'ignore') {
+       log.info(plan.reason);
+       return;
+     }
+@@ -734,20 +749,28 @@ export function activate(context: vscode.ExtensionContext): void {
+       await context.globalState.update(DISMISSED_VERSION_KEY, action.latestTag);
+     }
+   };
+ 
+   // Fire and forget: a failure here must never take activation with it, and
+   // the issue asks for silence on every failure, not just no notification.
+   void offerUpdateChecks()
+     .then(() => runUpdateCheck())
+     .catch(() => {});
+ 
++  /**
++   * Terminals opened by openClaudeToTrust, tracked so the close hook below
++   * (ruling 2) only re-checks trust for terminals THIS command opened - a
++   * resume terminal, or any other terminal in the window, closing must not
++   * trigger it.
++   */
++  const trustTerminals = new Set<vscode.Terminal>();
++
+   context.subscriptions.push(
+     {
+       dispose: () => {
+         for (const t of stallChecks) {
+           clearTimeout(t);
+         }
+         stallChecks.clear();
+       },
+     },
+     channel,
+@@ -1072,20 +1095,77 @@ export function activate(context: vscode.ExtensionContext): void {
+       ];
+       const picked = await vscode.window.showQuickPick(items, {
+         title: 'Claude Limit Buster',
+         placeHolder: waiting > 0 ? `${waiting} resume(s) waiting` : 'Watching for usage limits',
+       });
+       if (!picked) {
+         return;
+       }
+       await vscode.commands.executeCommand(picked.command);
+     }),
++    /**
++     * Trust hotlink (Task 5a). Opens a terminal running plain `claude` (no
++     * `--resume`, no prompt) in `cwd`, so the user answers Claude's own trust
++     * dialog themselves - the extension never types into this terminal and
++     * never writes `~/.claude.json` (constraint 2). Linked from the
++     * untrusted-folder notice above; the tooltip link is Task 5b.
++     */
++    vscode.commands.registerCommand(`${NS}.openClaudeToTrust`, (cwd?: unknown) => {
++      // Only ever invoked with a cwd today (the notice button, and Task 5b's
++      // tooltip link); a bare Command Palette invocation - which is why it is
++      // hidden there (`"when": "false"` in package.json) - or a stale
++      // keybinding has no folder to open, so this logs and stops rather than
++      // guessing one.
++      if (typeof cwd !== 'string') {
++        log.warn('claudeLimitBuster.openClaudeToTrust was invoked with no folder; ignoring.');
++        return;
++      }
++      const s = settings();
++      const launcher = findLauncher(s.claudeCommand);
++      if (!launcher) {
++        // Same failure, and the same handling, as the resume launch below.
++        log.error(`Cannot open a trust terminal for ${cwd}: no claude executable found.`);
++        void vscode.window.showErrorMessage(
++          'Claude Limit Buster: could not find the claude executable. Set claudeLimitBuster.claudeCommand.',
++        );
++        return;
++      }
++      // Same reasoning as the resume launch: open from whichever spelling
++      // the CLI already has on record, so a folder trusted from a terminal
++      // is recognised even when VS Code reports a different-cased drive
++      // letter for the same directory (trust.ts).
++      const onRecord = trustedSpelling(
++        cwd,
++        readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
++        process.platform,
++      );
++      const opts = buildTrustTerminalOptions(onRecord ?? cwd, launcher);
++      const terminal = vscode.window.createTerminal(opts);
++      trustTerminals.add(terminal);
++      terminal.show();
++      log.info(`Opened a terminal at ${opts.cwd} to trust it with the Claude CLI.`);
++    }),
++    vscode.window.onDidCloseTerminal((terminal) => {
++      if (!trustTerminals.delete(terminal)) {
++        return;
++      }
++      // Ruling 2: re-check EVERY pending job, not just the one the terminal
++      // was opened for - refreshTrust is mtime-cached per session, so this is
++      // cheap, and it is what catches a job whose cwd is a different spelling
++      // of the same folder the user just trusted. Then force the same render
++      // call scheduler.onChange uses (above), so the tooltip's marker clears
++      // now instead of waiting for the next countdown tick.
++      for (const job of scheduler.jobs) {
++        refreshTrust(job);
++      }
++      status.update(scheduler.current, scheduler.jobs.length, settings().statusBar);
++    }),
+   );
+ 
+   scheduler.start();
+   void watcher.start();
+   log.info('Claude Limit Buster active.');
+ }
+ 
+ export function deactivate(): void {
+   /* subscriptions handle teardown */
+ }
+diff --git a/src/resumer.ts b/src/resumer.ts
+index 5c38ab6..5a2eab3 100644
+--- a/src/resumer.ts
++++ b/src/resumer.ts
+@@ -116,20 +116,48 @@ export function buildTerminalOptions(
+   return {
+     name: `Limit Buster: ${session.sessionId.slice(0, 8)}`,
+     cwd: session.cwd,
+     shellPath: launcher.file,
+     shellArgs: [...launcher.args, ...claudeArgs],
+     isTransient: true,
+     env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
+   };
+ }
+ 
++/**
++ * Terminal options for a plain `claude` launch in `cwd`, with no `--resume`
++ * and no prompt (Task 5a: Trust hotlink).
++ *
++ * This terminal exists only so a human can answer Claude's own trust dialog
++ * themselves - constraint 2 forbids the extension from answering it or
++ * writing `~/.claude.json`, so nothing here sends any input into the
++ * terminal it opens. The environment is stripped exactly as
++ * buildTerminalOptions strips it: a window opened from inside a running
++ * Claude session must not hand this new `claude` process that session's
++ * identity either.
++ *
++ * Not built by calling buildTerminalOptions with a fake ResolvedSession:
++ * that function's name embeds a session id this launch does not have, and
++ * threading an empty claudeArgs list through its session-shaped signature
++ * would be more confusing than a second, smaller function.
++ */
++export function buildTrustTerminalOptions(cwd: string, launcher: Launcher): TerminalOptionsLike {
++  return {
++    name: `Limit Buster: Trust ${path.basename(cwd)}`,
++    cwd,
++    shellPath: launcher.file,
++    shellArgs: [...launcher.args],
++    isTransient: true,
++    env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
++  };
++}
++
+ /**
+  * Matches the shim-directory variables npm's generated launchers set to their
+  * own directory: %dp0% / %~dp0% in a .cmd shim (computed by its :find_dp0
+  * routine), $basedir in a .ps1 shim (computed from $PSScriptRoot). All three
+  * are expanded to path.dirname(found) before the entry point is resolved.
+  */
+ const SHIM_DIR_VAR = /%~?dp0%?|\$basedir/gi;
+ 
+ /**
+  * Find something spawnable for `claude`.
+diff --git a/test/extension.test.ts b/test/extension.test.ts
+index 503bd15..8f76f54 100644
+--- a/test/extension.test.ts
++++ b/test/extension.test.ts
+@@ -1,19 +1,20 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { stallVerdict as realStallVerdict } from '../src/stallWatch';
+ import * as fs from 'node:fs';
+ import * as os from 'node:os';
+ import * as path from 'node:path';
+ import {
+   FakeEventEmitter,
+   FakeTabInputWebview,
++  fireTerminalClose,
+   installVscodeStub,
+   resetVscodeFake,
+   stubModule,
+   vscodeFake,
+   type FakeTab,
+ } from './helpers/vscode';
+ import type { AgentRow, HolderRecord } from '../src/liveSessions';
+ 
+ installVscodeStub();
+ 
+@@ -1343,20 +1344,234 @@ test('the trust warning clears once the folder is trusted mid-countdown', async
+ 
+     trustedCwds = 'all';
+     await oneTick();
+     assert.ok(!/not trusted/i.test(tooltip()), `the warning must clear: ${tooltip()}`);
+   } finally {
+     trustedCwds = 'all';
+     teardown(ctx);
+   }
+ });
+ 
++// ---------------------------------------------------------------------------
++// Task 5a: Trust hotlink - claudeLimitBuster.openClaudeToTrust
++// ---------------------------------------------------------------------------
++
++const TRUST_BUTTON = 'Open Claude to Trust';
++const trustCommand = () => vscodeFake.commands.get('claudeLimitBuster.openClaudeToTrust');
++const trustTerminalOptions = (index = 0) =>
++  vscodeFake.terminals[index]?.options as
++    | { shellPath: string; shellArgs: string[]; cwd?: string; name: string }
++    | undefined;
++
++test('the command opens exactly one plain-claude terminal at the given cwd', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER };
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    await trustCommand()!(REAL_CWD);
++    assert.equal(vscodeFake.terminals.length, 1, 'exactly one terminal must open');
++    const opts = trustTerminalOptions();
++    assert.ok(opts, 'setup: the terminal must have options');
++    assert.equal(opts.shellPath, LAUNCHER);
++    assert.deepEqual(opts.shellArgs, [], 'plain claude: no --resume, no prompt argument');
++    assert.equal(opts.cwd, REAL_CWD);
++    assert.match(opts.name, /Limit Buster/);
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('the command launches from the trusted spelling on record, not the given cwd, when one exists', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER };
++  const recorded = 'C:/Users/me/project';
++  trustedSpellingFor.set(REAL_CWD, recorded);
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    await trustCommand()!(REAL_CWD);
++    const opts = trustTerminalOptions();
++    assert.equal(opts?.cwd, recorded, 'must launch from the CLI-recorded spelling');
++  } finally {
++    trustedSpellingFor.clear();
++    teardown(ctx);
++  }
++});
++
++test('invoked with no cwd (e.g. the Command Palette), the command opens nothing and logs', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { claudeCommand: LAUNCHER };
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    await trustCommand()!();
++    assert.equal(vscodeFake.terminals.length, 0, 'no folder to open a terminal in');
++    assert.ok(
++      vscodeFake.outputLines.some((l) => /openClaudeToTrust/.test(l)),
++      `expected a log line naming the command; saw ${JSON.stringify(vscodeFake.outputLines)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('the command shows an error and opens nothing when claude cannot be found', async () => {
++  resetVscodeFake();
++  // No separator: resolveClaudeLauncher looks this up on PATH via `which`,
++  // and a name this implausible is not on any machine's PATH - the same
++  // failure mode resume() itself hits when claudeCommand is misconfigured.
++  vscodeFake.config = { claudeCommand: 'clb-test-definitely-not-a-real-claude-binary' };
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    await trustCommand()!(REAL_CWD);
++    assert.equal(vscodeFake.terminals.length, 0, 'no launcher, no terminal');
++    assert.ok(
++      vscodeFake.errors.some((e) => /could not find the claude executable/i.test(e)),
++      `expected a user-visible error; saw ${JSON.stringify(vscodeFake.errors)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('the untrusted-folder notice offers "Open Claude to Trust", and clicking it opens the terminal', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  trustedCwds = new Set(); // nothing trusted
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
++    await flush();
++    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
++    assert.ok(notice, 'setup: expected the schedule notice');
++    assert.ok(
++      notice.items.includes(TRUST_BUTTON),
++      `an untrusted folder must offer the trust button; saw ${JSON.stringify(notice.items)}`,
++    );
++
++    assert.equal(vscodeFake.terminals.length, 0, 'not yet - the button has not been clicked');
++    notice.answer(TRUST_BUTTON);
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 1, 'clicking the button must open the trust terminal');
++    assert.equal(trustTerminalOptions()?.cwd, REAL_CWD);
++  } finally {
++    trustedCwds = 'all';
++    teardown(ctx);
++  }
++});
++
++test('dismissing the untrusted-folder notice opens no terminal', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  trustedCwds = new Set(); // nothing trusted
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
++    await flush();
++    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
++    assert.ok(notice, 'setup: expected the schedule notice');
++    // Dismissed, same as closing the notification without picking a button.
++    notice.answer(undefined);
++    await flush();
++    assert.equal(vscodeFake.terminals.length, 0, 'dismissing the notice must not open a terminal');
++  } finally {
++    trustedCwds = 'all';
++    teardown(ctx);
++  }
++});
++
++test('a trusted folder\'s notice never offers the trust button', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  trustedCwds = new Set([REAL_CWD]);
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
++    await flush();
++    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
++    assert.ok(notice, 'setup: expected the schedule notice');
++    assert.ok(
++      !notice.items.includes(TRUST_BUTTON),
++      `a trusted folder must not offer the trust button; saw ${JSON.stringify(notice.items)}`,
++    );
++  } finally {
++    teardown(ctx);
++  }
++});
++
++test('closing the trust terminal re-reads trust immediately, without waiting for the next tick', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  trustedCwds = new Set(); // nothing trusted yet
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
++    await flush();
++    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.match(tooltip(), /not trusted/i, 'setup: must warn while untrusted');
++
++    await trustCommand()!(REAL_CWD);
++    assert.equal(vscodeFake.terminals.length, 1, 'setup: the trust terminal must have opened');
++
++    // The user answered Claude's own trust prompt in that terminal, then
++    // closed it - simulated here by flipping what the CLI's config reports
++    // and firing the close event, with no real scheduler tick in between.
++    trustedCwds = 'all';
++    fireTerminalClose(vscodeFake.terminals[0]!);
++    await flush();
++
++    assert.ok(
++      !/not trusted/i.test(tooltip()),
++      `the marker must clear on close, before the next tick: ${tooltip()}`,
++    );
++  } finally {
++    trustedCwds = 'all';
++    teardown(ctx);
++  }
++});
++
++test('closing an unrelated terminal does not re-read trust', async () => {
++  resetVscodeFake();
++  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
++  trustedCwds = new Set(); // nothing trusted yet
++  const ctx = contextOver(new Map());
++  start(ctx);
++  try {
++    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000));
++    await flush();
++    const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
++    assert.match(tooltip(), /not trusted/i, 'setup: must warn while untrusted');
++
++    trustedCwds = 'all';
++    // A terminal this extension never opened via openClaudeToTrust - the
++    // close hook must ignore it, not treat every closing terminal as a cue
++    // to re-check trust.
++    fireTerminalClose({ options: {}, shown: 0, processId: Promise.resolve(undefined), show() {}, dispose() {} });
++    await flush();
++
++    assert.match(
++      tooltip(),
++      /not trusted/i,
++      `an unrelated terminal closing must not re-check trust: ${tooltip()}`,
++    );
++  } finally {
++    trustedCwds = 'all';
++    teardown(ctx);
++  }
++});
++
+ test('resumeMode headless actually launches headless', async () => {
+   // The setting has been declared since 0.1.0 while extension.ts logged
+   // "not yet implemented" and resumed interactively anyway. A setting that
+   // quietly does something other than what it says is worse than one that
+   // does not exist.
+   resetVscodeFake();
+   vscodeFake.config = {
+     claudeCommand: LAUNCHER,
+     resumeMode: 'headless',
+     headlessPermissionMode: 'acceptEdits',
+diff --git a/test/helpers/vscode.ts b/test/helpers/vscode.ts
+index c9f2415..27110f1 100644
+--- a/test/helpers/vscode.ts
++++ b/test/helpers/vscode.ts
+@@ -27,20 +27,37 @@ export class FakeEventEmitter<T> {
+ 
+ export interface FakeTerminal {
+   options: unknown;
+   shown: number;
+   /** VS Code resolves the shell's pid asynchronously; so does this. */
+   processId: Promise<number | undefined>;
+   show(): void;
+   dispose(): void;
+ }
+ 
++/**
++ * A single, module-level emitter for `vscode.window.onDidCloseTerminal`.
++ *
++ * Unlike FakeWatcher's emitters (recreated per activate() call, since a real
++ * TranscriptWatcher is per-window), `window.onDidCloseTerminal` is part of
++ * the shared fake `vscode` API surface itself - one global, exactly like real
++ * VS Code. A test's `finally { teardown(ctx) }` disposes the extension's own
++ * subscription (removing its listener), so this can be reused across tests
++ * without a reset.
++ */
++const closeTerminalEmitter = new FakeEventEmitter<FakeTerminal>();
++
++/** Fire a terminal-closed event, as if the user closed `terminal`'s tab. */
++export function fireTerminalClose(terminal: FakeTerminal): void {
++  closeTerminalEmitter.fire(terminal);
++}
++
+ /**
+  * One recorded information message. `answer` settles the promise the extension
+  * is awaiting, so a test can leave an offer open - firing other events while it
+  * hangs - and accept it later, which is the only way to reproduce a second
+  * session coming ready before the first notification is clicked.
+  */
+ export interface FakeInfoMessage {
+   message: string;
+   items: string[];
+   answer(item?: string): void;
+@@ -202,20 +219,21 @@ const fakeVscode = {
+           this.visible = true;
+         },
+         hide() {
+           this.visible = false;
+         },
+         dispose() {},
+       };
+       vscodeFake.statusBarItems.push(item);
+       return item;
+     },
++    onDidCloseTerminal: closeTerminalEmitter.event,
+     createTerminal: (options: unknown): FakeTerminal => {
+       const terminal: FakeTerminal = {
+         options,
+         shown: 0,
+         processId: Promise.resolve(vscodeFake.terminalPid),
+         show() {
+           this.shown += 1;
+         },
+         dispose() {},
+       };
+diff --git a/test/resumer.test.ts b/test/resumer.test.ts
+index b452d38..a44df1e 100644
+--- a/test/resumer.test.ts
++++ b/test/resumer.test.ts
+@@ -1,18 +1,20 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import {
+   buildResumeArgs,
+   buildHeadlessArgs,
+   buildTerminalOptions,
++  buildTrustTerminalOptions,
+   resolveClaudeLauncher,
+   cwdExists,
++  PARENT_SESSION_VARIABLES,
+ } from '../src/resumer';
+ import type { ResolvedSession } from '../src/sessionResolver';
+ 
+ const ID = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
+ const session: ResolvedSession = {
+   sessionId: ID,
+   transcript: `/h/.claude/projects/p/${ID}.jsonl`,
+   cwd: '/projects/example',
+   bytes: 1000,
+ };
+@@ -54,20 +56,48 @@ test('headless mode omits the flag when no mode is configured', () => {
+ 
+ test('terminal options launch claude directly, with no shell', () => {
+   const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
+   assert.equal(opts.shellPath, '/usr/bin/claude');
+   assert.deepEqual(opts.shellArgs, ['--resume', ID, 'go']);
+   assert.equal(opts.cwd, '/projects/example');
+   assert.match(opts.name, /Limit Buster/);
+   assert.ok(opts.name.includes(ID.slice(0, 8)));
+ });
+ 
++test('the trust terminal runs plain claude: no --resume, no prompt argument', () => {
++  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
++  assert.equal(opts.shellPath, '/usr/bin/claude');
++  assert.deepEqual(opts.shellArgs, [], 'no resume args and no prompt - just plain claude');
++  assert.equal(opts.cwd, '/projects/example');
++});
++
++test('the trust terminal name uses the existing "Limit Buster: " prefix', () => {
++  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
++  assert.match(opts.name, /^Limit Buster: /);
++});
++
++test('the trust terminal strips every parent-session variable, same as a resume terminal', () => {
++  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
++  for (const name of PARENT_SESSION_VARIABLES) {
++    assert.equal(opts.env[name], null, `${name} must be nulled out`);
++  }
++  assert.equal(Object.keys(opts.env).length, PARENT_SESSION_VARIABLES.length, 'no extra env entries');
++});
++
++test('a node-shim launcher is still prefixed in the trust terminal', () => {
++  const opts = buildTrustTerminalOptions('/projects/example', {
++    file: 'C:\\Program Files\\nodejs\\node.exe',
++    args: ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'],
++  });
++  assert.deepEqual(opts.shellArgs, ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js']);
++});
++
+ test('a node-shim launcher prepends its own args before the resume args', () => {
+   const opts = buildTerminalOptions(session, 'go', {
+     file: 'C:\\Program Files\\nodejs\\node.exe',
+     args: ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'],
+   });
+   assert.deepEqual(opts.shellArgs, [
+     'C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js',
+     '--resume',
+     ID,
+     'go',
