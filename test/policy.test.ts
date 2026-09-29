@@ -103,3 +103,24 @@ test('a reset time already in the past still schedules rather than being ignored
   if (p.kind !== 'schedule') return;
   assert.equal(p.job.resumeAtMs, past.getTime() + 600_000);
 });
+
+test('an overload job carries the detection entry timestamp it was planned from (final review I3)', () => {
+  const p = planResume(
+    { detection: { text: 'API Error: 529 Overloaded' }, cwd: '/projects/example', file: FILE, entryTimestampMs: 1_234_567 },
+    'overload',
+    settings(),
+    small,
+    NOW,
+    noJitter,
+  );
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.entryTimestampMs, 1_234_567);
+});
+
+test('a hit with no entry timestamp plans a job without one', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.entryTimestampMs, undefined);
+});

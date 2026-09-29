@@ -61,27 +61,38 @@ export function claimsDir(): string {
  * stable no matter how differently each window's jitter rolled.
  *
  * An overload job has no stated reset time at all - "the jitter *is* the
- * backoff" (policy.ts) - so `baseResumeAtMs` is not a deadline here the way
- * it is for a limit job; it is simply the instant planResume read `now` at
- * DETECTION time, before that job's own random backoff was added. That
- * instant is near-identical across every window watching the same account
- * (millisecond-scale apart, per the 2026-09-24 field incident), so it is
- * floored to a 10-minute bucket and used as the key.
+ * backoff" (policy.ts) - so its key is the identity of the transcript entry
+ * that reported it: `entryTimestampMs`, the entry's own `timestamp`
+ * (final review, Important 3). Every window reads the same line, so every
+ * window gets the same value, and two separate overloads are two separate
+ * entries with two separate timestamps.
  *
- * Fix round 1: this used to floor `resumeAtMs` - the padded fire time -
- * instead. `resumeAtMs` includes each window's OWN independently-rolled
- * jitter (`randomDelayMinMinutes`..`randomDelayMaxMinutes`, often 5-30
- * minutes apart), so two windows that detected the identical overload landed
- * in different 10-minute buckets far more often than not, and both fired.
- * Keying on `baseResumeAtMs` instead is what makes them actually collide.
+ * That replaced a 10-minute bucket of the detection instant
+ * (`baseResumeAtMs`, the moment planResume read `now`). The bucket collided
+ * across windows as intended, but also with THIS window's own earlier claim:
+ * a successful automatic resume leaves its claim fresh for an hour
+ * (STALE_MS), so a genuine second overload in the same bucket found the key
+ * 'taken' by itself and was dropped. The bucket survives only as the
+ * fallback for a job with no entry timestamp (an entry that carried none, or
+ * a job persisted by an older build).
+ *
+ * Fix round 1 history, still true of that fallback: bucketing `resumeAtMs`
+ * - the padded fire time, with each window's own independently-rolled
+ * jitter in it - put two windows' copies of the same overload in different
+ * buckets far more often than not; `baseResumeAtMs` does not have that
+ * problem.
  */
 export function claimKeyFor(job: {
   sessionId: string;
   baseResumeAtMs: number;
   resumeAtMs: number;
   reason: 'limit' | 'overload';
+  entryTimestampMs?: number;
 }): string {
   if (job.reason === 'overload') {
+    if (job.entryTimestampMs !== undefined && Number.isFinite(job.entryTimestampMs)) {
+      return `${job.sessionId}-overload-${job.entryTimestampMs}`;
+    }
     return `${job.sessionId}-overload-${Math.floor(job.baseResumeAtMs / 600_000)}`;
   }
   return `${job.sessionId}-${job.baseResumeAtMs}`;
@@ -103,7 +114,14 @@ function claimPath(dir: string, key: string): string {
  *   (Goal 2 - never block a resume nobody is coming back to answer for),
  *   logged so the failure is not silent. 'claimed'.
  */
-function attempt(file: string, key: string, nowMs: number, fs: ClaimFs, log: Logger): ClaimResult | 'retry' {
+function attempt(
+  file: string,
+  key: string,
+  nowMs: number,
+  fs: ClaimFs,
+  log: Logger,
+  owner: string | undefined,
+): ClaimResult | 'retry' {
   let fd: number;
   try {
     fd = fs.openSync(file, 'wx');
@@ -131,7 +149,11 @@ function attempt(file: string, key: string, nowMs: number, fs: ClaimFs, log: Log
     return 'retry';
   }
   try {
-    fs.writeSync(fd, `${process.pid} ${nowMs}`);
+    // "<pid> <ms> <window>": the window identity (vscode.env.sessionId) is
+    // what lets claimOwner tell this window's own earlier claim apart from
+    // another window's (final review, Important 3). Last, so an older
+    // build's two-field file simply reads as having no owner.
+    fs.writeSync(fd, owner ? `${process.pid} ${nowMs} ${owner}` : `${process.pid} ${nowMs}`);
   } finally {
     fs.closeSync(fd);
   }
@@ -152,15 +174,45 @@ function attempt(file: string, key: string, nowMs: number, fs: ClaimFs, log: Log
  * the second open - vanishingly unlikely, but not impossible), this fails
  * open rather than looping.
  */
-export function claimResume(dir: string, key: string, nowMs: number, fs: ClaimFs, log: Logger = noopLog): ClaimResult {
+export function claimResume(
+  dir: string,
+  key: string,
+  nowMs: number,
+  fs: ClaimFs,
+  log: Logger = noopLog,
+  owner?: string,
+): ClaimResult {
   fs.mkdirSync(dir, { recursive: true });
   const file = claimPath(dir, key);
-  const first = attempt(file, key, nowMs, fs, log);
+  const first = attempt(file, key, nowMs, fs, log, owner);
   if (first !== 'retry') {
     return first;
   }
-  const second = attempt(file, key, nowMs, fs, log);
+  const second = attempt(file, key, nowMs, fs, log, owner);
   return second === 'retry' ? 'claimed' : second;
+}
+
+/**
+ * The window identity recorded in `key`'s claim file by claimResume's
+ * `owner`, or undefined when there is no such file, it cannot be read, or it
+ * was written without one (an older build). Only ever used to word a log
+ * line - "already claimed by this window" rather than "by another window"
+ * (final review, Important 3) - never to decide anything: a claim is a claim,
+ * whoever holds it.
+ */
+export function claimOwner(
+  dir: string,
+  key: string,
+  fs: { readFileSync(p: string, encoding: 'utf8'): string },
+): string | undefined {
+  let body: string;
+  try {
+    body = fs.readFileSync(claimPath(dir, key), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const owner = body.trim().split(' ').slice(2).join(' ');
+  return owner || undefined;
 }
 
 /**

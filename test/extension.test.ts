@@ -50,6 +50,20 @@ class FakeWatcher {
     FakeWatcher.latest = this;
   }
 
+  /**
+   * Pretend an overload was detected for `sessionId` from a transcript entry
+   * stamped `entryTimestampMs` - the entry identity the overload claim keys
+   * on (final review I3). Runs through the real policy and scheduler.
+   */
+  overloadFor(sessionId: string, entryTimestampMs: number | undefined, cwd: string = REAL_CWD): void {
+    this.overloadEmitter.fire({
+      detection: { rule: 'api-error-status', status: 529, text: 'API Error: 529 Overloaded' },
+      cwd,
+      file: `/h/.claude/projects/p/${sessionId}.jsonl`,
+      entryTimestampMs,
+    });
+  }
+
   /** Pretend a Claude turn just ended in `cwd`. */
   endTurnIn(cwd: string | undefined): void {
     this.inputEmitter.fire({ cwd, file: `/h/p/${SESSION}.jsonl` });
@@ -238,17 +252,17 @@ stubModule('./trust', {
 const realClaims = require('../src/claims') as typeof import('../src/claims');
 let fakeClaimResult: 'claimed' | 'taken' | 'real' = 'claimed';
 let realClaimsDir = '';
-const claimCalls: { dir: string; key: string }[] = [];
+const claimCalls: { dir: string; key: string; owner?: string }[] = [];
 const releasedKeys: string[] = [];
 const claimResultQueue: ('claimed' | 'taken')[] = [];
 
 stubModule('./claims', {
   ...(realClaims as unknown as Record<string, unknown>),
   claimsDir: () => (fakeClaimResult === 'real' ? realClaimsDir : realClaims.claimsDir()),
-  claimResume: (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown) => {
-    claimCalls.push({ dir, key });
+  claimResume: (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
+    claimCalls.push({ dir, key, owner });
     if (fakeClaimResult === 'real') {
-      return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never);
+      return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never, owner);
     }
     if (claimResultQueue.length > 0) {
       return claimResultQueue.shift()!;
@@ -2866,6 +2880,107 @@ test('scheduler.onFire on an overload job collides across two windows sharing on
     // Fix round 2: this test's own claims dir, unlike every other test here,
     // is a REAL directory (fakeClaimResult = 'real') that real claim files
     // were actually written into - it must not be left behind.
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Final review, Important 3: overload claims keyed on the entry ----------
+
+/** autoResume on, no jitter, real claims in a throwaway directory; returns that directory. */
+const realClaimsSetup = (): string => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-i3-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  claimCalls.length = 0;
+  releasedKeys.length = 0;
+  return dir;
+};
+
+test('two distinct overload events in the same 10 minutes are both claimed and both resumed (final review I3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = realClaimsSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    const first = Date.now() - 120_000;
+    watcher.overloadFor(SESSION, first);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the first overload must have resumed');
+    // A second, separate failure two minutes later - the same 10-minute
+    // bucket, and this window's own claim for the first is still fresh.
+    watcher.overloadFor(SESSION, first + 120_000);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 2, 'a genuine second overload must not collide with this window\'s own earlier claim');
+    assert.ok(
+      !vscodeFake.outputLines.some((l) => /claimed by/.test(l)),
+      `neither fire may have been dropped as claimed; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every claim this window writes records its window identity (final review I3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.envSessionId = 'window-A';
+  const dir = realClaimsSetup();
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', { ...pastJob(), reason: 'overload' as const, entryTimestampMs: 777 }]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: the fire must have resumed');
+    assert.equal(realClaims.claimOwner(dir, `${SESSION}-overload-777`, fs), 'window-A');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fire whose claim this same window already holds is logged as such, not as another window (final review I3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = realClaimsSetup();
+  const job = { ...pastJob(), reason: 'overload' as const, entryTimestampMs: 888 };
+  assert.equal(realClaims.claimResume(dir, realClaims.claimKeyFor(job), Date.now(), fs, undefined, 'fake-window-session'), 'claimed');
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a held claim still drops the fire');
+    assert.ok(
+      vscodeFake.outputLines.some((l) => /already claimed by this window/.test(l)),
+      `a self-collision must say so; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+    assert.ok(!vscodeFake.outputLines.some((l) => /another window/.test(l)), 'and must not blame another window');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fire whose claim a different window holds is still logged as another window (final review I3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = realClaimsSetup();
+  const job = { ...pastJob(), reason: 'overload' as const, entryTimestampMs: 999 };
+  assert.equal(realClaims.claimResume(dir, realClaims.claimKeyFor(job), Date.now(), fs, undefined, 'window-B'), 'claimed');
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => /claimed by another window/.test(l)));
+    assert.ok(!vscodeFake.outputLines.some((l) => /this window/.test(l)));
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -823,3 +823,16 @@ test('a flagged entry keeps full recall, with no API Error head needed (final re
   const line = entry({ type: 'assistant', isApiErrorMessage: true, message: { content: 'Request timed out.' } });
   assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
 });
+
+test('an overload hit carries its entry timestamp, the identity every window shares (final review I3)', () => {
+  const ts = new Date(Date.now() - 60_000).toISOString();
+  const line = entry({ type: 'assistant', isApiErrorMessage: true, timestamp: ts, message: { content: 'API Error: 529 Overloaded' } });
+  assert.equal(make().inspectLine(line, FILE).overload?.entryTimestampMs, new Date(ts).getTime());
+});
+
+test('an overload hit from an entry with no timestamp carries none', () => {
+  const line = entry({ type: 'assistant', isApiErrorMessage: true, message: { content: 'API Error: 529 Overloaded' } });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.overload);
+  assert.equal(out.overload.entryTimestampMs, undefined);
+});

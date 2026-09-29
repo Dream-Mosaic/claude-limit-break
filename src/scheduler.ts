@@ -27,6 +27,14 @@ export interface PendingJob {
    * one persisted by a version that predates this field.
    */
   folderTrusted?: boolean;
+  /**
+   * The `timestamp` of the transcript entry this job was detected from, in
+   * ms, when it had one (overload hits only, today). Identifies an overload
+   * event across windows for the cross-window claim (claims.ts claimKeyFor;
+   * final review, Important 3). Absent on a job persisted by an older build,
+   * which falls back to the old 10-minute bucket.
+   */
+  entryTimestampMs?: number;
 }
 
 export interface MementoLike {

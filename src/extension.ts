@@ -47,7 +47,7 @@ import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
-import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
+import { claimsDir, claimKeyFor, claimResume, claimOwner, releaseClaim, cleanupStaleClaims } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
 const NS = 'claudeLimitBreak';
@@ -104,6 +104,15 @@ export function activate(context: vscode.ExtensionContext): void {
   // staleness check is what keeps a claim from blocking anything for long;
   // this just keeps the machine-wide directory from growing forever.
   cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
+
+  /**
+   * Take (or, on a manual path, refresh) the cross-window claim for `key`
+   * (Task 10), recording this window's identity in it so a later collision
+   * can be told apart from another window's (final review, Important 3).
+   * `vscode.env.sessionId` is per window and per run - exactly the scope of
+   * "this window" here.
+   */
+  const claim = (key: string) => claimResume(claimsDir(), key, Date.now(), fs, log, vscode.env.sessionId);
 
   const scheduler = new ResumeScheduler(context.globalState, log);
   const status = new CountdownStatusBar();
@@ -947,8 +956,17 @@ export function activate(context: vscode.ExtensionContext): void {
       // autoResume split below, so the off-autoResume path cannot become a
       // backdoor around a lost claim either.
       const claimKey = claimKeyFor(job);
-      if (claimResume(claimsDir(), claimKey, Date.now(), fs, log) === 'taken') {
-        log.info(`Resume for ${job.sessionId.slice(0, 8)} claimed by another window; dropping.`);
+      if (claim(claimKey) === 'taken') {
+        // Worded by who holds it, for the log only - either way the fire is
+        // dropped. A claim this window wrote itself (an earlier resume of the
+        // same event) used to be reported as "another window", which sent
+        // the reader looking for a window that did not exist (final review,
+        // Important 3).
+        const holder =
+          claimOwner(claimsDir(), claimKey, fs) === vscode.env.sessionId
+            ? 'already claimed by this window'
+            : 'claimed by another window';
+        log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
         return;
       }
       const s = settings();
@@ -1000,7 +1018,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // user's explicit intent), but only release if this call actually
           // won the claim itself ('claimed', including a stale takeover it
           // just performed) - never a claim 'taken' by someone else.
-          const notifyClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
+          const notifyClaim = claim(claimKey);
           if (!resume(job, true)) {
             rememberReady(job);
             if (notifyClaim === 'claimed') {
@@ -1064,7 +1082,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // claim out from under it. Only release when this call actually
           // won the claim itself ('claimed', which includes a stale
           // takeover it just performed).
-          const buttonClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
+          const buttonClaim = claim(claimKey);
           if (!resume(job, true)) {
             rememberReady(job);
             if (buttonClaim === 'claimed') {
@@ -1161,7 +1179,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // "Resume Now" moves exactly one.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          const countingClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
+          const countingClaim = claim(key);
           if (resume(counting, true)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {
@@ -1180,7 +1198,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
-        const readyClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
+        const readyClaim = claim(key);
         if (resume(ready, true)) {
           forgetReady(ready.sessionId);
         } else if (readyClaim === 'claimed') {

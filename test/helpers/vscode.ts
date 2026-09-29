@@ -151,6 +151,8 @@ export const vscodeFake = {
   shownChannels: 0,
   /** Tabs `tabGroups.close` has removed, in call order, for assertions. */
   closedTabs: [] as FakeTab[],
+  /** What `vscode.env.sessionId` reports: this fake window's identity. */
+  envSessionId: 'fake-window-session',
 };
 
 export function resetVscodeFake(): void {
@@ -172,6 +174,7 @@ export function resetVscodeFake(): void {
   vscodeFake.shownChannels = 0;
   vscodeFake.tabs = [];
   vscodeFake.closedTabs = [];
+  vscodeFake.envSessionId = 'fake-window-session';
 }
 
 const fakeVscode = {
@@ -182,6 +185,10 @@ const fakeVscode = {
   MarkdownString: FakeMarkdownString,
   TabInputWebview: FakeTabInputWebview,
   env: {
+    /** One fixed identity per fake "window"; claims.ts records it (final review I3). */
+    get sessionId() {
+      return vscodeFake.envSessionId;
+    },
     openExternal: (uri: unknown) => {
       vscodeFake.openedExternal.push(String((uri as { value?: string }).value ?? uri));
       return Promise.resolve(true);
