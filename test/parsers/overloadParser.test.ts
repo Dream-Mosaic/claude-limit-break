@@ -217,3 +217,60 @@ test('the message glyph Claude Code prefixes a banner line with is still accepte
     'stream-interrupted',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Final review, Important 4: on the UNFLAGGED path (`anchored: true`) every
+// overload rule - not just transient-429 and stream-interrupted - requires a
+// physical line that starts with "API Error". Each of these short assistant
+// prose blocks armed an overload retry before, and a resume 5-30 minutes
+// later then fired with the "I hit my usage limit" prompt.
+// ---------------------------------------------------------------------------
+
+const UNFLAGGED_PROSE: [string, string][] = [
+  ['connection-error', 'npm install failed: fetch failed (proxy). I will retry with the registry mirror.'],
+  ['timeout', 'All the tests pass except one case where the request timed out.'],
+  ['server-error', 'The staging endpoint returned Internal server error for the upload, so I skipped it.'],
+  ['api-error-status', 'Earlier we saw API Error: 529 Overloaded, but the retry succeeded.'],
+];
+
+for (const [rule, prose] of UNFLAGGED_PROSE) {
+  test(`unflagged prose that used to fire ${rule} does not arm an overload when anchored (final review I4)`, () => {
+    assert.equal(detectOverload(prose)?.rule, rule, 'setup: the unanchored (flagged) path still recognises it');
+    assert.equal(detectOverload(prose, { anchored: true }), undefined, prose);
+  });
+}
+
+/** Each rule's real render, one per rule - the render Claude Code writes on a line of its own. */
+const REAL_RENDERS: [string, string][] = [
+  ['api-error-status', 'API Error: 529 Overloaded'],
+  ['api-error-status', 'API Error (500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}})'],
+  ['overloaded', 'API Error: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'],
+  ['server-error', 'API Error: Internal server error'],
+  ['connection-error', 'API Error: Connection error.'],
+  ['timeout', 'API Error: Request timed out.'],
+  ['transient-429', TRANSIENT_429],
+  ['stream-interrupted', 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.'],
+];
+
+for (const [rule, render] of REAL_RENDERS) {
+  test(`the real ${rule} render fires flagged, and unflagged at a line start (final review I4): ${render.slice(0, 40)}`, () => {
+    assert.equal(detectOverload(render)?.rule, rule, 'flagged (unanchored)');
+    assert.equal(detectOverload(render, { anchored: true })?.rule, rule, 'unflagged, at the start of the text');
+    assert.equal(
+      detectOverload(`Some preceding context.\n⏺ ${render}`, { anchored: true })?.rule,
+      rule,
+      'unflagged, on its own line behind the message glyph',
+    );
+  });
+}
+
+test('anchored: the status comes from the API Error line itself', () => {
+  assert.equal(detectOverload('API Error: 503 Service Unavailable', { anchored: true })?.status, 503);
+});
+
+test('anchored: the parens form still reaches the in-flight exclusion', () => {
+  assert.equal(
+    detectOverload('API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10', { anchored: true }),
+    undefined,
+  );
+});

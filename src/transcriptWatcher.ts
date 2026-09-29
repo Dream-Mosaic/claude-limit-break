@@ -536,7 +536,14 @@ export class TranscriptWatcher {
                 if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
                     continue;
                 }
-                const overload = detectOverload(candidate.text);
+                // Final review, Important 4: unflagged text is believed only on a
+                // line that starts with "API Error" - for every rule, not just the
+                // two Task 4a anchored. Short assistant prose ("npm install failed:
+                // fetch failed", "the request timed out", "Earlier we saw API
+                // Error: 529") armed a retry here, and the resume then went out
+                // with the "I hit my usage limit" prompt. Flagged entries keep
+                // full recall, same as every other veto in this module.
+                const overload = detectOverload(candidate.text, { anchored: !flagged });
                 if (overload) {
                     return { overload: { detection: overload, cwd, file } };
                 }
