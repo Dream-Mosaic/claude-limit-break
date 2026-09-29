@@ -44,7 +44,8 @@ Three consequences worth knowing:
 
 Claude Code has its own "Continue automatically at usage limit" behaviour
 (`autoContinueAtUsageLimit`), on by default for an interactive terminal
-session and absent from the VS Code panel. Left alone, that setting and this
+session and absent from the VS Code panel. It covers usage limits only — not
+a `529`, a server error or an interrupted stream. Left alone, that setting and this
 extension can both try to continue the same session — Limit Break checks who,
 if anyone, already holds a session before it launches a resume for it:
 
@@ -52,15 +53,20 @@ if anyone, already holds a session before it launches a resume for it:
 |---|---|
 | An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The existing stale-tab handling (below) runs afterwards exactly as it always does. |
 | A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
-| An **idle terminal, native auto-continue on** | Stands down. Claude Code will pick it back up by itself; a second `claude --resume` here would just fork the conversation. |
-| An **idle terminal, native auto-continue off** | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. |
+| An **idle terminal at a usage limit, native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute later it checks that the transcript has grown since the limit; if it has not (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
+| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
 
 Two VS Code windows watching the same account can still both detect an
 identical reset within milliseconds of each other, before either shows up in
 the holder check above. A machine-wide file claim (`fs.openSync(path, 'wx')`,
-first one wins, aged out automatically) makes sure only one of them actually
-launches — see `src/claims.ts`.
+first one wins, aged out automatically) makes sure only one of them acts on
+it — see `src/claims.ts`. The window that wins keeps the claim even when the
+table above says to stand down or to offer "Resume in Terminal Anyway", so
+the other windows do not each show the same offer; and "Cancel Pending
+Resume" claims every job it cancels, so the other windows drop their copies
+too. Resuming by hand (Resume Now, or any notification button) always goes
+ahead regardless of claims.
 
 ## What you will see
 
@@ -68,8 +74,9 @@ A marker in the status bar while it is watching (`$(eye)`), and while
 something is pending, one of:
 
 - `Claude resumes in 4h 12m` — one or more sessions counting down.
-- `Claude ready to resume` — the countdown elapsed but `autoResume` is off, or
-  a launch failed in a way that keeps the job retryable.
+- `Claude ready to resume` — the countdown elapsed but `autoResume` is off,
+  the session is held by an idle terminal and waits for you to say so (see the
+  table above), or a launch failed in a way that keeps the job retryable.
 - `Resume gave up` — at least one session has stalled, lost its `claude`
   executable, lost its folder, or had a budget refusal dismissed; see
   [Token budget](#token-budget). This wins over "ready" in the status-bar text
@@ -77,10 +84,12 @@ something is pending, one of:
 
 Hovering shows one line per session — short id, folder, its state (a resume
 time, "ready", or a gave-up reason), and, for a folder the Claude CLI does not
-yet trust, an "Open Claude to Trust" link. That link (also offered on the
-notification when a job is first scheduled) opens a plain `claude` terminal in
-that folder so *you* answer the CLI's own trust prompt — the extension never
-answers it and never writes to `~/.claude.json`.
+yet trust, a "Trust this folder" link. That link (the notification shown when
+a job is first scheduled offers the same thing as an "Open Claude to Trust"
+button) opens a plain `claude` terminal in that folder so *you* answer the
+CLI's own trust prompt — the extension never answers it and never writes to
+`~/.claude.json`. A gave-up line clears on its own on a new detection for that
+session, or when the session finishes a turn or is resumed.
 
 Clicking the status bar opens a menu: Resume Now, Cancel Pending Resume (also
 clears anything that gave up), Show Log, and — only shown when something has
@@ -124,7 +133,10 @@ recorded as a gave-up session (above), not retried again on its own.
 ## Install
 
 Limit Break is a new extension id. Uninstall Claude Limit Buster 0.1.x first;
-its settings do not carry over.
+its settings do not carry over. If it is still installed, Limit Break warns on
+startup — both would resume the same sessions, and the old one does not check
+whether a session is already open — with an "Uninstall Claude Limit Buster"
+button.
 
 There is no Marketplace listing and there is not intended to be one. Every
 release attaches a built `.vsix`, so the quickest route is to download one from

@@ -24,22 +24,44 @@ its settings do not carry over.
   same session. An idle Claude Code panel still resumes unattended - the main
   use case - and the existing stale-tab handling runs after it exactly as
   before. A panel or terminal that is already busy or waiting is left alone. An
-  idle terminal defers to Claude Code's own "Continue automatically at usage
-  limit" setting when it is on, and only offers "Resume in Terminal Anyway"
-  when it is off. A different session busy or waiting in the *same folder*
-  still gets resumed, with a sentence added to its opening prompt asking it to
-  message the busy session via SendMessage before editing anything, rather
-  than being blocked.
+  idle terminal at a usage limit defers to Claude Code's own "Continue
+  automatically at usage limit" setting when it is on, and offers "Resume in
+  Terminal Anyway" when it is off. An idle terminal after an overload always
+  gets that offer: Claude Code's setting covers usage limits only. A different
+  session busy or waiting in the *same folder* still gets resumed, with a
+  sentence added to its opening prompt asking it to message the busy session
+  via SendMessage before editing anything, rather than being blocked. The busy
+  session's name is quoted, kept to one line and capped at 64 characters in
+  that sentence, since it is text Limit Break does not control.
+- Checks that Claude Code's own auto-continue really did continue a session
+  it stood down for. The setting reads as on when it is absent, but it is not
+  offered to every account; if the transcript has not grown a minute after
+  the resume time, Limit Break says "Claude Code did not continue ... on its
+  own" and offers Resume Now instead of dropping the session silently.
 - A machine-wide, filesystem-based claim so that two VS Code windows watching
   the same account do not both launch a resume for the same reset - the
   scenario that motivated this release: two windows detected an identical
   limit within milliseconds of each other and each fired its own terminal.
+  The window that claims a reset keeps the claim when it stands down or
+  offers "Resume in Terminal Anyway", so other windows do not each repeat the
+  offer. An overload is claimed per failure (the transcript entry that
+  reported it), so a second overload soon after a resumed one is not mistaken
+  for the first. "Cancel Pending Resume" claims every job it cancels, so the
+  other windows drop their copies instead of firing them. Resuming by hand
+  always goes ahead regardless of claims.
+- A warning on startup when Claude Limit Buster 0.1.x is still installed:
+  both extensions would resume the same sessions, and the old one does not
+  check whether a session is already open. The warning's "Uninstall Claude
+  Limit Buster" button removes it.
 - A distinct "gave up" status for a resume this window has stopped retrying on
   its own: a launch that stalled (its transcript never grew), no `claude`
   executable found, the session's folder no longer exists, or a token-budget
   refusal that was dismissed rather than overridden. Each shows in the status
   bar with its own icon and a reason, and a "Dismiss gave-up notices" menu item
-  clears them without discarding any resume still waiting.
+  clears them without discarding any resume still waiting. A gave-up record
+  also clears on a new detection for that session, when the session finishes
+  a turn or is resumed, and with "Cancel Pending Resume"; the tooltip lists
+  all of these.
 - `claudeLimitBreak.watchScope`: watch every Claude session on the machine (the
   previous, and still default, behaviour) or only sessions inside this
   window's workspace.
@@ -59,10 +81,12 @@ its settings do not carry over.
   never writes to `~/.claude.json`.
 - The status-bar tooltip now lists every waiting, ready, and gave-up session as
   its own line, instead of describing only the soonest one.
-- Detects two more cases as an overload rather than a usage limit - a retry
-  Claude Code is already handling in-flight, and a stream interrupted because
-  the machine went to sleep - and a transient 429 that explicitly disclaims
-  being a usage limit. Reads the transcript's own `quotaLimits.resetsAt` field
+- Treats two more cases as an overload (retried after a short backoff) rather
+  than a usage limit: a stream interrupted because the machine went to sleep,
+  the connection dropped or the response stalled, and a transient 429 that
+  explicitly disclaims being a usage limit. A retry Claude Code is already
+  running itself ("Retrying in 5s · attempt 3/10") is recognised and left
+  alone, so its own backoff is not interrupted. Reads the transcript's own `quotaLimits.resetsAt` field
   ahead of parsing the banner text when a rate-limit entry carries one, which
   gets calendar dates, time zones and same-day rollovers right without
   depending on the wording of a message this extension does not control.
@@ -90,9 +114,15 @@ its settings do not carry over.
   spring-forward and fall-back daylight-saving hours to the correct side,
   instead of landing up to an hour off.
 - Untrusted transcript text (a `grep` quoting a banner, a subagent checkpoint
-  note, a percentage-usage warning) no longer arms a timer by accident;
-  subagent transcripts and quoted or tool-result text are excluded from that
-  path the same way a genuinely flagged entry is not.
+  note, a percentage-usage warning) no longer arms a timer by accident. Text
+  in a subagent's transcript, quoted text and tool output are ignored unless
+  Claude Code itself flagged the entry as an API error; a flagged entry is
+  still believed wherever its text appears.
+- The model's own prose no longer arms an overload retry. A sentence such as
+  "npm install failed: fetch failed", "one request timed out" or "earlier we
+  saw API Error: 529" used to schedule a resume that then went out with the
+  usage-limit prompt. Text Claude Code did not flag as an API error now counts
+  only on a line that starts with "API Error".
 - A single click on the status bar no longer cancels the pending resume
   outright; it opens a menu (Resume Now / Cancel Pending Resume / Show Log /
   Dismiss gave-up notices when something has given up).

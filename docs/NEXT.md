@@ -1,6 +1,7 @@
 # Next steps
 
-State as of 2026-09-25, after the Limit Break 1.0 plan (both lanes) landed on
+State as of 2026-09-25, after the Limit Break 1.0 plan (both lanes) and its
+final review fix wave landed on
 `claude/limit-break-1.0-cloud`. Read
 [design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first;
 both predate the rename and still say "Claude Limit Buster" — that is a
@@ -37,6 +38,21 @@ re-review 3). The slower case Task 2's holder check already covered
 is unaffected by any of this and still works as before.
 
 What is not covered:
+- **The job lists themselves are shared across windows.** `globalState` is
+  per profile, not per window, so every window reads and writes the same
+  `claudeLimitBreak.pending` and `claudeLimitBreak.ready` keys: one window's
+  persist can overwrite another's list, and a reload restores whatever the
+  last writer left. The claims make sure only one window ACTS on a job
+  (including a cancelled one, since the final review wave), but the lists
+  are not merged. Pre-existing; a per-window key or a merge-on-write would
+  fix it.
+- A claim is kept whenever the holder decision stands down or offers
+  "Resume in Terminal Anyway" (final review, Important 2), and Cancel holds
+  one until each cancelled job's own fire time (Important 7). The ruled cost:
+  the same reset re-detected in the same window within that time is dropped
+  as "already claimed by this window", and a failed launch from the "Resume
+  in Terminal Anyway" button leaves the fire's own claim in place (it only
+  releases a claim it took itself). Manual resumes bypass claims either way.
 - The claim's atomicity guarantee is `O_EXCL`, which is real, but Task 10's
   own two-claimer test only exercises it sequentially in one process, not
   with two real concurrent processes racing the syscall (Task 10 review 1
@@ -70,11 +86,10 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
 - The in-flight-retry regex's narrowness is unpinned — no test asserts a
   terminal case containing the literal word "attempt" that should NOT match
   (`src/parsers/overloadParser.ts`).
-- Pre-existing: the old api-error-status overload rule fires on mid-sentence
-  prose containing e.g. "API Error: 529", not just a line-start render
-  (`src/parsers/overloadParser.ts`; the newer transient-429/sleep-interrupt
-  rules were anchored to line-start in the 4a fix, this older one was not, to
-  keep the fix scoped).
+- The default `resumePrompt` says "I hit my usage limit" even when the job
+  is an overload retry (`src/config.ts`, `src/policy.ts` - the job carries
+  `reason`, the prompt ignores it). A reason-specific default would read
+  better; harmless as it stands, since the resumed model just continues.
 
 **Trust hotlink** (Task 5a review)
 - `claudeLimitBreak.openClaudeToTrust` opens a terminal with no `cwdExists`
@@ -99,7 +114,13 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
   `src/gaveUp.ts` / `src/extension.ts`).
 - A stall check armed just before "Cancel Pending Resume" can still
   record/notify a gave-up state right after Cancel runs (a narrow timing
-  window, not reproduced).
+  window, not reproduced). The native auto-continue check added in the final
+  review wave is cancelled by Cancel; the stall check is not.
+- A dismissed budget refusal records the session as given up even while a
+  job for the same session is still counting down (final review minor).
+- "Resume Now" says "nothing pending" while the status bar shows a gave-up
+  session: gave-up records are not jobs, so there is nothing to resume, but
+  the two messages read as contradicting each other (final review minor).
 
 **Tooltip / status bar** (Task 5b review)
 - A newline embedded in a folder name breaks the tooltip's one-line-per-
@@ -120,7 +141,36 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
   (`src/holderPolicy.ts` / `src/extension.ts`). Cost if wrong: a stale
   coordination sentence shown on a manual retry.
 
+**Final review minors** (ruled OK to ship)
+- `claude agents --json` runs through `execFileSync` with a 10s timeout, on
+  the extension host thread (`src/extension.ts` `runAgentsListing`): a hung
+  CLI blocks the host for up to 10s per fire or manual resume.
+- `which`/`readShim` are defined twice in `src/extension.ts` (once at
+  activation for `findLauncher`, again inside `resume()`).
+- The unit suite's extension tests run on real timers (the scheduler's 1s
+  tick, a shortened stall grace): the suite takes about two minutes, and
+  timing-sensitive tests poll for a log line rather than sleeping a fixed
+  time where they can.
+- Subagent test fixtures use UUID-shaped transcript names; real subagent
+  transcripts are named differently (e.g. `agent-*.jsonl`), so the fixtures
+  exercise the resolver a little more generously than reality.
+- `test/readmeSettings.test.ts` rejects column-padded table rows with a
+  misleading "missing" message (Task 9b review).
+- The native auto-continue check's baseline is the transcript size at
+  detection. Anything written between detection and the check - including
+  you typing into the terminal during the wait - reads as "it continued",
+  and the check stays silent. That is the safe direction (the old,
+  pre-check behaviour), not a false alarm.
+
 ## Open questions
+
+- **Does a flagged in-flight retry that carries `quotaLimits` get read as a
+  usage limit?** The in-flight-retry exclusion ("Retrying in 5s · attempt
+  3/10") lives in the overload parser; the watcher's `quotaLimits.resetsAt`
+  branch runs first for a flagged entry and only skips itself for the
+  transient-429 render (`src/transcriptWatcher.ts`). If Claude Code writes
+  `quotaLimits` on an in-flight 429 entry, that entry would arm a limit timer.
+  Needs a real transcript line to settle (final review, open question).
 
 - **Does Claude Code actually write a transient-429 entry with the literal
   "API Error:" head into the JSONL, and does such an entry carry
