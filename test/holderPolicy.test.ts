@@ -150,7 +150,7 @@ test('decideOnFire remembers and offers Resume in Terminal Anyway for an OVERLOA
     /limit has reset/i,
     'an overload notice must not claim a usage limit reset',
   );
-  assert.doesNotMatch(decision.logMessage ?? '', /will pick it back up/i);
+  assert.doesNotMatch(decision.logMessage ?? '', /pick it back up/i);
 });
 
 test('decideOnFire treats an OVERLOAD in an idle terminal the same with auto-continue off', () => {
@@ -164,6 +164,16 @@ test('decideOnFire still stands down for a LIMIT in an idle terminal with auto-c
   const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'limit');
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
+});
+
+// Final review, Important 6: "auto-continue is on when the key is absent" is
+// unverified for every account, so standing down for it arms a check.
+test('decideOnFire asks for a native-continue check exactly when it stands down for auto-continue (final review I6)', () => {
+  assert.equal(decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'limit').awaitNativeContinue, true);
+  assert.equal(decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT, 'limit').awaitNativeContinue, undefined);
+  assert.equal(decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'overload').awaitNativeContinue, undefined);
+  assert.equal(decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT, 'limit').awaitNativeContinue, undefined);
+  assert.equal(decideOnFire({ kind: 'none' }, true, SHORT, 'limit').awaitNativeContinue, undefined);
 });
 
 test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {

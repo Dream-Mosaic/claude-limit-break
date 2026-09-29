@@ -61,6 +61,10 @@ export function planResume(
       // keeps the persisted job (globalState) exactly as it was for a hit
       // without it.
       ...(hit.entryTimestampMs !== undefined ? { entryTimestampMs: hit.entryTimestampMs } : {}),
+      // The native auto-continue check's baseline (final review, Important
+      // 6). resolveSession reports 0 for a size it could not read; that is
+      // "unknown", not a baseline every transcript has grown past.
+      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
     },
   };
 }

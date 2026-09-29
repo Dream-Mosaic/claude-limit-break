@@ -2376,7 +2376,7 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVE
     const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
     assert.ok(offer, `an overload is not covered by native auto-continue, so it must be offered; saw ${JSON.stringify(vscodeFake.info)}`);
     assert.ok(
-      !vscodeFake.outputLines.some((l) => /will pick it back up/.test(l)),
+      !vscodeFake.outputLines.some((l) => /pick it back up/.test(l)),
       'must not claim native auto-continue will handle an overload',
     );
     // Remembered: the palette's Resume Now finds it (after the modal, since
@@ -2394,6 +2394,212 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVE
     autoContinueOn = true;
     clearHolders();
     teardown(ctx);
+  }
+});
+
+// Final review, Important 6: whether Claude Code's own auto-continue is
+// really on for this account is unverified (the key's absence reads as on,
+// but the feature is not offered to every account). Standing down for it
+// now arms a check after the stall-watch grace: no transcript growth since
+// detection means nothing continued it, and the job is offered back.
+
+/** A real transcript this test controls, `bytes` long. */
+const transcriptOf = (bytes: number): { dir: string; file: string } => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-'));
+  const file = path.join(dir, `${SESSION}.jsonl`);
+  fs.writeFileSync(file, 'x'.repeat(bytes));
+  return { dir, file };
+};
+
+const nativeContinueJob = (file: string, transcriptBytesAtDetection?: number) => ({
+  ...pastJob(),
+  transcript: file,
+  ...(transcriptBytesAtDetection !== undefined ? { transcriptBytesAtDetection } : {}),
+});
+
+/** Long enough for the scheduler tick plus the (stubbed, 300ms) stall-watch grace. */
+const tickAndGrace = () => new Promise((r) => setTimeout(r, 1900));
+
+const nativeNotice = () => vscodeFake.info.find((m) => /did not continue/.test(m.message));
+
+/**
+ * Resolve as soon as onFire has stood down for native auto-continue - the
+ * start of the check's (stubbed, 300ms) grace - so a test can act inside
+ * that window without racing the scheduler's one-second tick.
+ */
+const untilStoodDown = async (): Promise<void> => {
+  for (let i = 0; i < 300; i += 1) {
+    if (vscodeFake.outputLines.some((l) => /Checking that it did/.test(l))) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`onFire never stood down for native auto-continue; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+};
+
+test('standing down for native auto-continue, then no transcript growth since detection: remembered and offered (final review I6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    assert.equal(nativeNotice(), undefined, 'nothing yet - the grace period has not run');
+    await tickAndGrace();
+    const notice = nativeNotice();
+    assert.ok(notice, `a silent native failure must be offered back; saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.match(notice.message, new RegExp(`^Limit Break: Claude Code did not continue ${SESSION.slice(0, 8)} on its own\\. Resume it here\\?$`));
+    assert.deepEqual(notice.items, ['Resume Now']);
+    assert.equal(vscodeFake.terminals.length, 0, 'offered, never launched on its own');
+    // Clicking it is a manual resume into a terminal-held session: the
+    // ordinary fork warning comes first, then the launch.
+    notice.answer('Resume Now');
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal, 'the fork warning must be shown for the terminal holder');
+    modal.answer('Resume Anyway');
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Now then resumes it');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the native-continue check leaves the job remembered for the palette Resume Now too (final review I6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await untilStoodDown();
+    assert.equal(store.get(READY_KEY), undefined, 'not remembered while the check is still pending');
+    await tickAndGrace();
+    assert.equal((store.get(READY_KEY) as { sessionId: string }[] | undefined)?.[0]?.sessionId, SESSION);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('growth since detection - native auto-continue already ran before this window fired - means nothing is offered (final review I6)', async () => {
+  // The common case: randomDelay pads the fire 5-30 minutes past the reset,
+  // so Claude Code has usually continued (and may have finished) by then.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(900);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined, 'it grew: native auto-continue did its job');
+    assert.equal(store.get(READY_KEY), undefined, 'and nothing is remembered');
+    assert.ok(vscodeFake.outputLines.some((l) => /continued .* on its own/.test(l)), 'but the log says so');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no detection baseline (an older job), growth during the grace counts (final review I6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    fs.appendFileSync(file, 'more');
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined, 'it grew after the fire');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no detection baseline and no growth, the job is offered back (final review I6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    await tickAndGrace();
+    assert.ok(nativeNotice());
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cancel during the grace drops the native-continue check, so a discarded job is not offered back (final review I6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the native-continue check keeps the claim throughout (final review I6, consistent with I2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    await tickAndGrace();
+    assert.ok(nativeNotice(), 'setup: the check must have fallen through');
+    assert.deepEqual(releasedKeys, [], 'neither standing down nor offering it back releases the claim');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

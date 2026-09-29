@@ -124,3 +124,19 @@ test('a hit with no entry timestamp plans a job without one', () => {
   if (p.kind !== 'schedule') return;
   assert.equal(p.job.entryTimestampMs, undefined);
 });
+
+test('a planned job records the transcript size at detection, the baseline for the native-continue check (final review I6)', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 123_456, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.transcriptBytesAtDetection, 123_456);
+});
+
+test('an unreadable transcript size is left off the job rather than recorded as zero', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => {
+    throw new Error('ENOENT');
+  }, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.transcriptBytesAtDetection, undefined);
+});

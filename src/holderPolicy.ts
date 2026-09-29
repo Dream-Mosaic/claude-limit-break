@@ -11,6 +11,15 @@ export interface OnFireDecision {
   logLevel?: 'info' | 'warn';
   /** Present only when the user should be told, with exactly one button. */
   notice?: { message: string; button: string };
+  /**
+   * True only when this stood down for Claude Code's own auto-continue (an
+   * idle terminal at a usage LIMIT, the setting reading as on). Whether that
+   * feature really exists for this account is unverified - the key's absence
+   * reads as on, but the research found the toggle offered to some accounts
+   * only - so the caller checks back after the stall-watch grace and offers
+   * the job if the transcript never grew (final review, Important 6).
+   */
+  awaitNativeContinue?: true;
 }
 
 const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
@@ -155,7 +164,9 @@ export function decideOnFire(
       remember: false,
       logMessage:
         `Session ${shortId} is open in a terminal (pid ${holder.pid}); ` +
-        `Claude Code's own auto-continue will pick it back up, so nothing was started here.`,
+        `Claude Code's own auto-continue should pick it back up, so nothing was started here. ` +
+        `Checking that it did.`,
+      awaitNativeContinue: true,
     };
   }
   return {
