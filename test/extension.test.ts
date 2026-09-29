@@ -2645,8 +2645,8 @@ test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFF
     assert.match(prompt ?? '', /SendMessage/, 'the resumed model must be told how to coordinate');
     assert.ok(prompt?.startsWith(PROMPT), `the user's own prompt must still lead: ${prompt}`);
     assert.ok(
-      vscodeFake.info.some((m) => m.message.includes('other-session')),
-      'the person is told too, non-blockingly',
+      vscodeFake.info.some((m) => m.message.includes('"other-session"')),
+      'the person is told too, non-blockingly, with the name quoted as in the prompt',
     );
   } finally {
     clearHolders();
@@ -2693,8 +2693,8 @@ test('scheduler.onFire also adds the coordination sentence when resuming an IDLE
     assert.match(prompt ?? '', /other-session/, 'the busy peer must be named even though the holder was an idle panel');
     assert.match(prompt ?? '', /SendMessage/);
     assert.ok(
-      vscodeFake.info.some((m) => m.message.includes('other-session')),
-      'the person is told too, non-blockingly',
+      vscodeFake.info.some((m) => m.message.includes('"other-session"')),
+      'the person is told too, non-blockingly, with the name quoted as in the prompt',
     );
   } finally {
     clearHolders();

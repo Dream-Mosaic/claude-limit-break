@@ -223,6 +223,28 @@ export function manualResumeWarning(
 /** The one field {@link buildResumePrompt} needs from a busy peer's `claude agents --json` row. */
 export type BusyPeer = Pick<AgentRow, 'pid' | 'name'>;
 
+/** Longest a peer name may run in a prompt or notice; `claude agents` names are free text. */
+const MAX_PEER_NAME = 64;
+
+/**
+ * How a busy peer is named in the resume prompt and the notice that echoes
+ * it. The name comes from `claude agents --json` - text this extension does
+ * not control, landing in the opening prompt of a session it launches - so
+ * (final review minor) it is folded onto one line (CR/LF become a space: a
+ * name must not be able to start a line of its own in the prompt), any
+ * double quote in it becomes a single one, it is capped at MAX_PEER_NAME
+ * characters, and it is quoted, so it reads as a name and not as more of
+ * the sentence. The pid fallback is this extension's own number and stays
+ * bare.
+ */
+export function peerLabel(peer: BusyPeer): string {
+  if (peer.name === undefined) {
+    return String(peer.pid);
+  }
+  const oneLine = peer.name.replace(/[\r\n]+/g, ' ').replace(/"/g, "'");
+  return `"${oneLine.slice(0, MAX_PEER_NAME)}"`;
+}
+
 /**
  * Append a coordination sentence to the user's resume prompt when one or
  * more DIFFERENT Claude sessions are busy or waiting in the same folder
@@ -236,7 +258,9 @@ export type BusyPeer = Pick<AgentRow, 'pid' | 'name'>;
  * editing anything. `resume(job)` still launches the same way either way;
  * the prompt travels as a single argv element to `claude --resume` (see
  * resumer.ts's buildResumeArgs), never shell-quoted by hand, so nothing here
- * needs to escape the names it inserts.
+ * needs to SHELL-escape the names it inserts - but they are still text this
+ * extension does not control, going into a model's prompt, so each is
+ * quoted, kept to one line and capped (see {@link peerLabel}).
  *
  * Exactly the user's own prompt, unchanged, when there are no peers - this
  * must never add stray text to the common case, which is every resume with
@@ -246,7 +270,7 @@ export function buildResumePrompt(userPrompt: string, busyPeers: readonly BusyPe
   if (busyPeers.length === 0) {
     return userPrompt;
   }
-  const names = busyPeers.map((p) => p.name ?? String(p.pid)).join(', ');
+  const names = busyPeers.map(peerLabel).join(', ');
   return (
     `${userPrompt} Another Claude session is working in this folder: ${names}. ` +
     `Before editing anything, message it with SendMessage to coordinate who does what.`

@@ -41,7 +41,7 @@ import {
   busyFolderPeers,
   type HolderRecord,
 } from './liveSessions';
-import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel } from './holderPolicy';
 import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
@@ -1227,7 +1227,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (rows !== 'unknown' && decision.resume && job.cwd) {
         const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
         if (peers.length > 0) {
-          const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
+          const names = peers.map(peerLabel).join(', ');
           log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
           void vscode.window.showInformationMessage(
             `Limit Break: another Claude session (${names}) is working in this folder. ` +
