@@ -192,3 +192,4 @@ Verdict: ready after Critical/Important fixes. Hard constraints hold across the 
 - Minors → NEXT.md (ruled OK to ship): reason-specific default prompt; flagged in-flight 429 with quotaLimits (open question); execFileSync blocking up to 10s; budget-dismiss gave-up while counting; Resume Now "nothing pending" vs gave-up; UUID-named subagent test fixtures; real-timer tests; duplicated which/readShim; plus every deferred item the triage marked OK TO SHIP.
 - Deferred triage: all OK TO SHIP except "api-error-status fires on mid-sentence prose" → covered by Important 4.
 - Final fix wave: dispatched (opus) at base 61b0103 with final-fix-brief.md (C1, I2-I7, 4 minors, docs)
+- 2026-09-29: the fix-wave implementer hit the weekly usage limit (resets Sep 29 06:00 UTC) before committing anything; tree clean at d4ef412, no report, no mutation left applied. Resumed the same implementer (its reading is intact) with the state spelled out.
