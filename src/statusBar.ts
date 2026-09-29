@@ -289,7 +289,13 @@ export class CountdownStatusBar {
       tooltip.appendMarkdown(`\n`);
     }
     if (hasGaveUp) {
-      tooltip.appendMarkdown(`A new limit for a session, or "Cancel Pending Resume", clears this.\n\n`);
+      // Every way a gave-up record clears (gaveUp.ts), not just two of them:
+      // a new detection for the session, the session finishing a turn, a
+      // resume of it launching, the menu's dismiss item, and Cancel.
+      tooltip.appendMarkdown(
+        `This clears on a new detection for the session, when the session finishes a turn or is resumed, ` +
+          `or with "Dismiss gave-up notices" or "Cancel Pending Resume" from the menu.\n\n`,
+      );
     }
     tooltip.appendMarkdown(`_Click for actions._`);
     if (hasTrustLink) {

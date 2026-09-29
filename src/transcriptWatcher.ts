@@ -17,7 +17,19 @@ export function transcriptRoot(): string {
 }
 
 export interface LimitHit { detection: LimitDetection; cwd?: string; file: string }
-export interface OverloadHit { detection: OverloadDetection; cwd?: string; file: string }
+export interface OverloadHit {
+    detection: OverloadDetection;
+    cwd?: string;
+    file: string;
+    /**
+     * The reporting entry's own `timestamp`, in ms, when it had a parseable
+     * one. An overload has no reset time, so this is what identifies the
+     * event: identical in every window (they all read the same line) and
+     * distinct for every separate failure. The cross-window claim keys on it
+     * (claims.ts claimKeyFor; final review, Important 3).
+     */
+    entryTimestampMs?: number;
+}
 export interface InputHit { detection: InputDetection; cwd?: string; file: string }
 export interface InspectResult { limit?: LimitHit; overload?: OverloadHit; inputNeeded?: InputHit }
 
@@ -536,9 +548,16 @@ export class TranscriptWatcher {
                 if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
                     continue;
                 }
-                const overload = detectOverload(candidate.text);
+                // Final review, Important 4: unflagged text is believed only on a
+                // line that starts with "API Error" - for every rule, not just the
+                // two Task 4a anchored. Short assistant prose ("npm install failed:
+                // fetch failed", "the request timed out", "Earlier we saw API
+                // Error: 529") armed a retry here, and the resume then went out
+                // with the "I hit my usage limit" prompt. Flagged entries keep
+                // full recall, same as every other veto in this module.
+                const overload = detectOverload(candidate.text, { anchored: !flagged });
                 if (overload) {
-                    return { overload: { detection: overload, cwd, file } };
+                    return { overload: { detection: overload, cwd, file, entryTimestampMs: writtenAt?.getTime() } };
                 }
             }
         }

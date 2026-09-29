@@ -11,7 +11,7 @@ export type Plan =
   | { kind: 'ignore'; reason: string };
 
 export function planResume(
-  hit: { detection: { resumeAt?: Date; text: string }; cwd?: string; file: string },
+  hit: { detection: { resumeAt?: Date; text: string }; cwd?: string; file: string; entryTimestampMs?: number },
   reason: 'limit' | 'overload',
   settings: Settings,
   statBytes: (p: string) => number,
@@ -57,6 +57,14 @@ export function planResume(
       resumeAtMs: base + jitterMs,
       jitterMs,
       reason,
+      // Only set when the watcher had one: an absent key, not `undefined`,
+      // keeps the persisted job (globalState) exactly as it was for a hit
+      // without it.
+      ...(hit.entryTimestampMs !== undefined ? { entryTimestampMs: hit.entryTimestampMs } : {}),
+      // The native auto-continue check's baseline (final review, Important
+      // 6). resolveSession reports 0 for a size it could not read; that is
+      // "unknown", not a baseline every transcript has grown past.
+      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
     },
   };
 }

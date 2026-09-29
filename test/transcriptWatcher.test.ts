@@ -795,3 +795,44 @@ test('a flagged banner in a subagents/ file still schedules an overload retry (p
     'a flagged entry must not be dropped by the subagent-file veto',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Final review, Important 4: unflagged assistant prose must not arm an
+// overload retry. On the unflagged path every overload rule needs a line that
+// starts with "API Error"; flagged entries keep full recall.
+// ---------------------------------------------------------------------------
+
+for (const prose of [
+  'npm install failed: fetch failed (proxy). I will retry with the registry mirror.',
+  'All the tests pass except one case where the request timed out.',
+  'The staging endpoint returned Internal server error for the upload, so I skipped it.',
+  'Earlier we saw API Error: 529 Overloaded, but the retry succeeded.',
+]) {
+  test(`unflagged assistant prose does not arm an overload retry (final review I4): ${prose.slice(0, 32)}`, () => {
+    const line = entry({ type: 'assistant', message: { content: [{ type: 'text', text: prose }] } });
+    assert.equal(make().inspectLine(line, FILE).overload, undefined, prose);
+  });
+}
+
+test('an unflagged entry whose text line starts with API Error still arms an overload retry (final review I4)', () => {
+  const line = entry({ type: 'assistant', message: { content: 'API Error: Request timed out.' } });
+  assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
+});
+
+test('a flagged entry keeps full recall, with no API Error head needed (final review I4)', () => {
+  const line = entry({ type: 'assistant', isApiErrorMessage: true, message: { content: 'Request timed out.' } });
+  assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
+});
+
+test('an overload hit carries its entry timestamp, the identity every window shares (final review I3)', () => {
+  const ts = new Date(Date.now() - 60_000).toISOString();
+  const line = entry({ type: 'assistant', isApiErrorMessage: true, timestamp: ts, message: { content: 'API Error: 529 Overloaded' } });
+  assert.equal(make().inspectLine(line, FILE).overload?.entryTimestampMs, new Date(ts).getTime());
+});
+
+test('an overload hit from an entry with no timestamp carries none', () => {
+  const line = entry({ type: 'assistant', isApiErrorMessage: true, message: { content: 'API Error: 529 Overloaded' } });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.overload);
+  assert.equal(out.overload.entryTimestampMs, undefined);
+});

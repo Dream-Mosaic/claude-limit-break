@@ -92,37 +92,51 @@ const STREAM_INTERRUPTED_RE =
     /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
 
 /**
- * The head every genuine "API Error:" banner line starts with - optionally
+ * The head every genuine "API Error" banner line starts with - optionally
  * behind the single message glyph Claude Code's own renders show ("⏺ API
  * Error: ..." / "● API Error: ..."), with nothing but leading whitespace in
- * front of it.
+ * front of it. Both the colon form ("API Error: 529 ...") and the parens form
+ * ("API Error (500 {...})") count (final review, Important 4): the parens
+ * form is a real terminal render too, and its in-flight variant ("... ·
+ * Retrying in 5s · attempt 3/10") must still get as far as the
+ * IN_FLIGHT_RETRY_RE exclusion rather than be silently lost to the anchor.
  */
-const LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api error:/i;
+const LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api error\s*[:(]/i;
 
 /**
- * Whether `innerRe` matches a physical line of `rawText` whose own visible
- * content genuinely BEGINS with "API Error:" - not one where the phrase
- * merely turns up mid-sentence in a longer line of prose, or inside a quoted
- * shell argument (Task 4a fix round 1, review finding #2: model notes like
- * "Added a rule so API Error: Your computer went to sleep mid-response. …"
- * and a Bash tool_use argument `echo "API Error: ..."` both fired the
+ * The match of `innerRe` on the first physical line of `rawText` whose own
+ * visible content genuinely BEGINS with "API Error" - not one where the
+ * phrase merely turns up mid-sentence in a longer line of prose, or inside a
+ * quoted shell argument (Task 4a fix round 1, review finding #2: model notes
+ * like "Added a rule so API Error: Your computer went to sleep mid-response.
+ * …" and a Bash tool_use argument `echo "API Error: ..."` both fired the
  * transient-429/stream-interrupted rules on the untrusted path before this).
  *
  * Checked per physical line of the RAW text, before normalize() collapses
  * every real newline into a single space and destroys the position a
  * line-start anchor would need to see - the same reason looksLikeQuotedNotice
  * (limitParser.ts) is checked this way rather than against the normalized
- * whole-text string. `innerRe` (which still carries its own "api error:"
- * requirement) is then tested against that one line's own normalized text, so
- * it keeps matching through normalize()'s usual quote/dash/whitespace
- * cleanup.
+ * whole-text string. `innerRe` is then run against that one line's own
+ * normalized text, so it keeps matching through normalize()'s usual
+ * quote/dash/whitespace cleanup.
  *
- * Only used for the two rules the brief calls "NEW" (transient-429,
- * stream-interrupted); the older api-error-status rule is left unanchored,
- * unchanged, per the controller's ruling (deferred, not this round).
+ * Used for the two rules marked `lineAnchored` on every path, and - final
+ * review, Important 4 - for EVERY rule on the unflagged path (`anchored`, see
+ * detectOverload): short unflagged assistant prose ("npm install failed:
+ * fetch failed", "the request timed out", "Earlier we saw API Error: 529")
+ * armed a retry through the older, unanchored rules until then.
  */
-function matchesApiErrorLine(rawText: string, innerRe: RegExp): boolean {
-    return rawText.split(/\r?\n/).some((line) => LINE_HEAD_RE.test(line) && innerRe.test(normalize(line)));
+function matchApiErrorLine(rawText: string, innerRe: RegExp): RegExpExecArray | undefined {
+    for (const line of rawText.split(/\r?\n/)) {
+        if (!LINE_HEAD_RE.test(line)) {
+            continue;
+        }
+        const m = innerRe.exec(normalize(line));
+        if (m) {
+            return m;
+        }
+    }
+    return undefined;
 }
 
 export function looksLikeOverloadMessage(text: string): boolean {
@@ -206,8 +220,18 @@ function sniffStatus(text: string): number | undefined {
     return n >= 500 && n <= 599 ? n : undefined;
 }
 
-/** Scan one short chunk of text for a transient server failure. */
-export function detectOverload(rawText: string): OverloadDetection | undefined {
+/**
+ * Scan one short chunk of text for a transient server failure.
+ *
+ * `anchored` is the UNFLAGGED path (final review, Important 4): text from an
+ * entry Claude Code did not itself mark as an API error is only believed when
+ * a rule matches on a line that starts with "API Error" - Claude Code flags
+ * its own errors, so an unflagged genuine overload with no such head is the
+ * one thing this gives up, and a sentence of the model's own prose that
+ * mentions a timeout or a failed fetch is what it stops. Flagged entries
+ * leave it off and keep full recall.
+ */
+export function detectOverload(rawText: string, opts: { anchored?: boolean } = {}): OverloadDetection | undefined {
     const text = normalize(rawText);
     if (!text || text.length > MAX_NOTICE_LENGTH) {
         return undefined;
@@ -232,13 +256,7 @@ export function detectOverload(rawText: string): OverloadDetection | undefined {
         return undefined;
     }
     for (const rule of RULES) {
-        if (rule.lineAnchored) {
-            if (!matchesApiErrorLine(rawText, rule.re)) {
-                continue;
-            }
-            return { rule: rule.id, status: sniffStatus(text), text };
-        }
-        const m = rule.re.exec(text);
+        const m = rule.lineAnchored || opts.anchored ? matchApiErrorLine(rawText, rule.re) : rule.re.exec(text);
         if (!m) {
             continue;
         }

@@ -41,16 +41,32 @@ import {
   busyFolderPeers,
   type HolderRecord,
 } from './liveSessions';
-import { decideOnFire, manualResumeWarning, buildResumePrompt } from './holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel } from './holderPolicy';
 import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
 import { execFileSync } from 'node:child_process';
-import { claimsDir, claimKeyFor, claimResume, releaseClaim, cleanupStaleClaims } from './claims';
+import {
+  claimsDir,
+  claimKeyFor,
+  claimResume,
+  claimOwner,
+  holdClaim,
+  releaseClaim,
+  cleanupStaleClaims,
+} from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
 const NS = 'claudeLimitBreak';
+
+/**
+ * The extension this one replaces (Task 8's rename). Still installed, it
+ * detects and resumes the same sessions as this one, with none of 1.0's
+ * cross-window claim or live-holder checks (final review, Important 5).
+ */
+const OLD_EXTENSION_ID = 'dream-mosaic.claude-limit-buster';
+const UNINSTALL_OLD_BUTTON = 'Uninstall Claude Limit Buster';
 
 /** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
 const TRUST_BUTTON = 'Open Claude to Trust';
@@ -104,6 +120,39 @@ export function activate(context: vscode.ExtensionContext): void {
   // staleness check is what keeps a claim from blocking anything for long;
   // this just keeps the machine-wide directory from growing forever.
   cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
+
+  // Final review, Important 5: 1.0 is a new extension id, so installing it
+  // does not remove Claude Limit Buster 0.1.x. Both would then watch the same
+  // transcripts and each launch its own resume - and the old one has no
+  // claim and no live-holder check, so nothing stops it forking a session
+  // this one is careful not to. Warned once per activation, with a one-click
+  // way out; the uninstall is VS Code's own command, run only on that click.
+  if (vscode.extensions.getExtension(OLD_EXTENSION_ID)) {
+    log.warn(`${OLD_EXTENSION_ID} is still installed; both extensions will try to resume the same sessions.`);
+    void Promise.resolve(
+      vscode.window.showWarningMessage(
+        'Limit Break: Claude Limit Buster 0.1.x is still installed. Both extensions watch the same sessions, ' +
+          'so a session can be resumed twice - and the old one does not check whether a session is already ' +
+          'open before starting a second one. Uninstall it?',
+        UNINSTALL_OLD_BUTTON,
+      ),
+    ).then((choice) => {
+      if (choice === UNINSTALL_OLD_BUTTON) {
+        void Promise.resolve(
+          vscode.commands.executeCommand('workbench.extensions.uninstallExtension', OLD_EXTENSION_ID),
+        ).catch((err: unknown) => log.error(`Could not uninstall ${OLD_EXTENSION_ID}: ${String(err)}`));
+      }
+    });
+  }
+
+  /**
+   * Take (or, on a manual path, refresh) the cross-window claim for `key`
+   * (Task 10), recording this window's identity in it so a later collision
+   * can be told apart from another window's (final review, Important 3).
+   * `vscode.env.sessionId` is per window and per run - exactly the scope of
+   * "this window" here.
+   */
+  const claim = (key: string) => claimResume(claimsDir(), key, Date.now(), fs, log, vscode.env.sessionId);
 
   const scheduler = new ResumeScheduler(context.globalState, log);
   const status = new CountdownStatusBar();
@@ -699,6 +748,115 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
+   * A "Resume Now" notification for one remembered job: the off-autoResume
+   * cooldown notice, and - final review, Important 6 - the notice that Claude
+   * Code's own auto-continue did not pick a session back up. The caller has
+   * already remembered the job (rememberReady); the click is a manual resume
+   * of exactly that job.
+   */
+  const offerResumeNow = (job: PendingJob, claimKey: string, message: string): void => {
+    void Promise.resolve(vscode.window.showInformationMessage(message, 'Resume Now')).then(async (choice) => {
+      if (choice !== 'Resume Now') {
+        return;
+      }
+      // Same live-holder gate the resumeNow command goes through - this
+      // button is just as much a manual resume as the palette command is.
+      if (!(await confirmManualResume(job))) {
+        return;
+      }
+      // This job, closed over here - not "whatever is ready now". Another
+      // session can come ready while this notification is still on
+      // screen, and the offer names a session, so it must honour it.
+      //
+      // Removing it is also how this click takes ownership of it
+      // (forgetReady) - not the Task 10 cross-window claim below, which
+      // is a separate thing. The notification outlives the job: the same
+      // session can be resumed from the command palette first, and
+      // without that ownership a later click here would launch a second
+      // `claude --resume` on it.
+      if (!forgetReady(job.sessionId)) {
+        void vscode.window.showInformationMessage(
+          `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+        );
+        return;
+      }
+      // forgetReady above is how this click takes ownership of the job;
+      // if the launch never actually started, that ownership must be
+      // undone (rememberReady) or the job is gone with no way back.
+      //
+      // Task 10, fix round 3: this notification can sit unanswered for a
+      // long time - nothing else resumes a remembered job in the meantime
+      // - long enough for the claim onFire wrote at fire time to
+      // go stale (>1h) and another window to take it over before this
+      // click happens. Round 1 released that claim unconditionally,
+      // reasoning it was always this window's own; round 2 fixed the same
+      // assumption on the other three manual paths but missed this one.
+      // Same fix: bypass the answer to decide whether to launch (the
+      // user's explicit intent), but only release if this call actually
+      // won the claim itself ('claimed', including a stale takeover it
+      // just performed) - never a claim 'taken' by someone else.
+      const notifyClaim = claim(claimKey);
+      if (!resume(job, true)) {
+        rememberReady(job);
+        if (notifyClaim === 'claimed') {
+          releaseClaim(claimsDir(), claimKey, fs, log);
+        }
+      }
+    });
+  };
+
+  /**
+   * Native auto-continue checks still waiting out their grace (final review,
+   * Important 6), kept apart from stallChecks so Cancel can drop them: a
+   * check that fires after Cancel would offer back a job the user just
+   * discarded.
+   */
+  const nativeChecks = new Set<NodeJS.Timeout>();
+
+  /**
+   * Check back on a session left to Claude Code's own auto-continue (final
+   * review, Important 6). decideOnFire stands down for it whenever the
+   * setting reads as on - including when the key is simply absent, which the
+   * CLI reads as on - but the research found the toggle offered to some
+   * accounts only, and an account without the feature would otherwise have
+   * its idle-terminal limit dropped with nothing said at all.
+   *
+   * Reuses the stall watch's grace period and growth test. The baseline is
+   * the transcript's size at DETECTION when the job carries it, not at this
+   * fire: randomDelay pads the fire 5-30 minutes past the reset, so a
+   * working auto-continue has usually written (and often finished) its turn
+   * before this runs, and measuring from the fire would call that a failure.
+   * An older job without the field falls back to the size now.
+   *
+   * No growth: the job is remembered and offered back. The claim onFire took
+   * is kept either way (consistent with Important 2) - the offer's own
+   * button bypasses claims like every manual path.
+   */
+  const armNativeContinueCheck = (job: PendingJob, claimKey: string): void => {
+    const baseline = job.transcriptBytesAtDetection ?? transcriptBytes(job.transcript) ?? 0;
+    const check = setTimeout(() => {
+      nativeChecks.delete(check);
+      const bytesNow = transcriptBytes(job.transcript);
+      if (stallVerdict({ bytesAtLaunch: baseline, bytesNow }) === 'grew') {
+        log.info(`Claude Code continued ${job.sessionId} on its own; its transcript has grown since the limit.`);
+        return;
+      }
+      log.warn(
+        `Claude Code did not continue ${job.sessionId} on its own: ${job.transcript} was ${baseline} bytes at ` +
+          `detection and ${bytesNow ?? 'unreadable'} now. Its auto-continue may not be available on this account; ` +
+          `offering the resume here instead.`,
+      );
+      rememberReady(job);
+      offerResumeNow(
+        job,
+        claimKey,
+        `Limit Break: Claude Code did not continue ${job.sessionId.slice(0, 8)} on its own. Resume it here?`,
+      );
+    }, GRACE_MS);
+    nativeChecks.add(check);
+  };
+
+  /**
    * Every open webview tab in this window, reduced to what panelTab.ts can
    * work on, paired with the real Tab so a choice can become a close() call.
    */
@@ -880,10 +1038,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     {
       dispose: () => {
-        for (const t of stallChecks) {
+        for (const t of [...stallChecks, ...nativeChecks]) {
           clearTimeout(t);
         }
         stallChecks.clear();
+        nativeChecks.clear();
       },
     },
     channel,
@@ -947,67 +1106,28 @@ export function activate(context: vscode.ExtensionContext): void {
       // autoResume split below, so the off-autoResume path cannot become a
       // backdoor around a lost claim either.
       const claimKey = claimKeyFor(job);
-      if (claimResume(claimsDir(), claimKey, Date.now(), fs, log) === 'taken') {
-        log.info(`Resume for ${job.sessionId.slice(0, 8)} claimed by another window; dropping.`);
+      if (claim(claimKey) === 'taken') {
+        // Worded by who holds it, for the log only - either way the fire is
+        // dropped. A claim this window wrote itself (an earlier resume of the
+        // same event) used to be reported as "another window", which sent
+        // the reader looking for a window that did not exist (final review,
+        // Important 3).
+        const holder =
+          claimOwner(claimsDir(), claimKey, fs) === vscode.env.sessionId
+            ? 'already claimed by this window'
+            : 'claimed by another window';
+        log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
         return;
       }
       const s = settings();
       if (!s.autoResume) {
         rememberReady(job);
         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
-        void Promise.resolve(
-          vscode.window.showInformationMessage(
-            `Limit Break: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
-            'Resume Now',
-          ),
-        ).then(async (choice) => {
-          if (choice !== 'Resume Now') {
-            return;
-          }
-          // Same live-holder gate the resumeNow command goes through - this
-          // button is just as much a manual resume as the palette command is.
-          if (!(await confirmManualResume(job))) {
-            return;
-          }
-          // This job, closed over here - not "whatever is ready now". Another
-          // session can come ready while this notification is still on
-          // screen, and the offer names a session, so it must honour it.
-          //
-          // Removing it is also how this click takes ownership of it
-          // (forgetReady) - not the Task 10 cross-window claim below, which
-          // is a separate thing. The notification outlives the job: the same
-          // session can be resumed from the command palette first, and
-          // without that ownership a later click here would launch a second
-          // `claude --resume` on it.
-          if (!forgetReady(job.sessionId)) {
-            void vscode.window.showInformationMessage(
-              `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
-            );
-            return;
-          }
-          // forgetReady above is how this click takes ownership of the job;
-          // if the launch never actually started, that ownership must be
-          // undone (rememberReady) or the job is gone with no way back.
-          //
-          // Task 10, fix round 3: this notification can sit unanswered for a
-          // long time - autoResume is off, so nothing else resumes it in the
-          // meantime - long enough for the claim onFire wrote at fire time to
-          // go stale (>1h) and another window to take it over before this
-          // click happens. Round 1 released that claim unconditionally,
-          // reasoning it was always this window's own; round 2 fixed the same
-          // assumption on the other three manual paths but missed this one.
-          // Same fix: bypass the answer to decide whether to launch (the
-          // user's explicit intent), but only release if this call actually
-          // won the claim itself ('claimed', including a stale takeover it
-          // just performed) - never a claim 'taken' by someone else.
-          const notifyClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
-          if (!resume(job, true)) {
-            rememberReady(job);
-            if (notifyClaim === 'claimed') {
-              releaseClaim(claimsDir(), claimKey, fs, log);
-            }
-          }
-        });
+        offerResumeNow(
+          job,
+          claimKey,
+          `Limit Break: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
+        );
         return;
       }
       // Task 2: before ever spawning a second `claude --resume`, find out who
@@ -1023,6 +1143,7 @@ export function activate(context: vscode.ExtensionContext): void {
         holder,
         autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
         job.sessionId.slice(0, 8),
+        job.reason,
       );
       if (decision.logMessage) {
         (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);
@@ -1047,14 +1168,14 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
           }
           // Task 10, fix round 1: this branch is reached only after
-          // decideOnFire declined to auto-resume, which already released
-          // this job's original claim (see `!decision.resume` above) - by
-          // the time someone clicks this button that claim is long gone. The
-          // click is exactly as much an explicit user action as the
-          // resumeNow command, so - same as resumeNow - it writes/refreshes
-          // its own claim before launching, ignoring whatever claimResume
-          // reports, so another window's own automatic attempt cannot also
-          // fire while this launch is in flight.
+          // decideOnFire declined to auto-resume. Since final review
+          // Important 2 that decline KEEPS this job's original claim (see
+          // `!decision.resume` below), but it may have gone stale by the
+          // time someone clicks. The click is exactly as much an explicit
+          // user action as the resumeNow command, so - same as resumeNow -
+          // it writes/refreshes its own claim before launching, ignoring
+          // whatever claimResume reports, so another window's own automatic
+          // attempt cannot also fire while this launch is in flight.
           //
           // Fix round 2: bypassing the ANSWER (above) is not the same as
           // OWNING the claim. If claimResume just reported 'taken', another
@@ -1063,7 +1184,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // claim out from under it. Only release when this call actually
           // won the claim itself ('claimed', which includes a stale
           // takeover it just performed).
-          const buttonClaim = claimResume(claimsDir(), claimKey, Date.now(), fs, log);
+          const buttonClaim = claim(claimKey);
           if (!resume(job, true)) {
             rememberReady(job);
             if (buttonClaim === 'claimed') {
@@ -1072,11 +1193,20 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         });
       }
+      if (decision.awaitNativeContinue) {
+        armNativeContinueCheck(job, claimKey);
+      }
       if (!decision.resume) {
-        // This window is not launching anything automatically - the claim it
-        // just took must not sit there blocking another window (or a later
-        // manual retry) for up to an hour over a resume nobody is making.
-        releaseClaim(claimsDir(), claimKey, fs, log);
+        // The claim is KEPT (final review, Important 2). Releasing it here -
+        // as this did until then - let every other window watching the same
+        // session (watchScope machine, the default) fire later on its own
+        // jitter, find the key free, and show the same "Resume in Terminal
+        // Anyway" offer: two clicks in two windows were two writers on a
+        // session a terminal holds. Whether the decision remembered and
+        // notified or dropped the job for a busy/waiting holder, this window
+        // has handled this reset, and the claim says so. Nothing is lost by
+        // keeping it: every manual path (Resume Now, the offer's own button)
+        // bypasses claims, and the claim ages out after STALE_MS.
         return;
       }
       // A second, independent controller ruling: on EVERY resume we are
@@ -1097,7 +1227,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (rows !== 'unknown' && decision.resume && job.cwd) {
         const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
         if (peers.length > 0) {
-          const names = peers.map((p) => p.name ?? String(p.pid)).join(', ');
+          const names = peers.map(peerLabel).join(', ');
           log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
           void vscode.window.showInformationMessage(
             `Limit Break: another Claude session (${names}) is working in this folder. ` +
@@ -1160,7 +1290,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // "Resume Now" moves exactly one.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          const countingClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
+          const countingClaim = claim(key);
           if (resume(counting, true)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {
@@ -1179,7 +1309,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
-        const readyClaim = claimResume(claimsDir(), key, Date.now(), fs, log);
+        const readyClaim = claim(key);
         if (resume(ready, true)) {
           forgetReady(ready.sessionId);
         } else if (readyClaim === 'claimed') {
@@ -1190,6 +1320,29 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
       // "Cancel Pending Resume" means all of it, but say how much it threw
       // away: a job dropped from readyJobs has no other trace.
+      //
+      // Final review, Important 7: with watchScope machine every window holds
+      // its own copy of the same pending job, and each would still fire it.
+      // Claiming each cancelled job's key here makes them drop it as taken
+      // when they do - held fresh until this job's own fire time (holdClaim),
+      // since a limit can count down for hours, far past an ordinary claim's
+      // one-hour life. This only stops the other windows ACTING on their
+      // copies; the persisted job lists are shared through globalState in a
+      // way that is not merged across windows (pre-existing, docs/NEXT.md).
+      const cancelled = [...scheduler.jobs, ...readyJobs];
+      const nowMs = Date.now();
+      for (const job of cancelled) {
+        holdClaim(claimsDir(), claimKeyFor(job), nowMs, job.resumeAtMs, fs, log, vscode.env.sessionId);
+      }
+      if (cancelled.length > 0) {
+        log.info(`Claimed ${cancelled.length} cancelled resume(s) so other windows drop them too.`);
+      }
+      // A native auto-continue check still in its grace would offer back a
+      // job this just discarded (final review, Important 6).
+      for (const t of nativeChecks) {
+        clearTimeout(t);
+      }
+      nativeChecks.clear();
       if (readyJobs.length > 0) {
         log.info(`Discarding ${readyJobs.length} resume(s) that were waiting to be started by hand.`);
         readyJobs.length = 0;

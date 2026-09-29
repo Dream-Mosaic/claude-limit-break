@@ -10,6 +10,8 @@ import {
   cleanupStaleClaims,
   claimKeyFor,
   claimsDir,
+  claimOwner,
+  holdClaim,
   type ClaimFs,
 } from '../src/claims';
 
@@ -180,7 +182,7 @@ test('claimKeyFor for a limit job is sessionId-baseResumeAtMs, the un-jittered r
   assert.equal(key, 'abc-123-1000000');
 });
 
-test('claimKeyFor for an overload job buckets the DETECTION instant (baseResumeAtMs), not the padded fire time', () => {
+test('claimKeyFor for an overload job with no entry timestamp falls back to bucketing the DETECTION instant (baseResumeAtMs), not the padded fire time', () => {
   // Fix round 1: this used to bucket resumeAtMs. resumeAtMs is padded with
   // each window's own independently-rolled jitter, so two windows detecting
   // the identical overload landed in different buckets and both fired.
@@ -209,6 +211,105 @@ test('claimKeyFor gives two overload jobs a different key when their detection i
   const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 0, resumeAtMs: 5_000_000, reason: 'overload' });
   const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 600_000, resumeAtMs: 5_000_000, reason: 'overload' });
   assert.notEqual(a, b, 'a genuinely different detection instant must not collide just because resumeAtMs matches');
+});
+
+// Final review, Important 3: an overload claim keyed on a 10-minute bucket
+// collided with this window's OWN earlier claim (a fresh 1h claim from a
+// successful resume), so a genuine second overload in the same bucket was
+// dropped. The detection entry's own timestamp is identical in every window
+// (all of them read the same transcript line) and distinct per event.
+
+test('claimKeyFor keys an overload job on its detection entry timestamp when it has one (final review I3)', () => {
+  const key = claimKeyFor({
+    sessionId: 'abc-123',
+    baseResumeAtMs: 6_000_000,
+    resumeAtMs: 7_000_000,
+    reason: 'overload',
+    entryTimestampMs: 5_999_123,
+  });
+  assert.equal(key, 'abc-123-overload-5999123');
+});
+
+test('two distinct overload events in the same 10 minutes get different keys, and both can be claimed (final review I3)', () => {
+  const dir = tempDir();
+  const first = { sessionId: 's', baseResumeAtMs: 6_000_000, resumeAtMs: 6_300_000, reason: 'overload' as const, entryTimestampMs: 6_000_000 };
+  const second = { ...first, baseResumeAtMs: 6_120_000, entryTimestampMs: 6_120_000 };
+  assert.equal(Math.floor(first.baseResumeAtMs / 600_000), Math.floor(second.baseResumeAtMs / 600_000), 'setup: same bucket');
+  assert.notEqual(claimKeyFor(first), claimKeyFor(second));
+  assert.equal(claimResume(dir, claimKeyFor(first), Date.now(), fs), 'claimed');
+  assert.equal(claimResume(dir, claimKeyFor(second), Date.now(), fs), 'claimed', 'the second event must not collide with the first');
+});
+
+test('the same overload event seen by two windows collides, however their detection instants and jitter differ (final review I3)', () => {
+  const dir = tempDir();
+  const windowA = { sessionId: 's', baseResumeAtMs: 6_000_050, resumeAtMs: 6_300_000, reason: 'overload' as const, entryTimestampMs: 5_999_000 };
+  const windowB = { ...windowA, baseResumeAtMs: 6_700_000, resumeAtMs: 8_100_000 };
+  assert.equal(claimKeyFor(windowA), claimKeyFor(windowB));
+  assert.equal(claimResume(dir, claimKeyFor(windowA), Date.now(), fs), 'claimed');
+  assert.equal(claimResume(dir, claimKeyFor(windowB), Date.now(), fs), 'taken');
+});
+
+test('a limit key ignores the entry timestamp: it stays the un-jittered reset (final review I3)', () => {
+  const key = claimKeyFor({ sessionId: 'abc', baseResumeAtMs: 1_000_000, resumeAtMs: 1_500_000, reason: 'limit', entryTimestampMs: 42 });
+  assert.equal(key, 'abc-1000000');
+});
+
+// --- claim owner (final review I3) --------------------------------------------
+
+test('claimResume records the window that took the claim, and claimOwner reads it back', () => {
+  const dir = tempDir();
+  assert.equal(claimResume(dir, 'k', Date.now(), fs, undefined, 'window-a1b2'), 'claimed');
+  assert.equal(claimOwner(dir, 'k', fs), 'window-a1b2');
+});
+
+test('claimOwner is undefined for a missing claim or one written without an owner (an older build)', () => {
+  const dir = tempDir();
+  assert.equal(claimOwner(dir, 'missing', fs), undefined);
+  fs.writeFileSync(path.join(dir, 'legacy.claim'), `${process.pid} ${Date.now()}`);
+  assert.equal(claimOwner(dir, 'legacy', fs), undefined);
+});
+
+// --- holdClaim (final review I7) -------------------------------------------
+
+test('holdClaim writes a claim that stays fresh until the held deadline, not just for STALE_MS from now', () => {
+  // Cancel writes one for a job that may not fire for hours; another window
+  // firing the same reset then must still find it fresh.
+  const dir = tempDir();
+  const now = Date.now();
+  const until = now + 5 * HOUR_MS;
+  assert.equal(holdClaim(dir, 'k', now, until, fs, undefined, 'window-A'), 'claimed');
+  assert.equal(claimResume(dir, 'k', until + 30 * 60_000, fs), 'taken', 'still fresh half an hour after the deadline');
+  assert.equal(claimOwner(dir, 'k', fs), 'window-A');
+  assert.equal(claimResume(dir, 'k', until + 2 * HOUR_MS, fs), 'claimed', 'but it does age out like any claim');
+});
+
+test('holdClaim with a deadline already past is an ordinary claim', () => {
+  const dir = tempDir();
+  const now = Date.now();
+  assert.equal(holdClaim(dir, 'k', now, now - HOUR_MS, fs), 'claimed');
+  assert.equal(claimResume(dir, 'k', now + 30 * 60_000, fs), 'taken');
+});
+
+test('holdClaim leaves a claim another window holds alone', () => {
+  const dir = tempDir();
+  const now = Date.now();
+  assert.equal(claimResume(dir, 'k', now, fs, undefined, 'window-B'), 'claimed');
+  assert.equal(holdClaim(dir, 'k', now, now + 5 * HOUR_MS, fs, undefined, 'window-A'), 'taken');
+  assert.equal(claimOwner(dir, 'k', fs), 'window-B');
+  assert.equal(claimResume(dir, 'k', now + 2 * HOUR_MS, fs), 'claimed', 'nor is the other window\'s claim kept alive past its own life');
+});
+
+test('holdClaim fails soft when the deadline cannot be set: still claimed, and logged', () => {
+  const dir = tempDir();
+  const { log, lines } = logger();
+  const brokenFs = {
+    ...fs,
+    utimesSync: () => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    },
+  };
+  assert.equal(holdClaim(dir, 'k', Date.now(), Date.now() + HOUR_MS * 3, brokenFs, log), 'claimed');
+  assert.ok(lines.length > 0);
 });
 
 // --- claimsDir ---------------------------------------------------------------

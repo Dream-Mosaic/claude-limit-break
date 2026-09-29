@@ -27,6 +27,23 @@ export interface PendingJob {
    * one persisted by a version that predates this field.
    */
   folderTrusted?: boolean;
+  /**
+   * The `timestamp` of the transcript entry this job was detected from, in
+   * ms, when it had one (overload hits only, today). Identifies an overload
+   * event across windows for the cross-window claim (claims.ts claimKeyFor;
+   * final review, Important 3). Absent on a job persisted by an older build,
+   * which falls back to the old 10-minute bucket.
+   */
+  entryTimestampMs?: number;
+  /**
+   * The transcript's size when the job was planned (at detection), when it
+   * could be read. The baseline for the native auto-continue check (final
+   * review, Important 6): a fire is padded 5-30 minutes past the reset, so
+   * Claude Code's own auto-continue has usually written - and often finished
+   * - its turn before this window fires, and growth has to be measured from
+   * before the reset, not from the fire.
+   */
+  transcriptBytesAtDetection?: number;
 }
 
 export interface MementoLike {
