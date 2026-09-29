@@ -1326,8 +1326,9 @@ export function activate(context: vscode.ExtensionContext): void {
       // Claiming each cancelled job's key here makes them drop it as taken
       // when they do - held fresh until this job's own fire time (holdClaim),
       // since a limit can count down for hours, far past an ordinary claim's
-      // one-hour life. Only the claim is shared: the job lists themselves
-      // live in each window's own state.
+      // one-hour life. This only stops the other windows ACTING on their
+      // copies; the persisted job lists are shared through globalState in a
+      // way that is not merged across windows (pre-existing, docs/NEXT.md).
       const cancelled = [...scheduler.jobs, ...readyJobs];
       const nowMs = Date.now();
       for (const job of cancelled) {
