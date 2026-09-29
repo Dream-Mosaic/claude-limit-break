@@ -516,3 +516,14 @@ test('a session both ready and given up (a launcher/cwd failure) is one line, sh
   // One line, not two: the session's short id must appear exactly once.
   assert.equal(text.split('0b3d1f66').length - 1, 1, text);
 });
+
+test('the gave-up reminder lists every way a gave-up notice clears (final review minor)', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update([], [], 'always', [gaveUp()]);
+  const text = tooltipText();
+  assert.match(text, /new detection/i, 'a new limit or overload for the session');
+  assert.match(text, /finish(es|ing)? a turn/i, 'the session finishing a turn');
+  assert.match(text, /"Dismiss gave-up notices"/);
+  assert.match(text, /"Cancel Pending Resume"/);
+});
