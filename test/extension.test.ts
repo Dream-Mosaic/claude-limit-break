@@ -2602,7 +2602,13 @@ test('a failed automatic launch releases its claim, so a later attempt is not bl
   }
 });
 
-test('the Task 2 holder decision declining a resume releases the claim too', async () => {
+// Final review, Important 2: a declining holder decision used to release the
+// claim, so with watchScope machine every other window fired later, found
+// the key free, and showed the same "Resume in Terminal Anyway" offer - two
+// clicks in two windows were two writers on a session a terminal holds. The
+// claim is now kept whenever the decision remembers/notifies or drops.
+
+test('the Task 2 holder decision dropping a resume for a busy holder keeps the claim (final review I2)', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -2613,13 +2619,66 @@ test('the Task 2 holder decision declining a resume releases the claim too', asy
   try {
     await oneTick();
     assert.equal(vscodeFake.terminals.length, 0, 'setup: a busy panel must have declined the resume');
-    assert.ok(
-      releasedKeys.length > 0,
-      `declining to resume must release the claim; saw ${JSON.stringify(releasedKeys)}`,
-    );
+    assert.deepEqual(releasedKeys, [], 'a dropped fire must keep its claim so no other window re-fires it');
   } finally {
     clearHolders();
     teardown(ctx);
+  }
+});
+
+test('an idle-terminal offer keeps its claim, and a second window firing the same reset drops it as taken (final review I2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-i2-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  const job = pastJob();
+  const key = realClaims.claimKeyFor(job);
+  // Window A.
+  vscodeFake.envSessionId = 'window-A';
+  const ctxA = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctxA);
+  let aDown = false;
+  let ctxB: FakeContext | undefined;
+  try {
+    await oneTick();
+    assert.ok(
+      vscodeFake.info.some((m) => m.items.includes('Resume in Terminal Anyway')),
+      'setup: window A must have offered the terminal resume',
+    );
+    assert.ok(fs.existsSync(path.join(dir, `${key}.claim`)), 'the claim must still exist after a declining decision');
+    teardown(ctxA);
+    aDown = true;
+    // Window B fires the same reset later, on its own jitter.
+    vscodeFake.info = [];
+    vscodeFake.outputLines = [];
+    vscodeFake.envSessionId = 'window-B';
+    ctxB = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+    start(ctxB);
+    await oneTick();
+    assert.equal(
+      vscodeFake.info.filter((m) => m.items.includes('Resume in Terminal Anyway')).length,
+      0,
+      'the second window must not offer the same resume again',
+    );
+    assert.ok(
+      vscodeFake.outputLines.some((l) => /claimed by another window/.test(l)),
+      `the second window must drop it as taken; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    autoContinueOn = true;
+    fakeClaimResult = 'claimed';
+    clearHolders();
+    if (!aDown) {
+      teardown(ctxA);
+    }
+    if (ctxB) {
+      teardown(ctxB);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -2802,8 +2861,8 @@ test('"Resume in Terminal Anyway" releases its own claim if the launch fails', a
     const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
     assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
     // decideOnFire's decision.resume is false here (idle terminal,
-    // auto-continue off), so onFire's own top-level release already fired
-    // once by this point - isolate to the button click's own write+release.
+    // auto-continue off); onFire keeps its claim (final review I2), so
+    // isolate to the button click's own write+release.
     releasedKeys.length = 0;
     offer.answer('Resume in Terminal Anyway');
     await flush();

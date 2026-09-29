@@ -1066,14 +1066,14 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
           }
           // Task 10, fix round 1: this branch is reached only after
-          // decideOnFire declined to auto-resume, which already released
-          // this job's original claim (see `!decision.resume` above) - by
-          // the time someone clicks this button that claim is long gone. The
-          // click is exactly as much an explicit user action as the
-          // resumeNow command, so - same as resumeNow - it writes/refreshes
-          // its own claim before launching, ignoring whatever claimResume
-          // reports, so another window's own automatic attempt cannot also
-          // fire while this launch is in flight.
+          // decideOnFire declined to auto-resume. Since final review
+          // Important 2 that decline KEEPS this job's original claim (see
+          // `!decision.resume` below), but it may have gone stale by the
+          // time someone clicks. The click is exactly as much an explicit
+          // user action as the resumeNow command, so - same as resumeNow -
+          // it writes/refreshes its own claim before launching, ignoring
+          // whatever claimResume reports, so another window's own automatic
+          // attempt cannot also fire while this launch is in flight.
           //
           // Fix round 2: bypassing the ANSWER (above) is not the same as
           // OWNING the claim. If claimResume just reported 'taken', another
@@ -1092,10 +1092,16 @@ export function activate(context: vscode.ExtensionContext): void {
         });
       }
       if (!decision.resume) {
-        // This window is not launching anything automatically - the claim it
-        // just took must not sit there blocking another window (or a later
-        // manual retry) for up to an hour over a resume nobody is making.
-        releaseClaim(claimsDir(), claimKey, fs, log);
+        // The claim is KEPT (final review, Important 2). Releasing it here -
+        // as this did until then - let every other window watching the same
+        // session (watchScope machine, the default) fire later on its own
+        // jitter, find the key free, and show the same "Resume in Terminal
+        // Anyway" offer: two clicks in two windows were two writers on a
+        // session a terminal holds. Whether the decision remembered and
+        // notified or dropped the job for a busy/waiting holder, this window
+        // has handled this reset, and the claim says so. Nothing is lost by
+        // keeping it: every manual path (Resume Now, the offer's own button)
+        // bypasses claims, and the claim ages out after STALE_MS.
         return;
       }
       // A second, independent controller ruling: on EVERY resume we are

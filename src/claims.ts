@@ -216,12 +216,13 @@ export function claimOwner(
 }
 
 /**
- * Give up a claim this process took out. Called only when this window did
- * not end up launching a resume off it - a failed launch, or the Task 2
- * holder decision declining - so a later attempt (another window, or a
- * manual retry) is not blocked by a claim nothing is going to act on. A
- * successful launch never calls this; that claim ages out on its own via
- * cleanupStaleClaims.
+ * Give up a claim this process took out. Called only when a launch off it
+ * failed to start, so a later attempt (another window, or a manual retry) is
+ * not blocked by a claim nothing is going to act on. A successful launch
+ * never calls this, and neither does the Task 2 holder decision declining
+ * (final review, Important 2: this window has handled that reset, and
+ * releasing let every other window re-offer it); those claims age out on
+ * their own (STALE_MS, then cleanupStaleClaims).
  *
  * Missing file is not an error - the claim may already have expired, or
  * never existed (a manual resume that bypassed the claim check entirely).
