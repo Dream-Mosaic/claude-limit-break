@@ -203,3 +203,5 @@ Verdict: ready after Critical/Important fixes. Hard constraints hold across the 
 Final review: complete (fix wave 09bb883..230fc67 reviewed clean; 2 parked).
 - Ruling: keep this SDD workspace (not deleted as the skill's Finish step says) — the user asked for tracked progress for the handoff to fix/1.0-field-reports — cost if wrong: a folder the other lane deletes after merging.
 - Release: dispatched (sonnet) — release/1.0.0 from the reviewed head, version bump only.
+- Release: DONE — release/1.0.0 @ 8dd2644 (bump only; 675/675 unit, 9/9 integration, check-vsix green against a built .vsix). Pushed; draft PR https://github.com/Dream-Mosaic/claude-limit-break/pull/23 (not merged).
+- Handoff: HANDOFF.md written (status, pull-in steps, parked items, open questions, 35 rulings).
