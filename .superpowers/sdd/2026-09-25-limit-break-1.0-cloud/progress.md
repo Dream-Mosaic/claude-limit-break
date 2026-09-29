@@ -193,3 +193,6 @@ Verdict: ready after Critical/Important fixes. Hard constraints hold across the 
 - Deferred triage: all OK TO SHIP except "api-error-status fires on mid-sentence prose" → covered by Important 4.
 - Final fix wave: dispatched (opus) at base 61b0103 with final-fix-brief.md (C1, I2-I7, 4 minors, docs)
 - 2026-09-29: the fix-wave implementer hit the weekly usage limit (resets Sep 29 06:00 UTC) before committing anything; tree clean at d4ef412, no report, no mutation left applied. Resumed the same implementer (its reading is intact) with the state spelled out.
+- Final fix wave: DONE (09bb883..230fc67, 11 commits): C1, I2-I7, 4 minors, docs; implementer: 675/675 unit, 9/9 integration, check-vsix green, every mutation caught. The auto-mode classifier was down during the run, so the controller verified the footprint by reading: no new branches, no .vsix, no ~/.claude.json writes, filesystem writes only in claims.ts (incl. the new utimesSync for cancel-held claims). After a container restart the commits survived; pushed; controller re-ran unit at 230fc67: 675/675.
+  - Implementer concerns (for the re-review): I6 baseline = transcript size at detection; I7 cancel-held claim mtime = the job's resumeAtMs; I2 a failed "Resume in Terminal Anyway" leaves the fire's claim in place; I4 "flagged" = isRateLimitEntry.
+- Final fix wave: scoped re-review dispatched (opus).
