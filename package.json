@@ -2,7 +2,7 @@
   "name": "claude-limit-break",
   "displayName": "Limit Break",
   "description": "Watches Claude Code transcripts for usage limits and resumes your session automatically.",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "publisher": "dream-mosaic",
   "license": "MIT",
   "icon": "media/icon.png",
