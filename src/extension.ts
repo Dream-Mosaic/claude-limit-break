@@ -60,6 +60,14 @@ import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 
 const NS = 'claudeLimitBreak';
 
+/**
+ * The extension this one replaces (Task 8's rename). Still installed, it
+ * detects and resumes the same sessions as this one, with none of 1.0's
+ * cross-window claim or live-holder checks (final review, Important 5).
+ */
+const OLD_EXTENSION_ID = 'dream-mosaic.claude-limit-buster';
+const UNINSTALL_OLD_BUTTON = 'Uninstall Claude Limit Buster';
+
 /** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
 const TRUST_BUTTON = 'Open Claude to Trust';
 
@@ -112,6 +120,30 @@ export function activate(context: vscode.ExtensionContext): void {
   // staleness check is what keeps a claim from blocking anything for long;
   // this just keeps the machine-wide directory from growing forever.
   cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
+
+  // Final review, Important 5: 1.0 is a new extension id, so installing it
+  // does not remove Claude Limit Buster 0.1.x. Both would then watch the same
+  // transcripts and each launch its own resume - and the old one has no
+  // claim and no live-holder check, so nothing stops it forking a session
+  // this one is careful not to. Warned once per activation, with a one-click
+  // way out; the uninstall is VS Code's own command, run only on that click.
+  if (vscode.extensions.getExtension(OLD_EXTENSION_ID)) {
+    log.warn(`${OLD_EXTENSION_ID} is still installed; both extensions will try to resume the same sessions.`);
+    void Promise.resolve(
+      vscode.window.showWarningMessage(
+        'Limit Break: Claude Limit Buster 0.1.x is still installed. Both extensions watch the same sessions, ' +
+          'so a session can be resumed twice - and the old one does not check whether a session is already ' +
+          'open before starting a second one. Uninstall it?',
+        UNINSTALL_OLD_BUTTON,
+      ),
+    ).then((choice) => {
+      if (choice === UNINSTALL_OLD_BUTTON) {
+        void Promise.resolve(
+          vscode.commands.executeCommand('workbench.extensions.uninstallExtension', OLD_EXTENSION_ID),
+        ).catch((err: unknown) => log.error(`Could not uninstall ${OLD_EXTENSION_ID}: ${String(err)}`));
+      }
+    });
+  }
 
   /**
    * Take (or, on a manual path, refresh) the cross-window claim for `key`
