@@ -55,10 +55,12 @@ function isIdleStatus(status: string | undefined): boolean {
  *     auto-continue on a bridged panel - so this silently drops the job:
  *     no spawn, no rememberReady, no notification, just a log line (naming
  *     Remote Control when the panel is bridged).
- *   - an idle terminal defers to autoContinueOn: Claude Code's own
- *     auto-continue already covers it when that setting is on (see
- *     autoContinue.ts), so this stays silent there too; only when it is OFF
- *     does this remember the job and offer "Resume in Terminal Anyway".
+ *   - an idle terminal defers to autoContinueOn for a usage LIMIT: Claude
+ *     Code's own auto-continue already covers it when that setting is on
+ *     (see autoContinue.ts), so this stays silent there too; only when it
+ *     is OFF does this remember the job and offer "Resume in Terminal
+ *     Anyway". An OVERLOAD (`reason`) always gets the offer - native
+ *     auto-continue covers usage limits only (final review, Critical 1).
  *
  * `resume: true` is reserved for 'none' (nobody found), a listing failure
  * ('unknown', which must still resume rather than fail closed and silently
@@ -78,7 +80,12 @@ function isIdleStatus(status: string | undefined): boolean {
  * see {@link buildResumePrompt} and `scheduler.onFire` in extension.ts, which
  * calls it directly off the same listing, independently of this decision.
  */
-export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: boolean, shortId: string): OnFireDecision {
+export function decideOnFire(
+  holder: SessionHolder | 'unknown',
+  autoContinueOn: boolean,
+  shortId: string,
+  reason: 'limit' | 'overload',
+): OnFireDecision {
   if (holder === 'unknown') {
     return {
       resume: true,
@@ -119,7 +126,29 @@ export function decideOnFire(holder: SessionHolder | 'unknown', autoContinueOn: 
         `${holder.status ?? 'active'}; not starting a second writer.`,
     };
   }
-  // terminal, idle.
+  // terminal, idle. Final review, Critical 1: Claude Code's own
+  // auto-continue (`autoContinueAtUsageLimit`) picks a session back up at a
+  // USAGE LIMIT reset only. It does nothing for a 529, a transient 429 or an
+  // interrupted stream - the overload family - so for an overload job the
+  // setting is irrelevant and the idle terminal is offered below exactly as
+  // if it were off. Before this, the default (a missing key reads as on)
+  // dropped every overload in an idle terminal with a log line claiming
+  // auto-continue would handle it; 0.1.2 used to resume those.
+  if (reason === 'overload') {
+    return {
+      resume: false,
+      remember: true,
+      logMessage:
+        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and hit a server error, which ` +
+        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
+      notice: {
+        message:
+          `Limit Break: session ${shortId} was stopped by a server error, and it is open in a terminal. ` +
+          `Continue it there.`,
+        button: RESUME_IN_TERMINAL_BUTTON,
+      },
+    };
+  }
   if (autoContinueOn) {
     return {
       resume: false,

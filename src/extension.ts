@@ -1023,6 +1023,7 @@ export function activate(context: vscode.ExtensionContext): void {
         holder,
         autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
         job.sessionId.slice(0, 8),
+        job.reason,
       );
       if (decision.logMessage) {
         (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);

@@ -15,7 +15,7 @@ const SHORT = '0b3d1f66';
 // ---------------------------------------------------------------------------
 
 test('decideOnFire resumes as today when nobody holds the session', () => {
-  const decision = decideOnFire({ kind: 'none' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'none' }, true, SHORT, 'limit');
   assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -25,7 +25,7 @@ test('decideOnFire resumes as today when the listing failed, but logs a warning 
   // Failing closed here would silently stop every resume on a machine where
   // `claude agents` misbehaves - 'unknown' must still resume, just be logged
   // as a listing failure.
-  const decision = decideOnFire('unknown', true, SHORT);
+  const decision = decideOnFire('unknown', true, SHORT, 'limit');
   assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -34,14 +34,14 @@ test('decideOnFire resumes as today when the listing failed, but logs a warning 
 });
 
 test('decideOnFire resumes an IDLE panel as normal - the product\'s main use case', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'idle' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'idle' }, true, SHORT, 'limit');
   assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined, 'must not notify instead of spawning');
 });
 
 test('decideOnFire drops the job silently for a BUSY panel - no spawn, no remember, no notice', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -49,7 +49,7 @@ test('decideOnFire drops the job silently for a BUSY panel - no spawn, no rememb
 });
 
 test('decideOnFire drops the job silently for a WAITING panel too', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'waiting' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'waiting' }, true, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -57,12 +57,12 @@ test('decideOnFire drops the job silently for a WAITING panel too', () => {
 });
 
 test('decideOnFire mentions Remote Control in the log line for a bridged, busy panel', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true, status: 'busy' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: true, status: 'busy' }, true, SHORT, 'limit');
   assert.match(decision.logMessage ?? '', /remote control/i);
 });
 
 test('decideOnFire does not mention Remote Control when the busy panel is not bridged', () => {
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: 'busy' }, true, SHORT, 'limit');
   assert.doesNotMatch(decision.logMessage ?? '', /remote control/i);
 });
 
@@ -71,28 +71,28 @@ test('decideOnFire treats an unreported panel status as IDLE (fail open) - resum
   // idle, not "not idle". Goal 2 is to resume unattended, and a listing
   // failure ('unknown') already resumes rather than blocking - a single row
   // with no readable status must not be treated more cautiously than that.
-  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT);
+  const decision = decideOnFire({ kind: 'panel', pid: 111, bridged: false, status: undefined }, true, SHORT, 'limit');
   assert.equal(decision.resume, true);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
 });
 
 test('decideOnFire drops the job silently for a BUSY terminal, regardless of auto-continue', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'busy' }, true, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
 });
 
 test('decideOnFire drops the job silently for a WAITING terminal, regardless of auto-continue', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'waiting' }, false, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'waiting' }, false, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
 });
 
 test('decideOnFire leaves an IDLE terminal alone, unremembered, when auto-continue is on', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -100,7 +100,7 @@ test('decideOnFire leaves an IDLE terminal alone, unremembered, when auto-contin
 });
 
 test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, true);
   assert.ok(decision.notice);
@@ -115,7 +115,7 @@ test('decideOnFire offers Resume in Terminal Anyway for an IDLE terminal when au
 // ---------------------------------------------------------------------------
 
 test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue on leaves it alone', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, true, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, true, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, false);
   assert.equal(decision.notice, undefined);
@@ -123,7 +123,7 @@ test('decideOnFire treats an unreported terminal status as IDLE (fail open) - au
 });
 
 test('decideOnFire treats an unreported terminal status as IDLE (fail open) - auto-continue off notifies and remembers', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, false, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: undefined }, false, SHORT, 'limit');
   assert.equal(decision.resume, false);
   assert.equal(decision.remember, true);
   assert.ok(decision.notice);
@@ -131,8 +131,43 @@ test('decideOnFire treats an unreported terminal status as IDLE (fail open) - au
   assert.match(decision.notice?.message ?? '', /terminal/i);
 });
 
+// ---------------------------------------------------------------------------
+// Final review, Critical 1: Claude Code's own auto-continue
+// (autoContinueAtUsageLimit) covers USAGE LIMITS only - not a 529, a
+// transient 429 or an interrupted stream. An overload job with an idle
+// terminal holder must never be dropped on the strength of that setting.
+// ---------------------------------------------------------------------------
+
+test('decideOnFire remembers and offers Resume in Terminal Anyway for an OVERLOAD in an idle terminal, even with auto-continue on (final review C1)', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'overload');
+  assert.equal(decision.resume, false, 'never a second writer into a terminal automatically');
+  assert.equal(decision.remember, true, 'native auto-continue does not cover an overload, so it must stay recoverable');
+  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+  assert.match(decision.notice?.message ?? '', /^Limit Break:/);
+  assert.match(decision.notice?.message ?? '', /terminal/i);
+  assert.doesNotMatch(
+    decision.notice?.message ?? '',
+    /limit has reset/i,
+    'an overload notice must not claim a usage limit reset',
+  );
+  assert.doesNotMatch(decision.logMessage ?? '', /will pick it back up/i);
+});
+
+test('decideOnFire treats an OVERLOAD in an idle terminal the same with auto-continue off', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, false, SHORT, 'overload');
+  assert.equal(decision.resume, false);
+  assert.equal(decision.remember, true);
+  assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+});
+
+test('decideOnFire still stands down for a LIMIT in an idle terminal with auto-continue on', () => {
+  const decision = decideOnFire({ kind: 'terminal', pid: 222, status: 'idle' }, true, SHORT, 'limit');
+  assert.equal(decision.remember, false);
+  assert.equal(decision.notice, undefined);
+});
+
 test('every user-facing decideOnFire notice is prefixed like the rest of the extension', () => {
-  const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT);
+  const decision = decideOnFire({ kind: 'terminal', pid: 1, status: 'idle' }, false, SHORT, 'limit');
   assert.match(decision.notice?.message ?? '', /^Limit Break:/);
 });
 

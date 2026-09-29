@@ -2249,6 +2249,40 @@ test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-conti
   }
 });
 
+test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVERLOAD in an IDLE terminal, even with auto-continue on (final review C1)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', { ...pastJob(), reason: 'overload' as const }]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'never a second writer into a terminal automatically');
+    const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+    assert.ok(offer, `an overload is not covered by native auto-continue, so it must be offered; saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.ok(
+      !vscodeFake.outputLines.some((l) => /will pick it back up/.test(l)),
+      'must not claim native auto-continue will handle an overload',
+    );
+    // Remembered: the palette's Resume Now finds it (after the modal, since
+    // an idle terminal holds it).
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
+    const pending = resumeNow();
+    await flush();
+    assert.ok(
+      !vscodeFake.info.some((m) => /nothing pending/.test(m.message)),
+      'the overload job must have been remembered for a manual resume',
+    );
+    vscodeFake.warningOffers.at(-1)?.answer(undefined);
+    await pending;
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+  }
+});
+
 test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
