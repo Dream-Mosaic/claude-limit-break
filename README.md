@@ -5,9 +5,6 @@
 A VS Code extension that waits out Claude Code usage limits and resumes your
 session — without typing into your terminal.
 
-Formerly published as **Claude Limit Buster**. See [Install](#install) if
-you have that version.
-
 ## What it does
 
 When a Claude Code session stops — a usage limit, a `529`, a server error — it
@@ -131,12 +128,6 @@ offers a "Resume anyway" button; dismissing it instead of overriding it is
 recorded as a gave-up session (above), not retried again on its own.
 
 ## Install
-
-Limit Break is a new extension id. Uninstall Claude Limit Buster 0.1.x first;
-its settings do not carry over. If it is still installed, Limit Break warns on
-startup — both would resume the same sessions, and the old one does not check
-whether a session is already open — with an "Uninstall Claude Limit Buster"
-button.
 
 There is no Marketplace listing and there is not intended to be one. Every
 release attaches a built `.vsix`, so the quickest route is to download one from
