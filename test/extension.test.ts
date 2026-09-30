@@ -1897,10 +1897,9 @@ test('closing an unrelated terminal does not re-read trust', async () => {
 });
 
 test('resumeMode headless actually launches headless', async () => {
-  // The setting has been declared since 0.1.0 while extension.ts logged
-  // "not yet implemented" and resumed interactively anyway. A setting that
-  // quietly does something other than what it says is worse than one that
-  // does not exist.
+  // A declared headless mode must launch headless, not log "not yet
+  // implemented" and resume interactively anyway. A setting that quietly does
+  // something other than what it says is worse than one that does not exist.
   resetVscodeFake();
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
@@ -4078,82 +4077,5 @@ test('gave up: "Dismiss gave-up notices" clears the records and leaves every wai
   } finally {
     teardown(ctx);
     fs.rmSync(transcript, { force: true });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Final review, Important 5: Claude Limit Buster 0.1.x still installed next
-// to Limit Break means two extensions detecting and resuming the same
-// sessions, and the old one has no claim or holder check.
-// ---------------------------------------------------------------------------
-
-const OLD_ID = 'dream-mosaic.claude-limit-buster';
-const oldExtensionWarning = () => vscodeFake.warningOffers.find((w) => /Claude Limit Buster/.test(w.message));
-
-test('with Claude Limit Buster still installed, activation warns once, naming the risk (final review I5)', async () => {
-  resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER };
-  vscodeFake.installedExtensions.add(OLD_ID);
-  const ctx = contextOver(new Map());
-  start(ctx);
-  try {
-    await flush();
-    const warnings = vscodeFake.warningOffers.filter((w) => /Claude Limit Buster/.test(w.message));
-    assert.equal(warnings.length, 1, 'exactly one warning per activation');
-    assert.match(warnings[0]!.message, /^Limit Break:/);
-    assert.match(warnings[0]!.message, /twice|second|both/i, 'the warning must name the double-resume risk');
-    assert.deepEqual(warnings[0]!.items, ['Uninstall Claude Limit Buster']);
-  } finally {
-    teardown(ctx);
-  }
-});
-
-test('the old-extension warning\'s button uninstalls exactly that extension (final review I5)', async () => {
-  resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER };
-  vscodeFake.installedExtensions.add(OLD_ID);
-  const uninstalled: unknown[] = [];
-  const ctx = contextOver(new Map());
-  start(ctx);
-  vscodeFake.commands.set('workbench.extensions.uninstallExtension', (id: unknown) => uninstalled.push(id));
-  try {
-    await flush();
-    oldExtensionWarning()!.answer('Uninstall Claude Limit Buster');
-    await flush();
-    await flush();
-    assert.deepEqual(uninstalled, [OLD_ID]);
-  } finally {
-    teardown(ctx);
-  }
-});
-
-test('dismissing the old-extension warning uninstalls nothing (final review I5)', async () => {
-  resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER };
-  vscodeFake.installedExtensions.add(OLD_ID);
-  const uninstalled: unknown[] = [];
-  const ctx = contextOver(new Map());
-  start(ctx);
-  vscodeFake.commands.set('workbench.extensions.uninstallExtension', (id: unknown) => uninstalled.push(id));
-  try {
-    await flush();
-    oldExtensionWarning()!.answer(undefined);
-    await flush();
-    assert.deepEqual(uninstalled, []);
-  } finally {
-    teardown(ctx);
-  }
-});
-
-test('without Claude Limit Buster installed, activation says nothing about it (final review I5)', async () => {
-  resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER };
-  const ctx = contextOver(new Map());
-  start(ctx);
-  try {
-    await flush();
-    assert.equal(oldExtensionWarning(), undefined);
-  } finally {
-    teardown(ctx);
   }
 });

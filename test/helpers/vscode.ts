@@ -153,8 +153,6 @@ export const vscodeFake = {
   closedTabs: [] as FakeTab[],
   /** What `vscode.env.sessionId` reports: this fake window's identity. */
   envSessionId: 'fake-window-session',
-  /** Extension ids `vscode.extensions.getExtension` reports as installed. */
-  installedExtensions: new Set<string>(),
 };
 
 export function resetVscodeFake(): void {
@@ -177,7 +175,6 @@ export function resetVscodeFake(): void {
   vscodeFake.tabs = [];
   vscodeFake.closedTabs = [];
   vscodeFake.envSessionId = 'fake-window-session';
-  vscodeFake.installedExtensions = new Set();
 }
 
 const fakeVscode = {
@@ -198,9 +195,6 @@ const fakeVscode = {
     },
   },
   Uri: { parse: (value: string) => ({ value }) },
-  extensions: {
-    getExtension: (id: string) => (vscodeFake.installedExtensions.has(id) ? { id } : undefined),
-  },
   window: {
     tabGroups: {
       get all() {

@@ -11,12 +11,9 @@ import { URL } from 'node:url';
  * This module polls the GitHub Releases API by hand and decides, purely,
  * whether to say something about it.
  *
- * `/releases/latest` cannot be used: it excludes pre-releases, and every
- * release of this project so far is published as a pre-release (verified
- * against the live API on 2026-09-23 - `gh api
- * repos/Dream-Mosaic/claude-limit-break/releases/latest` returns 404, while
- * `.../releases` lists v0.1.2 and v0.1.1, both `"prerelease": true`). The
- * newest tag is derived from the releases list instead (see {@link newestTag}).
+ * `/releases/latest` cannot be relied on: it excludes pre-releases and
+ * returns 404 for a project that has only published those. The newest tag is
+ * derived from the releases list instead (see {@link newestTag}).
  */
 
 // ---------------------------------------------------------------------------

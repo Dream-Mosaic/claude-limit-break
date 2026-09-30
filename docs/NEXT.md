@@ -3,9 +3,7 @@
 State as of 2026-09-25, after the Limit Break 1.0 plan (both lanes) and its
 final review fix wave landed on
 `claude/limit-break-1.0-cloud`. Read
-[design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first;
-both predate the rename and still say "Claude Limit Buster" — that is a
-historical record, not a live reference.
+[design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
 
 ## Settled (unlikely to need revisiting)
 
@@ -19,8 +17,7 @@ historical record, not a live reference.
   out a newer one exists.
 - **Extension identity:** package id `claude-limit-break`, extension id
   `dream-mosaic.claude-limit-break`, setting/command namespace
-  `claudeLimitBreak.*`. Renamed from Claude Limit Buster in Task 8
-  (`32a1515`); README's Install section carries the uninstall note.
+  `claudeLimitBreak.*`.
 
 ## Known limitations
 
