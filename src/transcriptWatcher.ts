@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -495,10 +495,17 @@ export class TranscriptWatcher {
                 // ...). Taken only when it is a string, and left off the detection
                 // otherwise, so the fire decision can tell the one limit Claude
                 // Code's native auto-continue covers from every other.
-                const limitType =
+                const fieldType =
                     quotaLimits && typeof quotaLimits === 'object'
                         ? (quotaLimits as Record<string, unknown>).rateLimitType
                         : undefined;
+                // An empty string is no type. With no usable field the entry's own
+                // text may still name it ("You've hit your weekly limit"), the same
+                // label the text path reads; the field wins when it is there.
+                const limitType =
+                    typeof fieldType === 'string' && fieldType !== ''
+                        ? fieldType
+                        : candidates.map((c) => rateLimitTypeFromText(normalize(c.text))).find((t) => t !== undefined);
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
                     const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
                     // Decisive either way: this is the authoritative field, so a
@@ -512,7 +519,7 @@ export class TranscriptWatcher {
                                     resumeAt,
                                     rule: 'quota-limits',
                                     text: 'quotaLimits.resetsAt',
-                                    ...(typeof limitType === 'string' ? { rateLimitType: limitType } : {}),
+                                    ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
                                 },
                                 cwd,
                                 file,

@@ -378,3 +378,14 @@ test('the limit type is ignored for an overload, which is always offered', () =>
   assert.deepEqual(five, weekly);
   assert.match(five.logMessage ?? '', /hit a server error/);
 });
+
+
+// Fix round 1 (Task 4c review, minor 2): the label lookup resolves own keys
+// only, so a prototype key is named by itself, never by an inherited member.
+test('decideOnFire names a prototype key as itself, not as an inherited member', () => {
+  for (const type of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const decision = decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', type);
+    assert.match(decision.logMessage ?? '', new RegExp(`hit a ${type.replace(/_/g, ' ')} limit, which`), type);
+    assert.equal(decision.remember, true, type);
+  }
+});

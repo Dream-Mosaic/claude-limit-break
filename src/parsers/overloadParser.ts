@@ -275,7 +275,11 @@ const RULES: OverloadRule[] = [
  * comment marker beside a link still trips the check.
  */
 function quotesSourceCode(text: string): boolean {
-    const withoutUrls = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, ' ');
+    // The link stops at whitespace, at the characters that end a link in source
+    // code (a quote, backtick, semicolon, paren or angle bracket) and at a
+    // comment marker of its own, so "https://a.com";//x and https://a.com/*x*/
+    // still trip the check below instead of being swallowed with the link.
+    const withoutUrls = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/(?:(?!\/\*|\/\/)[^\s"'`;)<>])*/gi, ' ');
     return /=>|\/\/|\/\*|`|\b(?:const|let|var|function|return|assert|expect|describe|import|export)\b/.test(withoutUrls);
 }
 

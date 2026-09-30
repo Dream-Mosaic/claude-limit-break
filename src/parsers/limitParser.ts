@@ -103,7 +103,7 @@ export const RATE_LIMIT_LABELS: Readonly<Record<string, string>> = {
  * guessing would stand the extension down for a limit Claude Code never
  * continues.
  */
-function rateLimitTypeFromText(text: string): string | undefined {
+export function rateLimitTypeFromText(text: string): string | undefined {
     const m = /\byou'?ve hit your (session|weekly|opus|sonnet|fable|usage credit) limit\b/i.exec(text);
     if (!m) {
         return undefined;

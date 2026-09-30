@@ -181,7 +181,10 @@ export function decideOnFire(
   // Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); a type this build
   // does not know is named by its raw key.
   if (rateLimitType !== undefined && rateLimitType !== 'five_hour') {
-    const label = RATE_LIMIT_LABELS[rateLimitType] ?? rateLimitType.replace(/_/g, ' ');
+    // Own keys only: an inherited member ('constructor', '__proto__') is not a label.
+    const label = Object.hasOwn(RATE_LIMIT_LABELS, rateLimitType)
+      ? RATE_LIMIT_LABELS[rateLimitType]
+      : rateLimitType.replace(/_/g, ' ');
     return {
       resume: false,
       remember: true,

@@ -400,3 +400,27 @@ test('the same 529 without a "Retrying in" suffix is still terminal (control for
   assert.equal(detectOverload('API Error (529 {"type":"error"})')?.rule, 'api-error-status');
   assert.equal(detectOverload('API Error: 500 Internal server error')?.rule, 'api-error-status');
 });
+
+// Fix round 1 (Task 4c review, minor 1): the URL that is taken out before the
+// code check stops at the characters that end a link in source code, so a
+// comment marker glued onto it still marks the text as quoted source.
+test('a code marker glued onto a link still marks the text as quoted source', () => {
+  for (const text of [
+    'x = "https://a.com";//API Error: 529 Overloaded',
+    'API Error: 529 Overloaded https://a.com/*x*/',
+    "url = 'https://a.com'//API Error: 529 Overloaded",
+    'API Error: 529 Overloaded (https://a.com)// see docs',
+    'API Error: 529 Overloaded x = https://a.com;//retry',
+    "API Error: 529 Overloaded 'https://a.com'=>retry",
+    'API Error: 529 Overloaded https://a.com;return retry',
+    'API Error: 529 Overloaded (https://a.com)=>retry',
+  ]) {
+    assert.equal(detectOverload(text), undefined, text);
+  }
+});
+
+test('a link that ends a documented render sentence is still not a code marker', () => {
+  const render = `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`;
+  assert.equal(detectOverload(render)?.rule, 'api-error-status');
+  assert.equal(detectOverload(`${render.slice(0, -1)} (https://status.claude.com/incidents/abc?x=1&y=2).`)?.rule, 'api-error-status');
+});

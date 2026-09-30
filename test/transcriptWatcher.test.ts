@@ -1037,3 +1037,32 @@ test('the text path leaves the type undefined when the notice names none', () =>
   assert.ok(out.limit);
   assert.equal(out.limit.detection.rateLimitType, undefined);
 });
+
+
+// Fix round 1 (Task 4c review, minor 2 and 4): a quotaLimits.rateLimitType
+// that is empty reads as absent, and an absent one falls back to the label in
+// the entry's own text.
+test('a quotaLimits entry with an empty rateLimitType leaves the type undefined', () => {
+  const out = make().inspectLine(typedQuotaEntry(''), FILE);
+  assert.equal(out.limit?.detection.rule, 'quota-limits');
+  assert.equal(Object.hasOwn(out.limit!.detection, 'rateLimitType'), false);
+});
+
+test('a quotaLimits entry with no usable rateLimitType takes the type from its own text', () => {
+  for (const type of [undefined, '', 7]) {
+    const weekly = make().inspectLine(typedQuotaEntry(type, "You've hit your weekly limit · resets in 5 hours"), FILE);
+    assert.equal(weekly.limit?.detection.rule, 'quota-limits', 'setup: the structured path');
+    assert.equal(weekly.limit?.detection.rateLimitType, 'seven_day', String(type));
+  }
+});
+
+test('the structured rateLimitType wins over a different label in the text', () => {
+  const out = make().inspectLine(typedQuotaEntry('five_hour', "You've hit your weekly limit · resets in 5 hours"), FILE);
+  assert.equal(out.limit?.detection.rateLimitType, 'five_hour');
+});
+
+test('a quotaLimits entry whose text names no type and whose field has none leaves it undefined', () => {
+  const out = make().inspectLine(typedQuotaEntry(undefined, 'Something went wrong with your plan limits'), FILE);
+  assert.equal(out.limit?.detection.rule, 'quota-limits');
+  assert.equal(Object.hasOwn(out.limit!.detection, 'rateLimitType'), false);
+});
