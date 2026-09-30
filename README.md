@@ -48,7 +48,7 @@ if anyone, already holds a session before it launches a resume for it:
 
 | The session is | Limit Break |
 |---|---|
-| An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The existing stale-tab handling (below) runs afterwards exactly as it always does. |
+| An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The stale-tab handling (below) runs afterwards. |
 | A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
 | An **idle terminal at a usage limit, native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute later it checks that the transcript has grown since the limit; if it has not (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
 | An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. |
@@ -109,7 +109,11 @@ So when a resumed session is still open in a panel, you get a notification
 saying to reopen that tab before typing in it. Reopening fixes it, because a
 restarted panel reads the transcript instead of its memory. Set
 `claudeLimitBreak.onStale` to `reopen` to have the tab closed and reopened for
-you instead of being asked.
+you instead of being asked. Reopening uses Claude Code's own
+`claude-vscode.reopenClosedSession` command, on the one Claude tab in this
+window. A tab in a different VS Code window is out of reach of this window's
+tab API, so there you always get the warning without the button, even with
+`onStale` set to `reopen`.
 
 This is measured, not assumed:
 [docs/research/2026-09-20-panel-fork-experiment.md](docs/research/2026-09-20-panel-fork-experiment.md).
@@ -142,10 +146,8 @@ gh release download $tag --repo Dream-Mosaic/claude-limit-break --pattern "*.vsi
 code --install-extension "$env:TEMP\claude-limit-break-$($tag.TrimStart('v')).vsix" --force
 ```
 
-The tag is named explicitly on purpose: GitHub's idea of "latest" excludes
-pre-releases, and every `0.x` release here is one, so a tagless
-`gh release download` reports `release not found`. `gh release list` does
-include them.
+The tag is looked up first because it is part of the `.vsix` file name used in
+the last line.
 
 To build it yourself instead:
 
@@ -169,7 +171,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | Setting | Default | What it does |
 |---|---|---|
 | `enabled` | `true` | Watch transcripts for limits and server errors. |
-| `autoResume` | `true` | Resume when the cooldown elapses. Off means a notification offers Resume Now instead, and that offer survives a window reload. |
+| `autoResume` | `true` | Resume when the cooldown elapses. Off means a notification offers Resume Now instead, and that offer survives a window reload (unless another window on the same VS Code profile has overwritten the shared list of waiting resumes; see Known limitations in [CHANGELOG.md](CHANGELOG.md)). |
 | `resumeMode` | `interactive` | `interactive` opens a terminal at your normal autonomy. `headless` runs with `-p` and needs an explicit permission mode below or tool calls are denied; opt-in and machine-scoped. |
 | `headlessPermissionMode` | `""` | Permission mode for headless resumes. Empty denies tool calls; headless does not inherit the session's own mode. |
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
