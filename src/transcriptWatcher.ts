@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice, normalize, rateLimitTypeFromText } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -412,12 +412,25 @@ export class TranscriptWatcher {
             }
             : undefined;
         const candidates: Candidate[] = [];
-        collectStrings(entry, candidates, 0, false);
-        // Claude Code tags a genuine limit entry as an API error. When those markers
-        // are present the entry is definitely a rate-limit event, so its text is
-        // trusted outright; otherwise the text has to clear a stricter bar.
-        const flagged = isRateLimitEntry(entry);
-        const apiError = isApiErrorEntry(entry);
+        collectStrings(entry, candidates, 0);
+        // The one admission gate for a resume, limit and overload alike (final
+        // fix wave A, A1 and A2): the entry must be one Claude Code itself
+        // flagged as an API error. Every limit and error message the 2.1.282
+        // binary writes is built by one constructor that sets
+        // `isApiErrorMessage: true` (research-api-errors-binary.md Q1: every
+        // branch of INn returns $o(...)), GitHub #64030 shows the same flag on
+        // 2.1.145, and all 138 limit entries on this machine carry it
+        // (task-4c-report.md). What an unflagged entry holds is someone
+        // TALKING about a limit or an error - the model's prose about a GitHub
+        // or npm rate limit, a thinking block, a Bash description, a user's
+        // paste, a grep hit in a tool_result - and every one of those used to
+        // be able to arm a resume of a session that never stopped (final
+        // review C1). Checked as the literal `true`: a bare `error:
+        // "rate_limit"` string, a 429 or a 5xx status without the flag, no
+        // longer admits an entry (final review M1). Cost if an old build wrote
+        // a limit without the flag: that build's limits are not detected; the
+        // local scan found no such entry.
+        const flagged = entry.isApiErrorMessage === true;
         const maxWait = this.getMaxWaitHours();
         // The real current time: staleness and the grace window are always
         // decided against this, never against the entry's own timestamp.
@@ -435,29 +448,13 @@ export class TranscriptWatcher {
         const writtenAt = rawTimestamp && !Number.isNaN(rawTimestamp.getTime()) ? rawTimestamp : undefined;
         const basis = writtenAt ?? now;
 
-        // The user pasting a limit notice into the chat - or asking about one - must
-        // never arm a resume timer. This is the same rule the overload scan below has
-        // always had; it was never applied to limits, and 4 of 6 ordinary user
-        // questions armed a timer as a result.
-        //
-        // `flagged` has to come first: Claude Code writes its own API-error notices as
-        // synthetic entries that can carry type "user", so a bare type check would
-        // suppress exactly the detection this extension exists for.
-        // A subagent's own transcript need not arm a limit itself (synthesis A3):
-        // a subagent that hits the limit stops its parent, whose own transcript
-        // records the same event too, so an unflagged note in the subagent's own
-        // file that merely quotes what happened - a checkpoint recap, a summary -
-        // must not re-arm. But `flagged` comes first, ahead of the subagent-file
-        // check, same as it already does ahead of the user-type check above: a
-        // subagent that genuinely hits the limit still writes Claude Code's own
-        // rate-limit marker into its own file, and that must still arm (fix round
-        // 1 - the first version of this guard dropped a real limit hit whenever it
-        // landed in a subagents/ file, flagged or not). Turn-end detection below
-        // is unaffected by this gate either way. Overload detection below now has
-        // its own separate subagent-file veto too (Task 4a fix round 1), applied
-        // per candidate rather than gating entry to the loop, so it stays exempt
-        // for flagged entries the same way this gate does.
-        if (flagged || (!isSubagentFile(file) && (apiError || entry.type !== 'user'))) {
+        // Limits only from a flagged entry (see `flagged` above). The entry's
+        // type is not consulted: Claude Code writes its own notices as
+        // synthetic entries that can carry type "user". A flagged entry in a
+        // subagents/ file still arms (Task 3 fix round 1): a subagent that
+        // genuinely hits the limit writes Claude Code's own marker into its own
+        // file too. Turn-end detection above is unaffected by this gate.
+        if (flagged) {
             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
             // on the flagged entry itself - immune to every way the text can be
             // misread (zone, DST, calendar rollover) - so it wins over the text
@@ -478,13 +475,11 @@ export class TranscriptWatcher {
             // one of those renders; if so the quotaLimits branch is skipped
             // outright, whatever its status, and the entry falls through to the
             // ordinary text/overload path below and is routed to overload.
-            const isTransientRateLimit =
-                flagged &&
-                candidates.some((c) => {
-                    const rule = detectOverload(c.text)?.rule;
-                    return rule === 'transient-429' || rule === 'rejected-429';
-                });
-            if (flagged && !isTransientRateLimit) {
+            const isTransientRateLimit = candidates.some((c) => {
+                const rule = detectOverload(c.text)?.rule;
+                return rule === 'transient-429' || rule === 'rejected-429';
+            });
+            if (!isTransientRateLimit) {
                 const quotaLimits = entry.quotaLimits;
                 const resetsAt =
                     quotaLimits && typeof quotaLimits === 'object'
@@ -535,60 +530,30 @@ export class TranscriptWatcher {
                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
                     continue;
                 }
-                // Text inside a tool_result block (or a top-level toolUseResult) is
-                // evidence Claude Code fed back to the model, not a notice it is
-                // delivering now - a `grep` hit quoting a banner is exactly how a real
-                // false positive armed a timer (synthesis A3). Flagged entries are
-                // exempt, same as every other veto here.
-                if (!flagged && candidate.toolResult) {
-                    continue;
-                }
-                // Trusted entries skip the source-code guard inside detectLimit, which is
-                // where that guard now lives.
-                const detection = detectLimit(candidate.text, basis, maxWait, { trusted: flagged, readAt: now });
+                // Every entry read here is flagged, so its text is trusted: it
+                // skips the source-code and quotation guards inside detectLimit,
+                // which exist for text nobody vouched for. The tool_result veto
+                // that used to sit here went with the unflagged path (A1).
+                const detection = detectLimit(candidate.text, basis, maxWait, { trusted: true, readAt: now });
                 if (detection) {
                     return { limit: { detection, cwd, file } };
                 }
             }
         }
-        // No limit here. A transient server error is worth reporting instead, but
-        // ONLY from an entry Claude Code itself marked as an API failure (Task 4c,
-        // R3). Every error message the 2.1.282 binary writes is built by one
-        // constructor that sets `isApiErrorMessage: true` (research-api-errors-
-        // binary.md Q1: every branch of INn returns $o(...)), and GitHub #64030
-        // shows the same flag on 2.1.145, so a genuine overload always carries
-        // it. A scan of the 168 `<synthetic>` assistant entries in this
-        // machine's ~/.claude/projects found 138 flagged (all rate_limit / 429)
-        // and 30 unflagged (all "No response requested."), none an error
-        // render. What is left on the unflagged side is the model or the user
-        // talking ABOUT an error - and this project's own transcripts are full
-        // of that - so it is never read here: the user pasting an error, the
-        // model quoting one on a line of its own, a tool_result holding `grep -n`
-        // output of the renders. An overload carries no reset time of its own,
-        // so a replayed one is judged on age alone: written longer ago than
-        // MAX_OVERLOAD_AGE_MS, it is history rather than something to retry now.
+        // No limit here. A transient server error is worth reporting instead,
+        // from the same flagged entries only (Task 4c R3, tightened to the
+        // literal flag by A2 / final review M1). A scan of the 168
+        // `<synthetic>` assistant entries in this machine's ~/.claude/projects
+        // found 138 flagged (all rate_limit / 429) and 30 unflagged (all "No
+        // response requested."), none an error render; the unflagged side is
+        // the model or the user talking ABOUT an error. An overload carries no
+        // reset time of its own, so a replayed one is judged on age alone:
+        // written longer ago than MAX_OVERLOAD_AGE_MS, it is history rather
+        // than something to retry now.
         const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
-        if (!overloadTooOld && apiError) {
+        if (!overloadTooOld && flagged) {
             for (const candidate of candidates) {
                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
-                    continue;
-                }
-                // An entry can pass `apiError` without being `flagged` (a bare `error`
-                // string, no isApiErrorMessage marker). It still gets the vetoes
-                // below, which keep a tool's raw output and someone else's quotation out of the
-                // overload path (Task 4a: routing the transient-429 and
-                // stream-interruption renders here reopened exactly the
-                // false-positive class Task 3 closed for limits). Mirrors the two
-                // guards the limit loop above already has; flagged entries stay
-                // exempt, same as every other veto in this module.
-                //
-                // Fix round 1 (review finding #3): an unflagged note in a
-                // subagents/ file must not arm an overload retry either, for the
-                // same reason the limit loop above skips subagent files - a
-                // subagent that genuinely hits an overload still writes Claude
-                // Code's own API-error marker (flagged), which stays exempt from
-                // this veto exactly like every other one.
-                if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
                     continue;
                 }
                 const overload = detectOverload(candidate.text);
@@ -622,92 +587,49 @@ export class TranscriptWatcher {
 }
 
 /**
- * Whether a transcript entry is one of Claude Code's own rate-limit errors.
- * Observed shape: `"error":"rate_limit"`, `"isApiErrorMessage":true`,
- * `"apiErrorStatus":429`.
- */
-function isRateLimitEntry(entry: Record<string, unknown>): boolean {
-    if (entry.isApiErrorMessage === true) {
-        return true;
-    }
-    if (typeof entry.error === 'string' && /rate.?limit/i.test(entry.error)) {
-        return true;
-    }
-    return entry.apiErrorStatus === 429 || entry.status === 429;
-}
-
-/**
- * Whether a transcript entry is one of Claude Code's own API failures, of any
- * kind. Broader than {@link isRateLimitEntry}: any 5xx counts, as does the
- * generic marker the CLI writes for "API Error:" turns.
- */
-function isApiErrorEntry(entry: Record<string, unknown>): boolean {
-    if (entry.isApiErrorMessage === true) {
-        return true;
-    }
-    const status = entry.apiErrorStatus ?? entry.status;
-    if (typeof status === 'number' && status >= 500 && status < 600) {
-        return true;
-    }
-    return typeof entry.error === 'string' && entry.error.length > 0;
-}
-
-/**
  * Whether a transcript file lives under a `subagents/` directory (synthesis
- * A3). A subagent that hits the limit stops its parent, whose own top-level
- * transcript records the same event via its own entries, so a subagent
- * file's entries never need to arm a limit timer themselves - see the doc
- * comment on {@link MAX_OFFSET_IDLE_MS} for how common these files are
- * (~85% of everything on disk for a typical project).
+ * A3). A subagent's turn ending says nothing about its parent session, so
+ * extension.ts never lets one clear a gave-up record - see the doc comment on
+ * {@link MAX_OFFSET_IDLE_MS} for how common these files are (~85% of
+ * everything on disk for a typical project).
  */
 export function isSubagentFile(file: string): boolean {
     return /[\\/]subagents[\\/]/i.test(file);
 }
 
-/** One string pulled out of a transcript entry, tagged with where it came from. */
+/**
+ * One string pulled out of a transcript entry. Only a flagged entry's strings
+ * are ever read (A1), so where inside the entry a string sat no longer
+ * matters: the tool_result tag the unflagged path needed went with it.
+ */
 interface Candidate {
     text: string;
-    /**
-     * True inside a `type: "tool_result"` content block, or anywhere under a
-     * top-level `toolUseResult` field - Claude Code's own record of what a
-     * tool returned. Text here is evidence fed back to the model, not a
-     * notice Claude Code is delivering now, so the untrusted limit path in
-     * {@link TranscriptWatcher.inspectLine} skips it outright (synthesis A3).
-     */
-    toolResult: boolean;
 }
 
 /**
  * Pull every human-readable string out of a transcript entry. Limit notices
- * turn up in assistant text blocks, tool results and error fields depending on
- * where the refusal originated, so the shape is not worth hard-coding.
- *
- * `inToolResult` is threaded down from the caller rather than recomputed per
- * string: once a `tool_result` content block (or the `toolUseResult` field)
- * is entered, every string anywhere inside it - however deeply nested -
- * carries the same origin.
+ * turn up in assistant text blocks and error fields depending on where the
+ * refusal originated, so the shape is not worth hard-coding.
  */
-function collectStrings(value: unknown, out: Candidate[], depth: number, inToolResult: boolean): void {
+function collectStrings(value: unknown, out: Candidate[], depth: number): void {
     if (depth > 6 || out.length > 200) {
         return;
     }
     if (typeof value === 'string') {
         if (value.length > 8) {
-            out.push({ text: value, toolResult: inToolResult });
+            out.push({ text: value });
         }
         return;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            collectStrings(item, out, depth + 1, inToolResult);
+            collectStrings(item, out, depth + 1);
         }
         return;
     }
     if (value && typeof value === 'object') {
-        const obj = value as Record<string, unknown>;
-        const isToolResult = inToolResult || obj.type === 'tool_result';
-        for (const [key, item] of Object.entries(obj)) {
-            collectStrings(item, out, depth + 1, isToolResult || key === 'toolUseResult');
+        for (const item of Object.values(value as Record<string, unknown>)) {
+            collectStrings(item, out, depth + 1);
         }
     }
 }
