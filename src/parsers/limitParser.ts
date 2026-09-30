@@ -12,6 +12,16 @@ export interface LimitDetection {
   resumeAt: Date;
   rule: string;
   text: string;
+  /**
+   * Which usage limit this is, in Claude Code's own vocabulary (`five_hour`,
+   * `seven_day`, `seven_day_opus`, `seven_day_sonnet`,
+   * `seven_day_overage_included`, `overage`), when it can be told: the
+   * watcher reads it from `quotaLimits.rateLimitType`, and detectLimit from
+   * the label in "You've hit your <label> limit". Absent otherwise - the key
+   * is left off, not set to undefined. It exists because Claude Code's native
+   * auto-continue covers the five-hour limit only (see holderPolicy.ts).
+   */
+  rateLimitType?: string;
 }
 
 interface Rule {
@@ -66,6 +76,41 @@ export function looksLikeLimitMessage(text: string): boolean {
     return LIMIT_HINTS.some((re) => re.test(t));
 }
 const HOUR_MS = 3_600_000;
+
+/**
+ * The label Claude Code puts in "You've hit your <label> limit" for each usage
+ * limit type - the 2.1.282 binary's own map (`vue`, research-api-errors-
+ * binary.md Q1), keyed by the `rateLimitType` the same build writes into
+ * `quotaLimits`. The label is lower-cased here; the text is matched without
+ * regard to case. One table serves both directions: detectLimit reads the type
+ * back out of a notice's label, and holderPolicy names the label in its log
+ * line.
+ */
+export const RATE_LIMIT_LABELS: Readonly<Record<string, string>> = {
+    five_hour: 'session',
+    seven_day: 'weekly',
+    seven_day_opus: 'Opus',
+    seven_day_sonnet: 'Sonnet',
+    seven_day_overage_included: 'Fable',
+    overage: 'usage credit',
+};
+
+/**
+ * The limit type a notice names, or undefined when it names none. Only the
+ * exact "You've hit your <label> limit" form counts: Claude Code's other limit
+ * wordings (the pre-2.1 "Claude AI usage limit reached", "You've reached your
+ * Fable 5 limit", a "monthly limit") do not say which window tripped, and
+ * guessing would stand the extension down for a limit Claude Code never
+ * continues.
+ */
+export function rateLimitTypeFromText(text: string): string | undefined {
+    const m = /\byou'?ve hit your (session|weekly|opus|sonnet|fable|usage credit) limit\b/i.exec(text);
+    if (!m) {
+        return undefined;
+    }
+    const label = (m[1] ?? '').toLowerCase();
+    return Object.entries(RATE_LIMIT_LABELS).find(([, name]) => name.toLowerCase() === label)?.[0];
+}
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 /** Keywords that legitimately introduce a "come back at/in ..." clause. */
@@ -460,7 +505,8 @@ export function detectLimit(
         if (at.getTime() < readAt.getTime() - RESET_GRACE_MS) {
             continue;
         }
-        return { resumeAt: at, rule: rule.id, text };
+        const rateLimitType = rateLimitTypeFromText(text);
+        return { resumeAt: at, rule: rule.id, text, ...(rateLimitType !== undefined ? { rateLimitType } : {}) };
     }
     return undefined;
 }

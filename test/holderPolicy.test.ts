@@ -286,3 +286,106 @@ test('peerLabel quotes a name and leaves a bare pid fallback unquoted', () => {
   assert.equal(peerLabel({ pid: 7, name: 'a\nb' }), '"a b"');
   assert.equal(peerLabel({ pid: 7, name: undefined }), '7');
 });
+
+
+// ---------------------------------------------------------------------------
+// Task 4c (R4): Claude Code's native auto-continue arms for the five-hour
+// limit ONLY (research-api-errors-binary.md Q4: the arm gate requires
+// status "rejected" and rateLimitType "five_hour"). A weekly, Opus, Sonnet,
+// Fable or usage-credit limit is never continued natively, so standing down
+// for it would strand the session. An unknown type keeps the old behaviour:
+// the native-continue check still offers the job back if nothing grew.
+// ---------------------------------------------------------------------------
+
+const IDLE_TERMINAL = { kind: 'terminal', pid: 222, status: 'idle' } as const;
+
+for (const type of ['five_hour', undefined]) {
+  test(`decideOnFire stands down for native auto-continue on an idle terminal with auto-continue on (${type})`, () => {
+    const decision = decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', type);
+    assert.equal(decision.resume, false);
+    assert.equal(decision.remember, false);
+    assert.equal(decision.notice, undefined);
+    assert.equal(decision.awaitNativeContinue, true);
+    assert.match(decision.logMessage ?? '', /auto-continue should pick it back up/);
+  });
+
+  test(`decideOnFire remembers and offers for an idle terminal with auto-continue off (${type})`, () => {
+    const decision = decideOnFire(IDLE_TERMINAL, false, SHORT, 'limit', type);
+    assert.equal(decision.resume, false);
+    assert.equal(decision.remember, true);
+    assert.equal(decision.awaitNativeContinue, undefined);
+    assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+    assert.match(decision.logMessage ?? '', /auto-continue is off/);
+  });
+}
+
+for (const autoContinueOn of [true, false]) {
+  test(`decideOnFire remembers and offers for a seven_day limit in an idle terminal, auto-continue ${autoContinueOn ? 'on' : 'off'}`, () => {
+    const decision = decideOnFire(IDLE_TERMINAL, autoContinueOn, SHORT, 'limit', 'seven_day');
+    assert.equal(decision.resume, false, 'an idle terminal is a live second writer: never auto-spawn');
+    assert.equal(decision.remember, true, 'native auto-continue will not run, so it must stay recoverable');
+    assert.equal(decision.awaitNativeContinue, undefined, 'nothing native to wait for');
+    assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
+    assert.equal(
+      decision.notice?.message,
+      `Limit Break: the limit has reset for session ${SHORT}, and it is open in a terminal. Continue it there.`,
+    );
+    assert.equal(
+      decision.logMessage,
+      `Session ${SHORT} is open in a terminal (pid 222) and hit a weekly limit, which Claude Code's own ` +
+        `auto-continue does not cover; not starting a second writer.`,
+    );
+  });
+}
+
+test('decideOnFire names the limit in the log line for every non-five-hour type', () => {
+  for (const [type, label] of [
+    ['seven_day', 'weekly'],
+    ['seven_day_opus', 'Opus'],
+    ['seven_day_sonnet', 'Sonnet'],
+    ['seven_day_overage_included', 'Fable'],
+    ['overage', 'usage credit'],
+  ]) {
+    const decision = decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', type);
+    assert.match(decision.logMessage ?? '', new RegExp(`hit a ${label} limit, which Claude Code's own auto-continue does not cover`), type);
+    assert.equal(decision.remember, true, type);
+    assert.equal(decision.awaitNativeContinue, undefined, type);
+  }
+});
+
+test('decideOnFire treats an unrecognised limit type string as not covered, and still names it', () => {
+  const decision = decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', 'seven_day_haiku');
+  assert.equal(decision.remember, true);
+  assert.equal(decision.awaitNativeContinue, undefined);
+  assert.match(decision.logMessage ?? '', /hit a seven day haiku limit/);
+});
+
+test('the limit type changes nothing for panels, for no holder, for a failed listing or for a busy terminal', () => {
+  for (const type of ['five_hour', 'seven_day', undefined]) {
+    assert.equal(decideOnFire({ kind: 'none' }, true, SHORT, 'limit', type).resume, true, `none ${type}`);
+    assert.equal(decideOnFire('unknown', true, SHORT, 'limit', type).resume, true, `unknown ${type}`);
+    assert.equal(decideOnFire({ kind: 'panel', pid: 1, bridged: false, status: 'idle' }, true, SHORT, 'limit', type).resume, true, `idle panel ${type}`);
+    assert.equal(decideOnFire({ kind: 'panel', pid: 1, bridged: false, status: 'busy' }, true, SHORT, 'limit', type).remember, false, `busy panel ${type}`);
+    const busyTerminal = decideOnFire({ kind: 'terminal', pid: 2, status: 'busy' }, true, SHORT, 'limit', type);
+    assert.equal(busyTerminal.resume, false, `busy terminal ${type}`);
+    assert.equal(busyTerminal.remember, false, `busy terminal ${type}`);
+  }
+});
+
+test('the limit type is ignored for an overload, which is always offered', () => {
+  const five = decideOnFire(IDLE_TERMINAL, true, SHORT, 'overload', 'five_hour');
+  const weekly = decideOnFire(IDLE_TERMINAL, true, SHORT, 'overload', 'seven_day');
+  assert.deepEqual(five, weekly);
+  assert.match(five.logMessage ?? '', /hit a server error/);
+});
+
+
+// Fix round 1 (Task 4c review, minor 2): the label lookup resolves own keys
+// only, so a prototype key is named by itself, never by an inherited member.
+test('decideOnFire names a prototype key as itself, not as an inherited member', () => {
+  for (const type of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const decision = decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', type);
+    assert.match(decision.logMessage ?? '', new RegExp(`hit a ${type.replace(/_/g, ' ')} limit, which`), type);
+    assert.equal(decision.remember, true, type);
+  }
+});

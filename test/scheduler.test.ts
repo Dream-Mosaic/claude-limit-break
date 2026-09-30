@@ -283,3 +283,23 @@ test('a genuinely new reset (different baseResumeAtMs) still replaces an earlier
   assert.equal(s.schedule(jobWithBase(SESSION_A, soonerBase, soonerBase)), true);
   assert.equal(s.current?.resumeAtMs, soonerBase);
 });
+
+// Task 4c (R4): the limit type is part of the job the memento holds, so it
+// survives a window reload; a job persisted without it reads as undefined.
+test('a job keeps its rateLimitType across reconstruction from the memento', (t) => {
+  const m = memento();
+  const first = new ResumeScheduler(m, silent);
+  t.after(() => first.dispose());
+  first.schedule({ ...job(Date.now() + 60_000), rateLimitType: 'seven_day' });
+  const second = new ResumeScheduler(m, silent);
+  t.after(() => second.dispose());
+  assert.equal(second.current?.rateLimitType, 'seven_day');
+});
+
+test('a job persisted without rateLimitType reads back with it undefined', (t) => {
+  const m = memento({ 'claudeLimitBreak.pending': [job(Date.now() + 60_000)] });
+  const s = new ResumeScheduler(m, silent);
+  t.after(() => s.dispose());
+  assert.ok(s.current);
+  assert.equal(s.current.rateLimitType, undefined);
+});

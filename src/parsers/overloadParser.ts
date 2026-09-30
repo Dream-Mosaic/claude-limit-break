@@ -54,12 +54,19 @@ const ERROR_MARKERS = [
  * own backoff. The colon form ("API Error: 529 ...") never carries this
  * suffix and stays terminal/actionable (synthesis A5; prior-art
  * 1-autoretry-detection.md "Three gaps" #1, overload.test.js:83-85: "Acting
- * on it would interrupt Claude's own backoff"). Matched on the "Retrying
- * in Ns .. attempt k/n" pair alone, not on the parens or the status code, so
- * it covers every code, second count and attempt ratio Claude Code might
- * render without needing a rule per variant.
+ * on it would interrupt Claude's own backoff").
+ *
+ * Matched on "Retrying in <number>" alone (Task 4c, R2): every countdown line
+ * means Claude Code is still retrying, whatever else it carries. The attempt
+ * counter is optional ("· Retrying in 12s" has none) and the unit is spelled
+ * two ways ("5s", and "1 seconds…" in the older parens render, GitHub #1166),
+ * so neither is part of the pattern - nor are the parens or the status code,
+ * which keeps it covering every code, count and ratio without a rule per
+ * variant. The 2.1.282 binary builds this line only inside its terminal UI
+ * component (research-api-errors-binary.md Q3) and never writes it to a
+ * transcript, so ignoring it cannot lose a real stop.
  */
-const IN_FLIGHT_RETRY_RE = /\bretrying in\s*\d+s\b[^\n]{0,60}\battempt\s*\d{1,2}\/\d{1,2}\b/i;
+const IN_FLIGHT_RETRY_RE = /\bretrying in\s*\d/i;
 
 /**
  * The transient-429 render Claude Code writes when the server is throttling
@@ -75,6 +82,32 @@ const IN_FLIGHT_RETRY_RE = /\bretrying in\s*\d+s\b[^\n]{0,60}\battempt\s*\d{1,2}
 const TRANSIENT_429_RE = /\bapi error:\s*server is temporarily limiting requests\b[^\n]{0,40}\bnot your usage limit\b/i;
 
 /**
+ * The other 429 render that is an overload, not a limit (Task 4c, R1): "API
+ * Error: Request rejected (429) · this may be a temporary capacity issue. If
+ * it persists, check https://status.claude.com." (code.claude.com/docs/en/
+ * errors.md, "Rate Limiting"). Anchored on the "temporary capacity issue"
+ * tail, not on the head alone: the head is what the binary writes ahead of
+ * ANY raw 429 message the API sent (INn: `Request rejected (429) · ${we||Pe}`),
+ * and one real transcript on this machine (Claude Code 2.1.267) reads "API
+ * Error: Request rejected (429) · Claude AI usage limit reached|1789071998" -
+ * a usage limit with a reset time, which the limit parser owns. Only the
+ * fallback text Claude Code itself substitutes when the API sent none says
+ * "this may be a temporary capacity issue". Like TRANSIENT_429_RE it has to be
+ * claimed before looksLikeOverloadMessage's "a 429 belongs to the limit
+ * parser" carve-out, or both parsers drop it.
+ */
+const REJECTED_429_RE = /\bapi error:\s*request rejected \(429\)[^\n]{0,10}\bthis may be a temporary capacity issue\b/i;
+
+/**
+ * "API Error: No response from API (waited 3m, then 10m on the retry). If a
+ * proxy or gateway on your network holds responses until they complete, raise
+ * API_TIMEOUT_MS or CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS to wait longer."
+ * (errors.md, "Connection and Timeout Errors"). The wait times vary, so the
+ * pattern stops at the fixed head.
+ */
+const NO_RESPONSE_RE = /\bapi error:\s*no response from api\b/i;
+
+/**
  * The stream-interruption family: a turn Claude Code's own byte-watchdog
  * finalized after a suspend/sleep, a dropped connection, or a stalled
  * stream - real content was already yielded, so Claude Code's built-in
@@ -84,12 +117,20 @@ const TRANSIENT_429_RE = /\bapi error:\s*server is temporarily limiting requests
  * variant is anchored on the literal "API Error:" head, as the brief
  * requires, so prose that merely mentions sleep or a dropped connection never
  * matches - the alternation only starts matching after that head is seen.
- * The seven variants themselves are exactly the ones the prior-art evidence
- * names (1-autoretry-detection.md:80-81, 2-autoretry-resume.md:296-297); no
- * additional phrasing has been invented beyond what that evidence shows.
+ *
+ * The set is the docs page's own list now (Task 4c): code.claude.com/docs/en/
+ * errors.md, "Mid-Response Failures", names six renders, each ending "The
+ * response above may be incomplete." - server error, connection lost, sleep,
+ * "the response stopped arriving", "part of the response never arrived" and
+ * "the response stream was malformed" (the last two are new here). The
+ * "before a response was produced" forms and "the response stalled" are not on
+ * that page; they stay because the prior-art evidence names them
+ * (1-autoretry-detection.md:80-81, 2-autoretry-resume.md:296-297) and a
+ * render Claude Code has ever written is worth keeping. Nothing beyond those
+ * two sources is invented.
  */
 const STREAM_INTERRUPTED_RE =
-    /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
+    /\bapi error:\s*(?:your computer went to sleep (?:mid-response|before a response was produced)|the response stopped arriving|part of the response never arrived|the response stream was malformed|connection lost (?:mid-response|before a response was produced)|server error mid-response|the response stalled before a response was produced)\b/i;
 
 /**
  * The head every genuine "API Error" banner line starts with - optionally
@@ -120,11 +161,13 @@ const LINE_HEAD_RE = /^\s*(?:[⏺●]\s*)?api error\s*[:(]/i;
  * normalized text, so it keeps matching through normalize()'s usual
  * quote/dash/whitespace cleanup.
  *
- * Used for the two rules marked `lineAnchored` on every path, and - final
- * review, Important 4 - for EVERY rule on the unflagged path (`anchored`, see
- * detectOverload): short unflagged assistant prose ("npm install failed:
- * fetch failed", "the request timed out", "Earlier we saw API Error: 529")
- * armed a retry through the older, unanchored rules until then.
+ * Used for the rules marked `lineAnchored`: the ones whose wording is ordinary
+ * English that turns up in prose and in a quoted shell argument, so the "API
+ * Error:" head is the only thing that makes it a banner. (Overload detection
+ * only ever reads an entry Claude Code itself flagged as an API error -
+ * inspectLine, Task 4c R3 - so unflagged prose never reaches these rules; the
+ * anchor is the second line of defence, for a flagged entry whose text quotes
+ * a render mid-sentence.)
  */
 function matchApiErrorLine(rawText: string, innerRe: RegExp): RegExpExecArray | undefined {
     for (const line of rawText.split(/\r?\n/)) {
@@ -145,7 +188,10 @@ export function looksLikeOverloadMessage(text: string): boolean {
     // while explicitly disclaiming being a usage limit - it must be claimed as
     // an overload before the carve-out below hands anything "rate limit"-shaped
     // to the limit parser, or it is dropped by both (see TRANSIENT_429_RE).
-    if (TRANSIENT_429_RE.test(t)) {
+    // The "Request rejected (429) ... temporary capacity issue" render is the
+    // same case: its "(429)" would otherwise trip the limit hint (see
+    // REJECTED_429_RE).
+    if (TRANSIENT_429_RE.test(t) || REJECTED_429_RE.test(t)) {
         return true;
     }
     // A 429 is a rate limit, not an overload: it belongs to the limit parser,
@@ -175,9 +221,12 @@ const RULES: OverloadRule[] = [
         re: /\b(?:internal server error|service unavailable|bad gateway|gateway timeout|upstream connect error)\b/i,
     },
     {
-        // "API Error: Connection error.", "fetch failed", "socket hang up"
+        // "API Error: Connection error.", "fetch failed", "socket hang up", and
+        // the documented "API Error: Connection to the API was lost (ECONNRESET)"
+        // - whose OS error code varies (INn interpolates it), so the phrase is
+        // matched, not just the one code.
         id: 'connection-error',
-        re: /\b(?:api error:?\s*connection error|connection error\b[^\n]{0,30}\bretr|fetch failed|socket hang up|econnreset|econnrefused|etimedout|enotfound|network error)\b/i,
+        re: /\b(?:api error:?\s*connection (?:error|to the api was lost)|connection error\b[^\n]{0,30}\bretr|fetch failed|socket hang up|econnreset|econnrefused|etimedout|enotfound|network error)\b/i,
     },
     {
         // "Request timed out", "API Error: Request timeout"
@@ -188,6 +237,18 @@ const RULES: OverloadRule[] = [
         // "Server is temporarily limiting requests (not your usage limit)"
         id: 'transient-429',
         re: TRANSIENT_429_RE,
+        lineAnchored: true,
+    },
+    {
+        // "Request rejected (429) · this may be a temporary capacity issue."
+        id: 'rejected-429',
+        re: REJECTED_429_RE,
+        lineAnchored: true,
+    },
+    {
+        // "No response from API (waited 3m, then 10m on the retry)."
+        id: 'no-response',
+        re: NO_RESPONSE_RE,
         lineAnchored: true,
     },
     {
@@ -205,9 +266,21 @@ const RULES: OverloadRule[] = [
  * prints embeds the API's JSON body — `API Error (529 {"type":"error",...})` —
  * and braces alone would throw the real thing away. Only the markers that no
  * error message ever carries are grounds for rejection here.
+ *
+ * A URL is taken out first (Task 4c): "//" is one of those markers, and it is
+ * also the second and third character of every link. Claude Code's renders now
+ * end "If it persists, check https://status.claude.com.", so before this, five
+ * of the six documented server-error renders were rejected as quoted source
+ * code - the identical sentence with the scheme removed was detected. A real
+ * comment marker beside a link still trips the check.
  */
 function quotesSourceCode(text: string): boolean {
-    return /=>|\/\/|\/\*|`|\b(?:const|let|var|function|return|assert|expect|describe|import|export)\b/.test(text);
+    // The link stops at whitespace, at the characters that end a link in source
+    // code (a quote, backtick, semicolon, paren or angle bracket) and at a
+    // comment marker of its own, so "https://a.com";//x and https://a.com/*x*/
+    // still trip the check below instead of being swallowed with the link.
+    const withoutUrls = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/(?:(?!\/\*|\/\/)[^\s"'`;)<>])*/gi, ' ');
+    return /=>|\/\/|\/\*|`|\b(?:const|let|var|function|return|assert|expect|describe|import|export)\b/.test(withoutUrls);
 }
 
 /** Pull a bare 5xx status out of a line when the matching rule did not. */
@@ -223,15 +296,14 @@ function sniffStatus(text: string): number | undefined {
 /**
  * Scan one short chunk of text for a transient server failure.
  *
- * `anchored` is the UNFLAGGED path (final review, Important 4): text from an
- * entry Claude Code did not itself mark as an API error is only believed when
- * a rule matches on a line that starts with "API Error" - Claude Code flags
- * its own errors, so an unflagged genuine overload with no such head is the
- * one thing this gives up, and a sentence of the model's own prose that
- * mentions a timeout or a failed fetch is what it stops. Flagged entries
- * leave it off and keep full recall.
+ * The caller decides whether the chunk is Claude Code's own error to begin
+ * with: this only reads text, and inspectLine hands it nothing from an entry
+ * Claude Code did not mark as an API error (Task 4c, R3 - every error message
+ * the binary writes is built with `isApiErrorMessage: true`, so an unmarked
+ * entry is the model or the user talking ABOUT an error). There used to be an
+ * `anchored` mode here for the unmarked path; with that path gone it is too.
  */
-export function detectOverload(rawText: string, opts: { anchored?: boolean } = {}): OverloadDetection | undefined {
+export function detectOverload(rawText: string): OverloadDetection | undefined {
     const text = normalize(rawText);
     if (!text || text.length > MAX_NOTICE_LENGTH) {
         return undefined;
@@ -239,10 +311,9 @@ export function detectOverload(rawText: string, opts: { anchored?: boolean } = {
     if (!looksLikeOverloadMessage(text)) {
         return undefined;
     }
-    // Claude Code is already retrying this one itself (ruling: applies on
-    // every path, flagged or not - it is retrying either way, so nothing here
-    // may schedule a second one on top of its own backoff). Checked ahead of
-    // the RULES loop so it wins even over a matching status-code rule.
+    // Claude Code is already retrying this one itself, so nothing here may
+    // schedule a second one on top of its own backoff. Checked ahead of the
+    // RULES loop so it wins even over a matching status-code rule.
     if (IN_FLIGHT_RETRY_RE.test(text)) {
         return undefined;
     }
@@ -256,7 +327,7 @@ export function detectOverload(rawText: string, opts: { anchored?: boolean } = {
         return undefined;
     }
     for (const rule of RULES) {
-        const m = rule.lineAnchored || opts.anchored ? matchApiErrorLine(rawText, rule.re) : rule.re.exec(text);
+        const m = rule.lineAnchored ? matchApiErrorLine(rawText, rule.re) : rule.re.exec(text);
         if (!m) {
             continue;
         }

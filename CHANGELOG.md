@@ -15,11 +15,16 @@ The first release.
 
 - Watches Claude Code transcripts for usage-limit notices and server errors,
   waits out the cooldown, and resumes the session by id.
-- Treats a stream interrupted because the machine went to sleep, the
-  connection dropped or the response stalled, and a transient 429 that
-  explicitly disclaims being a usage limit, as an overload (retried after a
-  short backoff) rather than a usage limit. A retry Claude Code is already
-  running itself ("Retrying in 5s · attempt 3/10") is recognised and left
+- Treats every transient error Claude Code documents as an overload (retried
+  after a short backoff) rather than a usage limit: a `529` or `500` (including
+  the renders that end "If it persists, check https://status.claude.com."), a
+  transient 429 that disclaims being a usage limit, a request that timed out or
+  got no response, a lost connection, and a response cut off mid-stream
+  because the machine slept, the connection dropped or the stream stalled or
+  was malformed. Errors that are not transient (a rejected API key, an unknown
+  model, usage credits required, a monthly spend limit) are left alone, since
+  resuming could only repeat them. A "Retrying in ..." line, with or without
+  an attempt counter, means Claude Code is still retrying itself and is left
   alone, so its own backoff is not interrupted. Reads the transcript's own
   `quotaLimits.resetsAt` field ahead of parsing the banner text when a
   rate-limit entry carries one, which gets calendar dates, time zones and
@@ -33,9 +38,13 @@ The first release.
   in a subagent's transcript, quoted text and tool output are ignored unless
   Claude Code itself flagged the entry as an API error; a flagged entry is
   still believed wherever its text appears.
-- The model's own prose does not arm an overload retry: text Claude Code did
-  not flag as an API error counts only on a line that starts with
-  "API Error".
+- An overload retry is armed only by an entry Claude Code marked as an API
+  error. Text the model writes or a tool returns, and errors the user pastes,
+  never arm one, even when they quote an error render word for word.
+- Claude Code's own auto-continue covers the five-hour usage limit only, so
+  Limit Break stands down for it only there. A weekly, Opus, Sonnet, Fable or
+  usage-credit limit in an idle terminal is offered as "Resume in Terminal
+  Anyway" instead, because nothing else will continue it.
 - Resumes into a new terminal whose shell process is `claude` itself, with the
   prompt passed as an argument. No shell parses it, and no existing terminal is
   ever written to. Set `claudeLimitBreak.resumeMode` to `headless` to resume

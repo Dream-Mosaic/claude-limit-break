@@ -783,9 +783,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /**
    * Check back on a session left to Claude Code's own auto-continue (final
-   * review, Important 6). decideOnFire stands down for it whenever the
-   * setting reads as on - including when the key is simply absent, which the
-   * CLI reads as on - but the research found the toggle offered to some
+   * review, Important 6). decideOnFire stands down for it - only for a
+   * five-hour limit or one of unknown type (native auto-continue arms for
+   * no other, Task 4c R4), and only while the setting reads as on, including
+   * when the key is simply absent, which the CLI reads as on - but the
+   * research found the toggle offered to some
    * accounts only, and an account without the feature would otherwise have
    * its idle-terminal limit dropped with nothing said at all.
    *
@@ -1112,6 +1114,7 @@ export function activate(context: vscode.ExtensionContext): void {
         autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
         job.sessionId.slice(0, 8),
         job.reason,
+        job.rateLimitType,
       );
       if (decision.logMessage) {
         (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);

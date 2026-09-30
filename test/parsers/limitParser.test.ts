@@ -520,3 +520,37 @@ test('fix round 1: looksLikeQuotedNotice recognises an absolute Windows path wit
   assert.ok(looksLikeQuotedNotice('C:\\Users\\x\\y.ts:12: Claude AI usage limit reached'), 'drive-letter grep prefix');
   assert.equal(looksLikeQuotedNotice("You've hit your session limit \u00b7 resets 12:40pm"), false, '"12:40pm" is not a drive letter');
 });
+
+// ---------------------------------------------------------------------------
+// Task 4c (R4): a text-path detection names the limit TYPE when the notice
+// does. The labels are the 2.1.282 binary's own `vue` map
+// (research-api-errors-binary.md Q1), inverted; holderPolicy uses the type to
+// decide whether Claude Code's native auto-continue covers the limit (it arms
+// for five_hour only, Q4).
+// ---------------------------------------------------------------------------
+
+const LIMIT_TYPE_CASES: [string, string | undefined][] = [
+  ["You've hit your session limit · resets 2am (America/Chicago)", 'five_hour'],
+  ["You've hit your weekly limit · resets 2am (America/Chicago)", 'seven_day'],
+  ["You've hit your Opus limit · resets 2am (America/Chicago)", 'seven_day_opus'],
+  ["You've hit your Sonnet limit · resets 2am (America/Chicago)", 'seven_day_sonnet'],
+  ["You've hit your Fable limit · resets 2am (America/Chicago)", 'seven_day_overage_included'],
+  ["You've hit your usage credit limit · resets 2am (America/Chicago)", 'overage'],
+  // Progress-saved suffix the binary appends (function dh).
+  ["You've hit your weekly limit · resets 2am (America/Chicago) · progress saved", 'seven_day'],
+  // Text that does not name a type leaves it undefined.
+  ['Claude AI usage limit reached. Try again in 5 hours', undefined],
+  ['API Error: Request rejected (429) · Claude AI usage limit reached|1785762000', undefined],
+  ["You've hit your monthly limit · resets 2am (America/Chicago)", undefined],
+];
+
+for (const [text, type] of LIMIT_TYPE_CASES) {
+  test(`detectLimit reads the limit type from the text (${type ?? 'undefined'}): ${text.slice(0, 48)}`, () => {
+    const hit = detectLimit(text, NOW, MAXW, { trusted: true });
+    assert.ok(hit, text);
+    assert.equal(hit.rateLimitType, type);
+    // An absent type is an absent key, so a detection stays deep-equal to one
+    // written before the field existed.
+    assert.equal(Object.hasOwn(hit, 'rateLimitType'), type !== undefined);
+  });
+}

@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, looksLikeQuotedNotice, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -463,24 +463,49 @@ export class TranscriptWatcher {
             // misread (zone, DST, calendar rollover) - so it wins over the text
             // outright when present. Only trusted on a flagged entry: the field
             // turning up on an ordinary turn is not itself a limit event.
-            // The transient-429 render disclaims being a usage limit in its own
-            // text (ruling 1), but Claude Code writes quotaLimits on every
-            // rate_limit entry regardless of which kind of rate limit it is
-            // (fix round 1, review finding #1) - so this field alone is not
-            // enough to tell a genuine limit reset apart from a transient-429
-            // entry that merely happens to carry it. Checked by asking the
-            // overload parser itself (not a duplicated regex) whether any of
-            // the entry's own candidate text is that exact render; if so, the
-            // quotaLimits branch is skipped outright; regardless of its
-            // status, so the entry falls through to the ordinary text/overload
-            // path below and is routed to overload instead.
-            const isTransientRateLimit = flagged && candidates.some((c) => detectOverload(c.text)?.rule === 'transient-429');
+            // The two transient-429 renders disclaim being a usage limit in
+            // their own text ("not your usage limit", "a temporary capacity
+            // issue"). Claude Code attaches quotaLimits only to a REJECTED
+            // usage-limit 429 - the branch that writes the "You've hit your ...
+            // limit" text - and never to a transient one (2.1.282 binary,
+            // research-api-errors-binary.md Q2: the transient branch never calls
+            // the quotaLimits builder), so this skip cannot fire on anything
+            // Claude Code writes today. It stays as belt and braces (an earlier
+            // reading of the evidence said every rate_limit entry carried the
+            // field, and a build that did would turn a transient 429 into a
+            // usage-limit timer): it asks the overload parser itself (not a
+            // duplicated regex) whether any of the entry's own candidate text is
+            // one of those renders; if so the quotaLimits branch is skipped
+            // outright, whatever its status, and the entry falls through to the
+            // ordinary text/overload path below and is routed to overload.
+            const isTransientRateLimit =
+                flagged &&
+                candidates.some((c) => {
+                    const rule = detectOverload(c.text)?.rule;
+                    return rule === 'transient-429' || rule === 'rejected-429';
+                });
             if (flagged && !isTransientRateLimit) {
                 const quotaLimits = entry.quotaLimits;
                 const resetsAt =
                     quotaLimits && typeof quotaLimits === 'object'
                         ? (quotaLimits as Record<string, unknown>).resetsAt
                         : undefined;
+                // Which limit tripped (Task 4c, R4): the same object names it, in
+                // the vocabulary the binary uses everywhere (five_hour, seven_day,
+                // ...). Taken only when it is a string, and left off the detection
+                // otherwise, so the fire decision can tell the one limit Claude
+                // Code's native auto-continue covers from every other.
+                const fieldType =
+                    quotaLimits && typeof quotaLimits === 'object'
+                        ? (quotaLimits as Record<string, unknown>).rateLimitType
+                        : undefined;
+                // An empty string is no type. With no usable field the entry's own
+                // text may still name it ("You've hit your weekly limit"), the same
+                // label the text path reads; the field wins when it is there.
+                const limitType =
+                    typeof fieldType === 'string' && fieldType !== ''
+                        ? fieldType
+                        : candidates.map((c) => rateLimitTypeFromText(normalize(c.text))).find((t) => t !== undefined);
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
                     const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
                     // Decisive either way: this is the authoritative field, so a
@@ -488,7 +513,18 @@ export class TranscriptWatcher {
                     // fall back to the text - it is history (or absurd), and the
                     // text does not get a second opinion on that.
                     return resumeAt
-                        ? { limit: { detection: { resumeAt, rule: 'quota-limits', text: 'quotaLimits.resetsAt' }, cwd, file } }
+                        ? {
+                            limit: {
+                                detection: {
+                                    resumeAt,
+                                    rule: 'quota-limits',
+                                    text: 'quotaLimits.resetsAt',
+                                    ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
+                                },
+                                cwd,
+                                file,
+                            },
+                        }
                         : { inputNeeded };
                 }
             }
@@ -516,46 +552,46 @@ export class TranscriptWatcher {
             }
         }
         // No limit here. A transient server error is worth reporting instead, but
-        // only from an entry Claude Code itself marked as an API failure or from a
-        // non-user entry: the user pasting an error into the chat - or asking about
-        // one - must never kick off an automatic retry. An overload carries no reset
-        // time of its own, so a replayed one is judged on age alone: written longer
-        // ago than MAX_OVERLOAD_AGE_MS, it is history rather than something to retry
-        // now.
+        // ONLY from an entry Claude Code itself marked as an API failure (Task 4c,
+        // R3). Every error message the 2.1.282 binary writes is built by one
+        // constructor that sets `isApiErrorMessage: true` (research-api-errors-
+        // binary.md Q1: every branch of INn returns $o(...)), and GitHub #64030
+        // shows the same flag on 2.1.145, so a genuine overload always carries
+        // it. A scan of the 168 `<synthetic>` assistant entries in this
+        // machine's ~/.claude/projects found 138 flagged (all rate_limit / 429)
+        // and 30 unflagged (all "No response requested."), none an error
+        // render. What is left on the unflagged side is the model or the user
+        // talking ABOUT an error - and this project's own transcripts are full
+        // of that - so it is never read here: the user pasting an error, the
+        // model quoting one on a line of its own, a tool_result holding `grep -n`
+        // output of the renders. An overload carries no reset time of its own,
+        // so a replayed one is judged on age alone: written longer ago than
+        // MAX_OVERLOAD_AGE_MS, it is history rather than something to retry now.
         const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
-        if (!overloadTooOld && (apiError || entry.type !== 'user')) {
+        if (!overloadTooOld && apiError) {
             for (const candidate of candidates) {
                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
                     continue;
                 }
-                // Task 4a: routing the transient-429 and stream-interruption renders
-                // through the overload path (see overloadParser.ts) reopens exactly
-                // the false-positive class Task 3 closed for limits - a tool's raw
-                // output, or someone else's quotation, is evidence Claude Code fed
-                // back to the model or a person is discussing, not a notice it is
-                // delivering now. Mirrors the same two guards the limit loop above
-                // already has; flagged entries stay exempt, same as every other veto
-                // in this module.
+                // An entry can pass `apiError` without being `flagged` (a bare `error`
+                // string, no isApiErrorMessage marker). It still gets the vetoes
+                // below, which keep a tool's raw output and someone else's quotation out of the
+                // overload path (Task 4a: routing the transient-429 and
+                // stream-interruption renders here reopened exactly the
+                // false-positive class Task 3 closed for limits). Mirrors the two
+                // guards the limit loop above already has; flagged entries stay
+                // exempt, same as every other veto in this module.
                 //
                 // Fix round 1 (review finding #3): an unflagged note in a
                 // subagents/ file must not arm an overload retry either, for the
                 // same reason the limit loop above skips subagent files - a
                 // subagent that genuinely hits an overload still writes Claude
                 // Code's own API-error marker (flagged), which stays exempt from
-                // this veto exactly like every other one. Applies to every
-                // overload rule here, old and new, since it is checked before
-                // detectOverload is ever called on the candidate.
+                // this veto exactly like every other one.
                 if (!flagged && (candidate.toolResult || looksLikeQuotedNotice(candidate.text) || isSubagentFile(file))) {
                     continue;
                 }
-                // Final review, Important 4: unflagged text is believed only on a
-                // line that starts with "API Error" - for every rule, not just the
-                // two Task 4a anchored. Short assistant prose ("npm install failed:
-                // fetch failed", "the request timed out", "Earlier we saw API
-                // Error: 529") armed a retry here, and the resume then went out
-                // with the "I hit my usage limit" prompt. Flagged entries keep
-                // full recall, same as every other veto in this module.
-                const overload = detectOverload(candidate.text, { anchored: !flagged });
+                const overload = detectOverload(candidate.text);
                 if (overload) {
                     return { overload: { detection: overload, cwd, file, entryTimestampMs: writtenAt?.getTime() } };
                 }

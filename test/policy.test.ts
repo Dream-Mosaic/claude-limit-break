@@ -140,3 +140,22 @@ test('an unreadable transcript size is left off the job rather than recorded as 
   if (p.kind !== 'schedule') return;
   assert.equal(p.job.transcriptBytesAtDetection, undefined);
 });
+
+// Task 4c (R4): the limit type the detection names rides on the job, so
+// decideOnFire can tell a five-hour limit (native auto-continue covers it)
+// from every other.
+test('a detection that names its limit type puts it on the job', () => {
+  const at = new Date('2026-08-03T17:00:00Z');
+  const typed = { ...hit(at), detection: { ...hit(at).detection, rateLimitType: 'seven_day' } };
+  const p = planResume(typed, 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.rateLimitType, 'seven_day');
+});
+
+test('a detection with no limit type leaves the key off the job, so a persisted job stays as it was', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(Object.hasOwn(p.job, 'rateLimitType'), false);
+});

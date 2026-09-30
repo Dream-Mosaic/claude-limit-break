@@ -41,17 +41,19 @@ Three consequences worth knowing:
 
 Claude Code has its own "Continue automatically at usage limit" behaviour
 (`autoContinueAtUsageLimit`), on by default for an interactive terminal
-session and absent from the VS Code panel. It covers usage limits only — not
-a `529`, a server error or an interrupted stream. Left alone, that setting and this
-extension can both try to continue the same session — Limit Break checks who,
-if anyone, already holds a session before it launches a resume for it:
+session and absent from the VS Code panel. It covers the five-hour (session)
+usage limit only — not the weekly, Opus, Sonnet, Fable or usage-credit limits,
+and not a `529`, a server error or an interrupted stream. Left alone, that
+setting and this extension can both try to continue the same session — Limit
+Break checks who, if anyone, already holds a session before it launches a
+resume for it:
 
 | The session is | Limit Break |
 |---|---|
 | An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The stale-tab handling (below) runs afterwards. |
 | A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
-| An **idle terminal at a usage limit, native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute later it checks that the transcript has grown since the limit; if it has not (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
-| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. |
+| An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute later it checks that the transcript has grown since the limit; if it has not (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
+| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
 
 Two VS Code windows watching the same account can still both detect an
