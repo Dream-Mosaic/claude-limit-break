@@ -4518,3 +4518,161 @@ for (const [type, offered] of [
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A5 (final review M4): the automatic fire's claim lasts as
+// long as the jitter can, so a window whose copy rolled a long delay still
+// finds it taken.
+// ---------------------------------------------------------------------------
+
+test('with randomDelayMaxMinutes 90, a second window firing 80 minutes after the first finds the claim taken (A5, M4)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 90 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a5-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  heldClaims.length = 0;
+  vscodeFake.envSessionId = 'window-A';
+  const job = pastJob();
+  const key = realClaims.claimKeyFor(job);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: window A resumed');
+    assert.deepEqual(
+      heldClaims.map((h) => [h.key, h.untilMs]),
+      [[key, job.baseResumeAtMs + 100 * 60_000]],
+      'held until the reset plus the longest jitter plus ten minutes',
+    );
+    const eightyMinutesLater = Date.now() + 80 * 60_000;
+    assert.equal(realClaims.claimResume(dir, key, eightyMinutesLater, fs, undefined, 'window-B'), 'taken');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fire long past its reset still holds its claim at least as long as an ordinary one (A5)', async () => {
+  // An overdue job restored after VS Code was closed for hours: reset + jitter
+  // + ten minutes is already in the past, and must not make the claim shorter.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 30 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a5b-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  vscodeFake.envSessionId = 'window-A';
+  const threeHoursAgo = Date.now() - 3 * 3_600_000;
+  const job = { ...pastJob(), baseResumeAtMs: threeHoursAgo, resumeAtMs: threeHoursAgo + 60_000 };
+  const key = realClaims.claimKeyFor(job);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: window A resumed');
+    assert.equal(realClaims.claimResume(dir, key, Date.now() + 50 * 60_000, fs, undefined, 'window-B'), 'taken');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A7 (final review M11): disabled means disabled, even for
+// a job scheduled before the setting was turned off.
+// ---------------------------------------------------------------------------
+
+test('a job that fires while Limit Break is disabled resumes nothing and is kept for Resume Now (A7, M11)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { enabled: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimCalls.length = 0;
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'nothing may launch while disabled');
+    assert.ok(
+      vscodeFake.outputLines.some((l) =>
+        l.endsWith(`Limit Break is disabled; kept session ${SESSION.slice(0, 8)} for Resume Now instead of resuming.`),
+      ),
+      `saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+    assert.equal((store.get(READY_KEY) as { sessionId: string }[] | undefined)?.[0]?.sessionId, SESSION);
+    assert.deepEqual(claimCalls, [], 'no claim: an enabled window may still resume its own copy');
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Now still works');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A8 (cloud parked #33): Cancel holds each job's claim so
+// other windows drop their copies - but a fresh plan in the SAME window for
+// the same reset must not be blocked by that window's own claim.
+// ---------------------------------------------------------------------------
+
+test('cancel, then the same reset detected again in this window: it fires, and another window still drops its copy (A8)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a8-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  vscodeFake.envSessionId = 'window-A';
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest!;
+    const resetAt = new Date(Date.now() + 1500);
+    const key = `${SESSION}-${resetAt.getTime()}`;
+    watcher.limitFor(SESSION, resetAt);
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    assert.equal(realClaims.claimOwner(dir, key, fs), 'window-A', 'setup: Cancel holds the claim');
+
+    watcher.limitFor(SESSION, resetAt);
+    assert.equal(fs.existsSync(path.join(dir, `${key}.claim`)), false, 'the fresh plan releases this window\'s own claim');
+    await oneTick();
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, 'the fresh plan fires');
+    assert.equal(
+      realClaims.claimResume(dir, key, Date.now(), fs, undefined, 'window-B'),
+      'taken',
+      'another window firing its copy of the same reset still drops it',
+    );
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fresh plan leaves a claim another window holds alone, and that window\'s claim still drops the fire (A8)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a8b-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  vscodeFake.envSessionId = 'window-A';
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetAt = new Date(Date.now() + 1000);
+    const key = `${SESSION}-${resetAt.getTime()}`;
+    assert.equal(realClaims.claimResume(dir, key, Date.now(), fs, undefined, 'window-B'), 'claimed', 'setup');
+    FakeWatcher.latest!.limitFor(SESSION, resetAt);
+    assert.equal(realClaims.claimOwner(dir, key, fs), 'window-B', 'another window\'s claim is left alone');
+    await oneTick();
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => /claimed by another window/.test(l)));
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+

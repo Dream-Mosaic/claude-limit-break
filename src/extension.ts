@@ -61,6 +61,13 @@ import { continuedSince } from './continuedSince';
 
 const NS = 'claudeLimitBreak';
 
+/**
+ * How far past the latest possible jittered fire an automatic fire's claim is
+ * held (final fix wave A, A5): slack for a window whose tick, `claude agents`
+ * listing or launch runs a little late.
+ */
+const CLAIM_MARGIN_MS = 10 * 60_000;
+
 /** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
 const TRUST_BUTTON = 'Open Claude to Trust';
 
@@ -264,6 +271,18 @@ export function activate(context: vscode.ExtensionContext): void {
     const job = { ...planned, folderTrusted };
     if (!scheduler.schedule(job)) {
       return;
+    }
+    // Final fix wave A, A8 (cloud parked #33): Cancel holds each cancelled
+    // job's claim until its fire time so every OTHER window drops its copy.
+    // But this window cancelling and then detecting the same reset again (the
+    // user retried, and hit the limit again) is a fresh plan, and its own
+    // Cancel claim would drop it at fire as "already claimed by this window".
+    // So a claim THIS window owns on the fresh plan's key is released; one
+    // another window holds is left exactly as it is.
+    const freshKey = claimKeyFor(job);
+    if (claimOwner(claimsDir(), freshKey, fs) === vscode.env.sessionId) {
+      releaseClaim(claimsDir(), freshKey, fs, log);
+      log.info(`Released this window's own claim on ${freshKey} so the fresh plan can fire.`);
     }
     if (folderTrusted === false) {
       log.warn(
@@ -1108,6 +1127,18 @@ export function activate(context: vscode.ExtensionContext): void {
       render();
     }),
     scheduler.onFire((job) => {
+      // Final fix wave A, A7 (final review M11): disabled means disabled,
+      // for a job scheduled before the setting was turned off too. Kept for
+      // Resume Now rather than dropped - turning the extension off is not
+      // asking to lose the session - and checked BEFORE the claim: this
+      // window is not handling the reset, so another window that is still
+      // enabled must remain free to.
+      const s = settings();
+      if (!s.enabled) {
+        rememberReady(job);
+        log.info(`Limit Break is disabled; kept session ${job.sessionId.slice(0, 8)} for Resume Now instead of resuming.`);
+        return;
+      }
       // Task 10: claim this reset before anything else. Every window watching
       // this account can independently detect and schedule the SAME reset -
       // watchScope: machine means every copy of the extension watches every
@@ -1119,8 +1150,20 @@ export function activate(context: vscode.ExtensionContext): void {
       // some other window already won this race: drop entirely, before the
       // autoResume split below, so the off-autoResume path cannot become a
       // backdoor around a lost claim either.
+      //
+      // Final fix wave A, A5 (final review M4): held until the reset plus the
+      // longest jitter the setting in force allows plus ten minutes, not the
+      // ordinary hour from now. Every window's copy of this job fires
+      // somewhere in that jitter band, and randomDelayMaxMinutes is
+      // window-scoped and unbounded: at 90, a copy firing 80 minutes after
+      // this one found an hour-old claim stale and resumed the same reset
+      // again. holdClaim pushes the file's mtime to the deadline, and only
+      // ever forward, so a fire long past its reset (an overdue restore)
+      // still gets at least the ordinary hour.
       const claimKey = claimKeyFor(job);
-      if (claim(claimKey) === 'taken') {
+      const maxJitterMs = Math.max(s.randomDelayMinMinutes, s.randomDelayMaxMinutes) * 60_000;
+      const holdUntil = job.baseResumeAtMs + maxJitterMs + CLAIM_MARGIN_MS;
+      if (holdClaim(claimsDir(), claimKey, Date.now(), holdUntil, fs, log, vscode.env.sessionId) === 'taken') {
         // Worded by who holds it, for the log only - either way the fire is
         // dropped. A claim this window wrote itself (an earlier resume of the
         // same event) used to be reported as "another window", which sent
@@ -1146,7 +1189,6 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(`Session ${job.sessionId.slice(0, 8)} has continued since the limit was detected; not resuming.`);
         return;
       }
-      const s = settings();
       if (!s.autoResume) {
         rememberReady(job);
         log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
