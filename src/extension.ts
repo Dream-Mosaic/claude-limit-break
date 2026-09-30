@@ -41,7 +41,7 @@ import {
   busyFolderPeers,
   type HolderRecord,
 } from './liveSessions';
-import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel } from './holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice } from './holderPolicy';
 import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
@@ -1181,14 +1181,34 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (decision.notice) {
         const notice = decision.notice;
-        void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then((choice) => {
+        void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then(async (choice) => {
           if (choice !== notice.button) {
+            return;
+          }
+          // Final fix wave A, A4 (final review I2): the offer was made on
+          // the holder snapshot from this fire, and the notification does
+          // not auto-dismiss. Look again: a terminal the user has since
+          // come back to and is typing in must not get a second writer.
+          // The job stays remembered for a later, deliberate Resume Now.
+          const rowsNow = detectAgentRows();
+          const holderNow =
+            rowsNow === 'unknown' ? 'unknown' : classifyHolder(rowsNow, job.sessionId, undefined, readHolderRecord);
+          const busyNow = busyAtClickNotice(holderNow, job.sessionId.slice(0, 8));
+          if (busyNow) {
+            log.info(busyNow);
+            void vscode.window.showInformationMessage(busyNow);
+            return;
+          }
+          // Then A3: still idle (or gone, or unknown) is the case the button
+          // was offered for, but a session that has moved on since the
+          // limit is asked about first, like every manual path.
+          if (!(await confirmNotContinued(job))) {
             return;
           }
           // "Resume in Terminal Anyway" takes ownership of the job
           // (forgetReady) exactly as the off-autoResume "Resume Now" button
-          // does, then resumes it - no second confirmation, because this
-          // button IS the confirmation.
+          // does, then resumes it - no holder modal, because this button IS
+          // the confirmation for the holder it was offered on.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
               `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,

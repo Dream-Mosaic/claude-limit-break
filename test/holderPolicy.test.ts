@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel } from '../src/holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice } from '../src/holderPolicy';
 
 const SHORT = '0b3d1f66';
 
@@ -328,7 +328,9 @@ for (const autoContinueOn of [true, false]) {
     assert.equal(decision.notice?.button, 'Resume in Terminal Anyway');
     assert.equal(
       decision.notice?.message,
-      `Limit Break: the limit has reset for session ${SHORT}, and it is open in a terminal. Continue it there.`,
+      // Final fix wave A (A4): the sentence naming the second terminal is new.
+      `Limit Break: the limit has reset for session ${SHORT}, and it is open in a terminal. Continue it there.` +
+        ' Resuming here opens a second terminal on the same conversation.',
     );
     assert.equal(
       decision.logMessage,
@@ -388,4 +390,54 @@ test('decideOnFire names a prototype key as itself, not as an inherited member',
     assert.match(decision.logMessage ?? '', new RegExp(`hit a ${type.replace(/_/g, ' ')} limit, which`), type);
     assert.equal(decision.remember, true, type);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A4 (final review I2): every notice that carries "Resume in
+// Terminal Anyway" says what the button does, and the click looks again.
+// ---------------------------------------------------------------------------
+
+const SECOND_TERMINAL = ' Resuming here opens a second terminal on the same conversation.';
+
+test('every "Resume in Terminal Anyway" notice says the button opens a second terminal (A4)', () => {
+  const notices = {
+    overload: decideOnFire(IDLE_TERMINAL, true, SHORT, 'overload').notice,
+    'non-five-hour': decideOnFire(IDLE_TERMINAL, true, SHORT, 'limit', 'seven_day').notice,
+    'auto-continue off': decideOnFire(IDLE_TERMINAL, false, SHORT, 'limit').notice,
+  };
+  for (const [branch, notice] of Object.entries(notices)) {
+    assert.equal(notice?.button, 'Resume in Terminal Anyway', branch);
+    assert.ok(notice?.message.endsWith(`Continue it there.${SECOND_TERMINAL}`), `${branch}: ${notice?.message}`);
+  }
+  assert.equal(
+    notices.overload?.message,
+    `Limit Break: session ${SHORT} was stopped by a server error, and it is open in a terminal. Continue it there.${SECOND_TERMINAL}`,
+  );
+  assert.equal(
+    notices['auto-continue off']?.message,
+    `Limit Break: the limit has reset for session ${SHORT}, and it is open in a terminal. Continue it there.${SECOND_TERMINAL}`,
+  );
+});
+
+test('busyAtClickNotice stops the click for a holder that is now busy or waiting (A4)', () => {
+  for (const status of ['busy', 'waiting']) {
+    assert.equal(
+      busyAtClickNotice({ kind: 'terminal', pid: 2, status }, SHORT),
+      `Limit Break: session ${SHORT} is now busy in a terminal; not starting a second writer.`,
+      status,
+    );
+    assert.equal(
+      busyAtClickNotice({ kind: 'panel', pid: 3, bridged: false, status }, SHORT),
+      `Limit Break: session ${SHORT} is now busy in a Claude panel; not starting a second writer.`,
+      status,
+    );
+  }
+});
+
+test('busyAtClickNotice lets the click through for an idle holder, no holder, or a failed listing (A4)', () => {
+  assert.equal(busyAtClickNotice(IDLE_TERMINAL, SHORT), undefined);
+  assert.equal(busyAtClickNotice({ kind: 'terminal', pid: 2, status: undefined }, SHORT), undefined, 'an unreported status is idle (fail open)');
+  assert.equal(busyAtClickNotice({ kind: 'panel', pid: 3, bridged: false, status: 'idle' }, SHORT), undefined);
+  assert.equal(busyAtClickNotice({ kind: 'none' }, SHORT), undefined);
+  assert.equal(busyAtClickNotice('unknown', SHORT), undefined);
 });

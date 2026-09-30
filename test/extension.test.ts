@@ -2865,6 +2865,108 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDL
   }
 });
 
+// ---------------------------------------------------------------------------
+// Final fix wave A, A4 (final review I2): "Resume in Terminal Anyway" looks
+// again at click time. The notification does not auto-dismiss, so the
+// holder snapshot it was offered on can be hours old.
+// ---------------------------------------------------------------------------
+
+/** Fire an idle-terminal limit job with auto-continue off, and return its "Resume in Terminal Anyway" offer. */
+const terminalOffer = async () => {
+  await oneTick();
+  const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+  assert.ok(offer, `setup: no terminal offer; saw ${JSON.stringify(vscodeFake.info)}`);
+  return offer;
+};
+
+for (const status of ['busy', 'waiting']) {
+  test(`"Resume in Terminal Anyway" does not resume when the terminal is now ${status} (A4, I2)`, async () => {
+    resetVscodeFake();
+    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    autoContinueOn = false;
+    holderRow('cli', 'idle');
+    const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+    const ctx = contextOver(store);
+    start(ctx);
+    try {
+      const offer = await terminalOffer();
+      holderRow('cli', status);
+      offer.answer('Resume in Terminal Anyway');
+      await flush();
+      await flush();
+      assert.equal(vscodeFake.terminals.length, 0, 'no second writer on a terminal someone is using');
+      assert.ok(
+        vscodeFake.info.some(
+          (m) =>
+            m.message ===
+            `Limit Break: session ${SESSION.slice(0, 8)} is now busy in a terminal; not starting a second writer.`,
+        ),
+        `saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`,
+      );
+      assert.ok(store.get(READY_KEY), 'the job stays remembered for a later Resume Now');
+    } finally {
+      autoContinueOn = true;
+      clearHolders();
+      teardown(ctx);
+    }
+  });
+}
+
+for (const [label, set] of [
+  ['still idle', () => holderRow('cli', 'idle')],
+  ['gone', () => clearHolders()],
+  ['unknown (the listing failed)', () => {
+    fakeAgentRows = 'unknown';
+  }],
+] as const) {
+  test(`"Resume in Terminal Anyway" resumes when the terminal is ${label} at click time (A4)`, async () => {
+    resetVscodeFake();
+    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    autoContinueOn = false;
+    holderRow('cli', 'idle');
+    const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
+    start(ctx);
+    try {
+      const offer = await terminalOffer();
+      set();
+      offer.answer('Resume in Terminal Anyway');
+      await flush();
+      await flush();
+      assert.equal(vscodeFake.terminals.length, 1);
+    } finally {
+      autoContinueOn = true;
+      clearHolders();
+      teardown(ctx);
+    }
+  });
+}
+
+test('"Resume in Terminal Anyway" on a session that continued since detection asks first (A4 after A3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = false;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    const offer = await terminalOffer();
+    fs.appendFileSync(file, USER_TURN);
+    offer.answer('Resume in Terminal Anyway');
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.equal(modal?.message, CONTINUED_MODAL);
+    modal!.answer(undefined);
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0, 'declined: nothing launched');
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('scheduler.onFire resumes anyway, with a coordination sentence, when a DIFFERENT session is busy in the same folder', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
