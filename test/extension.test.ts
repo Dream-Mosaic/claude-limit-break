@@ -3615,6 +3615,11 @@ test('two distinct overload events in the same 10 minutes are both claimed and b
     watcher.overloadFor(SESSION, first);
     await oneTick();
     assert.equal(vscodeFake.terminals.length, 1, 'setup: the first overload must have resumed');
+    // Changed by final fix wave A (A6, the user's decision): a second
+    // overload in a row now waits an extra 15 minutes, so the resumed turn
+    // finishes first here - which resets the streak - and the second
+    // failure is a first retry again. What this test is about is unchanged.
+    watcher.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`, REAL_CWD);
     // A second, separate failure two minutes later - the same 10-minute
     // bucket, and this window's own claim for the first is still fresh.
     watcher.overloadFor(SESSION, first + 120_000);
@@ -4676,3 +4681,147 @@ test('a fresh plan leaves a claim another window holds alone, and that window\'s
   }
 });
 
+// ---------------------------------------------------------------------------
+// Final fix wave A, A6 (final review M8, Goal 4) - the USER'S DECISION: a
+// session's 1st consecutive automatic overload resume keeps the usual random
+// delay, the 2nd-5th add +15/+30/+60/+120 minutes on top of it, a 6th is not
+// scheduled (gave up until it finishes a turn). A turn end resets the count;
+// limit jobs neither count nor back off.
+// ---------------------------------------------------------------------------
+
+const MINUTE = 60_000;
+const BACKOFF_STEPS = [0, 15, 30, 60, 120];
+const OVERLOAD_GAVE_UP = `Limit Break: session ${SESSION.slice(0, 8)} kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`;
+
+type StoredJobLike = { sessionId: string; baseResumeAtMs: number; resumeAtMs: number; reason: string };
+const pendingIn = (store: Map<string, unknown>) => (store.get('claudeLimitBreak.pending') as StoredJobLike[] | undefined) ?? [];
+
+let overloadEntry = Date.now();
+/**
+ * One overload detection for SESSION, and the job it planned (or undefined).
+ * A planned job is cancelled afterwards, so the next detection is not
+ * dropped by the one-job-per-session dedupe; Cancel does not reset the count.
+ * Nothing planned, nothing cancelled: Cancel would also clear the gave-up
+ * state a test may be looking at.
+ */
+const detectOverload = async (store: Map<string, unknown>): Promise<{ job?: StoredJobLike; before: number; after: number }> => {
+  const before = Date.now();
+  overloadEntry += 1;
+  FakeWatcher.latest!.overloadFor(SESSION, overloadEntry);
+  const after = Date.now();
+  const job = pendingIn(store).find((j) => j.sessionId === SESSION);
+  if (job) {
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+  }
+  return { job, before, after };
+};
+
+const assertBackoff = (
+  got: { job?: StoredJobLike; before: number; after: number },
+  backoffMin: number,
+  jitter: [number, number],
+  label: string,
+) => {
+  assert.ok(got.job, `${label}: a job must have been scheduled`);
+  const { job, before, after } = got;
+  assert.ok(
+    job.baseResumeAtMs >= before + backoffMin * MINUTE && job.baseResumeAtMs <= after + backoffMin * MINUTE,
+    `${label}: backoff +${backoffMin}m; base was ${(job.baseResumeAtMs - before) / MINUTE}m out`,
+  );
+  const padding = job.resumeAtMs - job.baseResumeAtMs;
+  assert.ok(
+    padding >= jitter[0] * MINUTE && padding <= jitter[1] * MINUTE,
+    `${label}: the usual random delay ${jitter[0]}-${jitter[1]}m on top; was ${padding / MINUTE}m`,
+  );
+};
+
+for (const [label, config, jitter] of [
+  ['the default random delay', {}, [5, 30]],
+  ['a custom random delay', { randomDelayMinMinutes: 1, randomDelayMaxMinutes: 3 }, [1, 3]],
+] as const) {
+  test(`overload resumes 1-5 of a session wait the usual delay plus 0, 15, 30, 60 and 120 minutes, with ${label} (A6)`, async () => {
+    resetVscodeFake();
+    vscodeFake.config = { claudeCommand: LAUNCHER, ...config };
+    const store = new Map<string, unknown>();
+    const ctx = contextOver(store);
+    start(ctx);
+    try {
+      for (const [i, step] of BACKOFF_STEPS.entries()) {
+        assertBackoff(await detectOverload(store), step, [...jitter], `resume ${i + 1}`);
+      }
+    } finally {
+      teardown(ctx);
+    }
+  });
+}
+
+test('a 6th consecutive overload of a session is not scheduled: it gives up until the session finishes a turn (A6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      assert.ok((await detectOverload(store)).job, `setup: resume ${i + 1} scheduled`);
+    }
+    vscodeFake.warnings = [];
+    const sixth = await detectOverload(store);
+    assert.equal(sixth.job, undefined, 'no 6th resume');
+    assert.deepEqual(vscodeFake.warnings, [OVERLOAD_GAVE_UP]);
+    const tooltip = (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
+    assert.match(tooltip, /kept stopping on server errors/, `the status bar shows it gave up: ${tooltip}`);
+
+    // Warn once: a 7th stays quiet, and is still not scheduled.
+    const seventh = await detectOverload(store);
+    assert.equal(seventh.job, undefined);
+    assert.deepEqual(vscodeFake.warnings, [OVERLOAD_GAVE_UP], 'an automatic repeat is not notified again');
+
+    // A finished turn: working again, so the count and the record go.
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`, REAL_CWD);
+    assertBackoff(await detectOverload(store), 0, [5, 30], 'after the turn');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a turn end resets the overload count (A6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      await detectOverload(store);
+    }
+    FakeWatcher.latest!.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`, REAL_CWD);
+    assertBackoff(await detectOverload(store), 0, [5, 30], 'first after the turn end');
+    assertBackoff(await detectOverload(store), 15, [5, 30], 'second after the turn end');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a limit job in between neither resets the overload count nor is delayed by it (A6)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await detectOverload(store);
+    await detectOverload(store);
+    const resetAt = new Date(Date.now() + 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetAt);
+    const limitJob = pendingIn(store).find((j) => j.sessionId === SESSION);
+    assert.equal(limitJob?.reason, 'limit');
+    assert.equal(limitJob?.baseResumeAtMs, resetAt.getTime(), 'no backoff on a limit');
+    const padding = limitJob!.resumeAtMs - limitJob!.baseResumeAtMs;
+    assert.ok(padding >= 5 * MINUTE && padding <= 30 * MINUTE, 'just the usual random delay');
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    assertBackoff(await detectOverload(store), 30, [5, 30], 'the third overload still counts as the third');
+  } finally {
+    teardown(ctx);
+  }
+});

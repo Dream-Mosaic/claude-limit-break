@@ -53,6 +53,13 @@ export interface PendingJob {
    * type, and for a job persisted before this field existed.
    */
   rateLimitType?: string;
+  /**
+   * The A6 overload backoff this job was planned with (final fix wave A; the
+   * user's decision: +15/+30/+60/+120 minutes for a session's 2nd-5th
+   * consecutive overload resume). Already included in `baseResumeAtMs`;
+   * kept for the log. Absent for a limit and for a first overload retry.
+   */
+  backoffMs?: number;
 }
 
 export interface MementoLike {
@@ -178,7 +185,9 @@ export class ResumeScheduler {
     }
     this.pending.set(job.sessionId, job);
     this.persist();
-    const jitter = job.jitterMs > 0 ? `, +${Math.round(job.jitterMs / 60_000)}m random delay` : '';
+    const jitter =
+      (job.backoffMs ? `, +${Math.round(job.backoffMs / 60_000)}m overload backoff` : '') +
+      (job.jitterMs > 0 ? `, +${Math.round(job.jitterMs / 60_000)}m random delay` : '');
     this.log.info(
       `Resume scheduled for ${new Date(job.resumeAtMs).toLocaleString()} ` +
         `(reason=${job.reason}, sessionId=${job.sessionId}${jitter}, cwd=${job.cwd ?? 'n/a'})`,

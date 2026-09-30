@@ -58,6 +58,7 @@ import {
 } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 import { continuedSince } from './continuedSince';
+import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
 
 const NS = 'claudeLimitBreak';
 
@@ -139,6 +140,14 @@ export function activate(context: vscode.ExtensionContext): void {
    * allows, and the ready-job persistence (#11) is a separate mechanism.
    */
   const gaveUp = new GaveUpState();
+
+  /**
+   * Consecutive overload retries planned per session since its last finished
+   * turn (final fix wave A, A6 - the user's decision; overloadBackoff.ts):
+   * the count that picks each retry's backoff, and gives up at the sixth.
+   * In memory only, like `gaveUp`.
+   */
+  const overloadStreaks = new OverloadStreaks();
 
   /**
    * The one place the status bar is drawn from. Reads `scheduler.jobs` and
@@ -272,6 +281,12 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!scheduler.schedule(job)) {
       return;
     }
+    // A6: counted when a retry is SCHEDULED, not when one launches - every
+    // window sees the same detections and turn ends, so every window's count
+    // agrees, while only one of them launches each resume (overloadBackoff.ts).
+    if (job.reason === 'overload') {
+      overloadStreaks.planned(job.sessionId);
+    }
     // Final fix wave A, A8 (cloud parked #33): Cancel holds each cancelled
     // job's claim until its fire time so every OTHER window drops its copy.
     // But this window cancelling and then detecting the same reset again (the
@@ -314,9 +329,36 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
-    const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage);
+    // A6: an overload retry's backoff comes from how many this session has
+    // had in a row. `undefined` is the sixth: nothing more is scheduled.
+    // Only the id is wanted here, so resolveSession's size is stubbed.
+    const streakId = reason === 'overload' ? resolveSession(hit.file, hit.cwd, () => 0)?.sessionId : undefined;
+    const backoffMs = streakId === undefined ? 0 : overloadBackoffMs(overloadStreaks.count(streakId));
+    const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage, backoffMs ?? 0);
     if (plan.kind === 'ignore') {
       log.info(plan.reason);
+      return;
+    }
+    if (backoffMs === undefined) {
+      // Final fix wave A, A6 (final review M8, Goal 4): the session kept
+      // stopping on server errors through five retries in a row. Nothing is
+      // scheduled or remembered; it gives up - visibly, in the status bar,
+      // and notified once (warn-once, gaveUp.ts) - until it finishes a turn.
+      // Ahead of gaveUp.detected() on purpose: a further overload is the
+      // same streak, not news, so it must not clear the record or re-warn.
+      const sessionId = plan.kind === 'refuse' ? plan.sessionId : plan.job.sessionId;
+      const cwd = plan.kind === 'refuse' ? plan.cwd : plan.job.cwd;
+      log.warn(
+        `Session ${sessionId} kept stopping on server errors (${MAX_OVERLOAD_RESUMES} resumes in a row); ` +
+          'not scheduling another until it finishes a turn.',
+      );
+      const warn = gaveUp.record({ sessionId, cwd, cause: 'overloads', atMs: Date.now() });
+      render();
+      if (warn) {
+        void vscode.window.showWarningMessage(gaveUpNotice({ cause: 'overloads', sessionId, cwd }));
+      } else {
+        log.info(`Already warned about this for ${sessionId}; not notifying again until its next detection.`);
+      }
       return;
     }
     // A new detection for a session - refused or scheduled, limit or
@@ -355,6 +397,7 @@ export function activate(context: vscode.ExtensionContext): void {
           new Date(),
           randomJitterMs,
           readUsage,
+          backoffMs,
         );
         if (forced.kind !== 'schedule') {
           log.warn(`Could not resume ${hit.file} even with the budget lifted: ${forced.reason}`);
@@ -1097,6 +1140,11 @@ export function activate(context: vscode.ExtensionContext): void {
       if (ended && gaveUp.turnEnded(ended.sessionId)) {
         log.info(`Session ${ended.sessionId} finished a turn; clearing its gave-up state.`);
         render();
+      }
+      // A6: a finished turn ends a run of server errors; the next overload
+      // retry of this session is a first one again.
+      if (ended && overloadStreaks.turnEnded(ended.sessionId)) {
+        log.info(`Session ${ended.sessionId} finished a turn; its overload retries start over.`);
       }
       const s = settings();
       if (!s.enabled) {
