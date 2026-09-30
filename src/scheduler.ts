@@ -155,6 +155,16 @@ export class ResumeScheduler {
     if (existing && existing.resumeAtMs >= Date.now()) {
       const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
       if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
+        // Final fix wave A, A9: the dropped re-detection may know which limit
+        // this is when the first detection did not (a text-only notice, then
+        // the flagged entry's quotaLimits). decideOnFire reads the type, so
+        // the job adopts it - only onto a job with none, only for the same
+        // reset, and never its schedule or deadline.
+        if (sameReset && existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
+          existing.rateLimitType = job.rateLimitType;
+          this.persist();
+          this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
+        }
         this.log.info(
           sameReset
             ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +
