@@ -142,7 +142,7 @@ export function decideOnFire(
   // setting is irrelevant and the idle terminal is offered below exactly as
   // if it were off. Before this, the default (a missing key reads as on)
   // dropped every overload in an idle terminal with a log line claiming
-  // auto-continue would handle it; 0.1.2 used to resume those.
+  // auto-continue would handle it.
   if (reason === 'overload') {
     return {
       resume: false,

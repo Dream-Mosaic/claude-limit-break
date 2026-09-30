@@ -1897,10 +1897,9 @@ test('closing an unrelated terminal does not re-read trust', async () => {
 });
 
 test('resumeMode headless actually launches headless', async () => {
-  // The setting has been declared since 0.1.0 while extension.ts logged
-  // "not yet implemented" and resumed interactively anyway. A setting that
-  // quietly does something other than what it says is worse than one that
-  // does not exist.
+  // A declared headless mode must launch headless, not log "not yet
+  // implemented" and resume interactively anyway. A setting that quietly does
+  // something other than what it says is worse than one that does not exist.
   resetVscodeFake();
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
