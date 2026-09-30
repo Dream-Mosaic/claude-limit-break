@@ -57,6 +57,7 @@ import {
   cleanupStaleClaims,
 } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
+import { continuedSince } from './continuedSince';
 
 const NS = 'claudeLimitBreak';
 
@@ -690,8 +691,43 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
+   * Final fix wave A, A3 (final review I1): the session has moved on since
+   * its stop was detected - a real user or assistant entry appended after
+   * the job's detection-time size (continuedSince.ts). A job with no such
+   * size (an older build's) or an unreadable transcript reads as not
+   * continued, which is how every resume behaved before this check.
+   */
+  const hasContinued = (job: PendingJob): boolean => continuedSince(job.transcript, job.transcriptBytesAtDetection);
+
+  /**
+   * A3's gate for every MANUAL path: the resumeNow command, the Resume Now
+   * notification button, the native-continue offer's button (both through
+   * offerResumeNow) and "Resume in Terminal Anyway". A resume here would put
+   * a second writer on a conversation that has already moved on, so the
+   * person is asked first - modal, since the answer decides whether the
+   * conversation forks. Resolves true when there is nothing to ask, or they
+   * chose to go ahead.
+   */
+  const confirmNotContinued = async (job: PendingJob): Promise<boolean> => {
+    if (!hasContinued(job)) {
+      return true;
+    }
+    const button = 'Resume Anyway';
+    const pick = await Promise.resolve(
+      vscode.window.showWarningMessage(
+        `Limit Break: session ${job.sessionId.slice(0, 8)} has continued since the limit was detected. ` +
+          'Resuming now will fork the conversation.',
+        { modal: true },
+        button,
+      ),
+    );
+    return pick === button;
+  };
+
+  /**
    * The gate every MANUAL resume goes through before `resume()` is ever
    * called: the command, and the off-autoResume notification's own button.
+   * The A3 continued-since check runs first; the live-holder warning after.
    *
    * A scheduled fire has its own, separate holder check (see
    * scheduler.onFire below) that never spawns a second writer at all; this
@@ -703,6 +739,9 @@ export function activate(context: vscode.ExtensionContext): void {
    * to exclude.
    */
   const confirmManualResume = async (job: PendingJob): Promise<boolean> => {
+    if (!(await confirmNotContinued(job))) {
+      return false;
+    }
     const rows = detectAgentRows();
     const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
     const warning = manualResumeWarning(holder, job.sessionId.slice(0, 8));
@@ -791,29 +830,34 @@ export function activate(context: vscode.ExtensionContext): void {
    * accounts only, and an account without the feature would otherwise have
    * its idle-terminal limit dropped with nothing said at all.
    *
-   * Reuses the stall watch's grace period and growth test. The baseline is
-   * the transcript's size at DETECTION when the job carries it, not at this
-   * fire: randomDelay pads the fire 5-30 minutes past the reset, so a
-   * working auto-continue has usually written (and often finished) its turn
-   * before this runs, and measuring from the fire would call that a failure.
-   * An older job without the field falls back to the size now.
+   * Reuses the stall watch's grace period. The baseline is the transcript's
+   * size at DETECTION when the job carries it, not at this fire: randomDelay
+   * pads the fire 5-30 minutes past the reset, so a working auto-continue
+   * has usually written (and often finished) its turn before this runs, and
+   * measuring from the fire would call that a failure. An older job without
+   * the field falls back to the size now.
    *
-   * No growth: the job is remembered and offered back. The claim onFire took
-   * is kept either way (consistent with Important 2) - the offer's own
+   * What counts as "Claude Code continued it" is a real turn since the
+   * baseline (continuedSince.ts; final fix wave A, A3 / final review M7),
+   * not any growth: a trailing hook entry, or a second limit notice from a
+   * hand retry, used to read as continued and drop the offer silently.
+   *
+   * Not continued: the job is remembered and offered back. The claim onFire
+   * took is kept either way (consistent with Important 2) - the offer's own
    * button bypasses claims like every manual path.
    */
   const armNativeContinueCheck = (job: PendingJob, claimKey: string): void => {
-    const baseline = job.transcriptBytesAtDetection ?? transcriptBytes(job.transcript) ?? 0;
+    const baseline = job.transcriptBytesAtDetection ?? transcriptBytes(job.transcript);
     const check = setTimeout(() => {
       nativeChecks.delete(check);
-      const bytesNow = transcriptBytes(job.transcript);
-      if (stallVerdict({ bytesAtLaunch: baseline, bytesNow }) === 'grew') {
-        log.info(`Claude Code continued ${job.sessionId} on its own; its transcript has grown since the limit.`);
+      if (continuedSince(job.transcript, baseline)) {
+        log.info(`Claude Code continued ${job.sessionId} on its own; a new turn follows the limit in its transcript.`);
         return;
       }
+      const bytesNow = transcriptBytes(job.transcript);
       log.warn(
-        `Claude Code did not continue ${job.sessionId} on its own: ${job.transcript} was ${baseline} bytes at ` +
-          `detection and ${bytesNow ?? 'unreadable'} now. Its auto-continue may not be available on this account; ` +
+        `Claude Code did not continue ${job.sessionId} on its own: ${job.transcript} was ${baseline ?? 'unreadable'} bytes at ` +
+          `detection and ${bytesNow ?? 'unreadable'} now, with no new turn. Its auto-continue may not be available on this account; ` +
           `offering the resume here instead.`,
       );
       rememberReady(job);
@@ -1089,6 +1133,19 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
         return;
       }
+      // Final fix wave A, A3 (final review I1): a resume is only for a stop
+      // that is still unhandled. A real turn since detection means someone -
+      // the user at an idle panel between messages, Claude Code's own
+      // auto-continue, another window whose claim aged out, a restore of a
+      // job overdue for hours - already moved the session on, and a resume
+      // now forks it. Ahead of the autoResume split and the holder check: an
+      // idle panel is exactly the case the holder check cannot tell apart
+      // from one left idle at the limit. Nothing is remembered or shown, and
+      // the claim is KEPT, so every other window drops its copy too.
+      if (hasContinued(job)) {
+        log.info(`Session ${job.sessionId.slice(0, 8)} has continued since the limit was detected; not resuming.`);
+        return;
+      }
       const s = settings();
       if (!s.autoResume) {
         rememberReady(job);
@@ -1261,7 +1318,19 @@ export function activate(context: vscode.ExtensionContext): void {
         // "Resume Now" moves exactly one.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          const countingClaim = claim(key);
+          // Held until the job's own fire time, not the ordinary hour
+          // (final fix wave A, final review M5): every other window's copy
+          // of this job still counts down to about then, and an hour-old
+          // claim would read as abandoned when it fires. Same as Cancel.
+          const countingClaim = holdClaim(
+            claimsDir(),
+            key,
+            Date.now(),
+            counting.resumeAtMs,
+            fs,
+            log,
+            vscode.env.sessionId,
+          );
           if (resume(counting, true)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {

@@ -262,19 +262,28 @@ const releasedKeys: string[] = [];
 const claimResultQueue: ('claimed' | 'taken')[] = [];
 const heldClaims: { key: string; untilMs: number; owner?: string }[] = [];
 
+/**
+ * The fake claimResume, shared by the fake holdClaim below: the real
+ * holdClaim IS claimResume plus an mtime push, so a claim taken through it
+ * (onFire's own since final fix wave A5, the counting Resume Now since M5,
+ * Cancel's) answers from the same `claimResultQueue` / `fakeClaimResult` and
+ * shows up in `claimCalls` exactly as a plain claim does.
+ */
+const fakeClaimResume = (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
+  claimCalls.push({ dir, key, owner });
+  if (fakeClaimResult === 'real') {
+    return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never, owner);
+  }
+  if (claimResultQueue.length > 0) {
+    return claimResultQueue.shift()!;
+  }
+  return fakeClaimResult;
+};
+
 stubModule('./claims', {
   ...(realClaims as unknown as Record<string, unknown>),
   claimsDir: () => (fakeClaimResult === 'real' ? realClaimsDir : realClaims.claimsDir()),
-  claimResume: (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
-    claimCalls.push({ dir, key, owner });
-    if (fakeClaimResult === 'real') {
-      return realClaims.claimResume(dir, key, nowMs, fsArg as never, log as never, owner);
-    }
-    if (claimResultQueue.length > 0) {
-      return claimResultQueue.shift()!;
-    }
-    return fakeClaimResult;
-  },
+  claimResume: fakeClaimResume,
   releaseClaim: (dir: string, key: string, fsArg: unknown, log?: unknown) => {
     releasedKeys.push(key);
     if (fakeClaimResult === 'real') {
@@ -287,9 +296,10 @@ stubModule('./claims', {
   holdClaim: (dir: string, key: string, nowMs: number, untilMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
     heldClaims.push({ key, untilMs, owner });
     if (fakeClaimResult === 'real') {
+      claimCalls.push({ dir, key, owner });
       return realClaims.holdClaim(dir, key, nowMs, untilMs, fsArg as never, log as never, owner);
     }
-    return fakeClaimResult;
+    return fakeClaimResume(dir, key, nowMs, fsArg, log, owner);
   },
   cleanupStaleClaims: () => {},
 });
@@ -2497,23 +2507,44 @@ test('the native-continue check leaves the job remembered for the palette Resume
   }
 });
 
-test('growth since detection - native auto-continue already ran before this window fired - means nothing is offered (final review I6)', async () => {
+/** One transcript line, as Claude Code appends it. */
+const jsonl = (o: Record<string, unknown>) => JSON.stringify(o) + '\n';
+/** A real turn: the session moving on (the user, auto-continue, another resume). */
+const USER_TURN = jsonl({ type: 'user', message: { role: 'user', content: 'ok, carry on' } });
+/** Claude Code's own synthetic limit entry: a hand retry hitting the limit again, not the session moving on. */
+const SYNTHETIC_LIMIT = jsonl({
+  type: 'assistant',
+  isApiErrorMessage: true,
+  error: 'rate_limit',
+  apiErrorStatus: 429,
+  message: { model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit · resets 2:10am" }] },
+});
+
+// Changed by final fix wave A (A3): the fixture used to be 400 more bytes of
+// 'x', and "the file grew" was the test. A real turn appended since detection
+// is the test now (M7), and the fire itself sees it first (I1), so the job
+// never reaches the native-continue check at all.
+test('a turn since detection - native auto-continue already ran before this window fired - means nothing is offered (final review I6, A3)', async () => {
   // The common case: randomDelay pads the fire 5-30 minutes past the reset,
   // so Claude Code has usually continued (and may have finished) by then.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
   holderRow('cli', 'idle');
-  const { dir, file } = transcriptOf(900);
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
   const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
   const ctx = contextOver(store);
   start(ctx);
   try {
     await oneTick();
     await tickAndGrace();
-    assert.equal(nativeNotice(), undefined, 'it grew: native auto-continue did its job');
+    assert.equal(nativeNotice(), undefined, 'it continued: native auto-continue did its job');
     assert.equal(store.get(READY_KEY), undefined, 'and nothing is remembered');
-    assert.ok(vscodeFake.outputLines.some((l) => /continued .* on its own/.test(l)), 'but the log says so');
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('has continued since the limit was detected; not resuming.')),
+      'but the log says so',
+    );
   } finally {
     autoContinueOn = true;
     clearHolders();
@@ -2522,7 +2553,9 @@ test('growth since detection - native auto-continue already ran before this wind
   }
 });
 
-test('with no detection baseline (an older job), growth during the grace counts (final review I6)', async () => {
+// Changed by final fix wave A (A3, M7): the growth appended was the bare
+// bytes 'more'; it is a real turn now, which is what counts as continuing.
+test('with no detection baseline (an older job), a turn during the grace counts (final review I6)', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2532,9 +2565,9 @@ test('with no detection baseline (an older job), growth during the grace counts 
   start(ctx);
   try {
     await untilStoodDown();
-    fs.appendFileSync(file, 'more');
+    fs.appendFileSync(file, USER_TURN);
     await tickAndGrace();
-    assert.equal(nativeNotice(), undefined, 'it grew after the fire');
+    assert.equal(nativeNotice(), undefined, 'it continued after the fire');
   } finally {
     autoContinueOn = true;
     clearHolders();
@@ -2604,6 +2637,209 @@ test('the native-continue check keeps the claim throughout (final review I6, con
     clearHolders();
     teardown(ctx);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a real turn during the native-continue grace means nothing is offered (A3, M7)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    fs.appendFileSync(file, USER_TURN);
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined);
+    assert.ok(vscodeFake.outputLines.some((l) => /continued .* on its own/.test(l)));
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only a synthetic error entry appended during the grace is not native auto-continue: still offered (A3, M7)', async () => {
+  // Before A3 any growth read as "Claude Code continued it" and the offer
+  // was dropped silently - a second limit notice from a hand retry did that.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    fs.appendFileSync(file, SYNTHETIC_LIMIT + jsonl({ type: 'system', content: 'Stop hook ran' }));
+    await tickAndGrace();
+    assert.ok(nativeNotice(), `the job must still be offered; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A3 (final review I1): a resume never lands on a session
+// that has moved on since its stop was detected. The automatic fire drops it
+// silently (keeping its claim); every manual path asks first.
+// ---------------------------------------------------------------------------
+
+const CONTINUED_LOG = `Session ${SESSION.slice(0, 8)} has continued since the limit was detected; not resuming.`;
+const CONTINUED_MODAL =
+  `Limit Break: session ${SESSION.slice(0, 8)} has continued since the limit was detected. ` +
+  'Resuming now will fork the conversation.';
+
+test('an automatic fire on a session continued since detection resumes nothing, remembers nothing, notifies nothing and keeps its claim (A3, I1)', async () => {
+  // The idle-panel race: the user came back at 2:12, typed, the turn ended,
+  // and the fire padded to 2:25 finds an idle panel.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'idle');
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  claimCalls.length = 0;
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
+  const job = nativeContinueJob(file, 500);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', job]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'no second writer on a session that moved on');
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(CONTINUED_LOG)), `saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.equal(store.get(READY_KEY), undefined, 'not remembered');
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes(SESSION.slice(0, 8))).length,
+      0,
+      'no notice names the session',
+    );
+    assert.ok(claimCalls.some((c) => c.key === realClaims.claimKeyFor(job)), 'the claim was taken');
+    assert.deepEqual(releasedKeys, [], 'and kept, so other windows drop their copies too');
+  } finally {
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with autoResume off, a session continued since detection is not offered either (A3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(offers().length, 0);
+    assert.equal(store.get(READY_KEY), undefined);
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(CONTINUED_LOG)));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only Claude Code\'s own synthetic entries since detection still resume as usual (A3 positive control)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, SYNTHETIC_LIMIT + jsonl({ type: 'system', content: 'Stop hook ran' }));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumeNow on a session that continued after it came ready warns modally, and resumes only on Resume Anyway (A3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(offers()[0], 'setup: remembered and offered');
+    fs.appendFileSync(file, USER_TURN);
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
+
+    let pending = resumeNow();
+    await flush();
+    const first = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(first, 'a modal warning must be shown');
+    assert.equal(first.message, CONTINUED_MODAL);
+    assert.deepEqual(first.items, ['Resume Anyway']);
+    first.answer(undefined);
+    await pending;
+    assert.equal(vscodeFake.terminals.length, 0, 'declined: nothing launched');
+
+    pending = resumeNow();
+    await flush();
+    const second = vscodeFake.warningOffers.filter((w) => w.modal).at(-1)!;
+    assert.notEqual(second, first);
+    second.answer('Resume Anyway');
+    await pending;
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Anyway resumes it');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Resume Now notification button also warns modally on a continued session (A3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const offer = offers()[0]!;
+    fs.appendFileSync(file, USER_TURN);
+    offer.answer('Resume Now');
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.equal(modal?.message, CONTINUED_MODAL);
+    modal!.answer(undefined);
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumeNow on a counting job holds its claim until the job\'s own fire time, as Cancel does (A3, M5)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { ...manualConfig(), autoResume: true };
+  fakeClaimResult = 'claimed';
+  heldClaims.length = 0;
+  const job = futureJob();
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 1, 'setup: it resumed');
+    assert.deepEqual(
+      heldClaims.map((h) => [h.key, h.untilMs]),
+      [[realClaims.claimKeyFor(job), job.resumeAtMs]],
+    );
+  } finally {
+    teardown(ctx);
   }
 });
 
