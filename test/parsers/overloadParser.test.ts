@@ -219,58 +219,184 @@ test('the message glyph Claude Code prefixes a banner line with is still accepte
 });
 
 // ---------------------------------------------------------------------------
-// Final review, Important 4: on the UNFLAGGED path (`anchored: true`) every
-// overload rule - not just transient-429 and stream-interrupted - requires a
-// physical line that starts with "API Error". Each of these short assistant
-// prose blocks armed an overload retry before, and a resume 5-30 minutes
-// later then fired with the "I hit my usage limit" prompt.
+// Task 4c (R1): every transient render the Claude Code docs (errors.md) and
+// the 2.1.282 binary (research-api-errors-binary.md Q1, function INn) name.
+// Each is the text of a FLAGGED entry - overload detection reads no other kind
+// of entry any more (inspectLine, R3) - so the parser itself has no
+// "unflagged" mode to test: whether the ENTRY is Claude Code's own is decided
+// before detectOverload is ever called.
 // ---------------------------------------------------------------------------
 
-const UNFLAGGED_PROSE: [string, string][] = [
-  ['connection-error', 'npm install failed: fetch failed (proxy). I will retry with the registry mirror.'],
-  ['timeout', 'All the tests pass except one case where the request timed out.'],
-  ['server-error', 'The staging endpoint returned Internal server error for the upload, so I skipped it.'],
-  ['api-error-status', 'Earlier we saw API Error: 529 Overloaded, but the retry succeeded.'],
+const STATUS_LINK = 'If it persists, check https://status.claude.com.';
+
+/** [render, rule that must claim it, status it must report]. */
+const DOCUMENTED_RENDERS: [string, string, number | undefined][] = [
+  [
+    `API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment. ${STATUS_LINK}`,
+    'overloaded',
+    529,
+  ],
+  [
+    `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`,
+    'api-error-status',
+    500,
+  ],
+  [
+    `API Error: Overloaded. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`,
+    'overloaded',
+    undefined,
+  ],
+  [
+    `API Error: Request rejected (429) · this may be a temporary capacity issue. ${STATUS_LINK}`,
+    'rejected-429',
+    undefined,
+  ],
+  ['API Error: Server is temporarily limiting requests (not your usage limit)', 'transient-429', undefined],
+  [
+    'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited',
+    'transient-429',
+    undefined,
+  ],
+  [
+    'API Error: No response from API (waited 3m, then 10m on the retry). If a proxy or gateway on your network holds responses until they complete, raise API_TIMEOUT_MS or CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS to wait longer.',
+    'no-response',
+    undefined,
+  ],
+  [
+    'API Error: Connection to the API was lost (ECONNRESET). This is usually temporary — try again.',
+    'connection-error',
+    undefined,
+  ],
+  ['Request timed out', 'timeout', undefined],
+  ['API Error: Server error mid-response. The response above may be incomplete.', 'stream-interrupted', undefined],
+  ['API Error: Connection lost mid-response. The response above may be incomplete.', 'stream-interrupted', undefined],
+  [
+    'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+    'stream-interrupted',
+    undefined,
+  ],
+  ['API Error: The response stopped arriving. The response above may be incomplete.', 'stream-interrupted', undefined],
+  [
+    'API Error: Part of the response never arrived. The response above may be incomplete.',
+    'stream-interrupted',
+    undefined,
+  ],
+  [
+    'API Error: The response stream was malformed. The response above may be incomplete.',
+    'stream-interrupted',
+    undefined,
+  ],
 ];
 
-for (const [rule, prose] of UNFLAGGED_PROSE) {
-  test(`unflagged prose that used to fire ${rule} does not arm an overload when anchored (final review I4)`, () => {
-    assert.equal(detectOverload(prose)?.rule, rule, 'setup: the unanchored (flagged) path still recognises it');
-    assert.equal(detectOverload(prose, { anchored: true }), undefined, prose);
+for (const [render, rule, status] of DOCUMENTED_RENDERS) {
+  test(`the documented render is an overload (${rule}): ${render.slice(0, 60)}`, () => {
+    const hit = detectOverload(render);
+    assert.ok(hit, render);
+    assert.equal(hit.rule, rule);
+    assert.equal(hit.status, status);
+    // Claude Code writes a usage limit as a different text altogether; none of
+    // these may also arm a limit timer, trusted (flagged) or not.
+    assert.equal(detectLimit(render, new Date(), 24, { trusted: true }), undefined, 'trusted limit path');
+    assert.equal(detectLimit(render, new Date(), 24, { trusted: false }), undefined, 'untrusted limit path');
   });
 }
 
-/** Each rule's real render, one per rule - the render Claude Code writes on a line of its own. */
-const REAL_RENDERS: [string, string][] = [
-  ['api-error-status', 'API Error: 529 Overloaded'],
-  ['api-error-status', 'API Error (500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}})'],
-  ['overloaded', 'API Error: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'],
-  ['server-error', 'API Error: Internal server error'],
-  ['connection-error', 'API Error: Connection error.'],
-  ['timeout', 'API Error: Request timed out.'],
-  ['transient-429', TRANSIENT_429],
-  ['stream-interrupted', 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.'],
-];
-
-for (const [rule, render] of REAL_RENDERS) {
-  test(`the real ${rule} render fires flagged, and unflagged at a line start (final review I4): ${render.slice(0, 40)}`, () => {
-    assert.equal(detectOverload(render)?.rule, rule, 'flagged (unanchored)');
-    assert.equal(detectOverload(render, { anchored: true })?.rule, rule, 'unflagged, at the start of the text');
-    assert.equal(
-      detectOverload(`Some preceding context.\n⏺ ${render}`, { anchored: true })?.rule,
-      rule,
-      'unflagged, on its own line behind the message glyph',
-    );
-  });
-}
-
-test('anchored: the status comes from the API Error line itself', () => {
-  assert.equal(detectOverload('API Error: 503 Service Unavailable', { anchored: true })?.status, 503);
+test('the documented renders are still found on a line of their own, after other text and the message glyph', () => {
+  for (const [render, rule] of DOCUMENTED_RENDERS) {
+    assert.equal(detectOverload(`Some preceding context.\n⏺ ${render}`)?.rule, rule, render);
+  }
 });
 
-test('anchored: the parens form still reaches the in-flight exclusion', () => {
+test('the "//" in "https://status.claude.com" is what dropped the documented renders', () => {
+  const withLink = `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`;
+  // The control: the very same sentence with only the scheme's "//" removed.
+  // Before the fix this was detected and `withLink` was not, so nothing else in
+  // the text - not "Internal server error", not the em dash, not the length -
+  // was what dropped it.
+  const withoutScheme = withLink.replace('https://', '');
+  assert.equal(detectOverload(withoutScheme)?.rule, 'api-error-status', 'control: no "//" in the text');
+  assert.equal(detectOverload(withLink)?.rule, 'api-error-status', 'a URL\'s "//" is not a code comment');
+});
+
+test('a real comment marker beside a banner still marks it as quoted source code', () => {
+  assert.equal(detectOverload('API Error: 529 Overloaded // retry with backoff'), undefined);
+  assert.equal(detectOverload('API Error: 529 Overloaded /* retry */'), undefined);
+  // A link in the same line does not excuse the marker beside it.
+  assert.equal(detectOverload('API Error: 529 Overloaded, see https://status.claude.com // TODO'), undefined);
+});
+
+test('"Request rejected (429)" carrying a usage-limit message stays a limit, not an overload', () => {
+  // Verbatim from a real transcript (Claude Code 2.1.267, entrypoint sdk-cli): the
+  // same "Request rejected (429)" head, but the API's own message is a usage
+  // limit with a reset time. Only the "temporary capacity issue" tail is an
+  // overload.
+  const usageLimit = 'API Error: Request rejected (429) · Claude AI usage limit reached|1789071998';
+  assert.equal(detectOverload(usageLimit), undefined);
   assert.equal(
-    detectOverload('API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10', { anchored: true }),
+    detectLimit(usageLimit, new Date(1789071998 * 1000 - 3_600_000), 24, { trusted: true })?.rule,
+    'epoch',
+    'the limit parser still owns it',
+  );
+});
+
+test('the no-response and request-rejected renders are anchored on their "API Error:" head', () => {
+  assert.equal(
+    detectOverload(
+      'Added a rule so API Error: No response from API (waited 3m, then 10m on the retry) is retried.',
+    ),
     undefined,
   );
+  assert.equal(
+    detectOverload(
+      `When Claude Code prints API Error: Request rejected (429) · this may be a temporary capacity issue. ${STATUS_LINK} we back off.`,
+    ),
+    undefined,
+  );
+});
+
+test('a connection loss is recognised whatever the OS error code (Task 4c ruling)', () => {
+  // The binary interpolates the code into the render (INn: `Connection to the
+  // API was lost (${w.code})`), so ECONNRESET is one of several.
+  for (const code of ['EPIPE', 'ETIMEDOUT', 'ECONNABORTED', 'ENETUNREACH']) {
+    const hit = detectOverload(`API Error: Connection to the API was lost (${code}). This is usually temporary — try again.`);
+    assert.equal(hit?.rule, 'connection-error', code);
+  }
+});
+
+// R1b: not transient, so a resume would only loop until the budget gives up.
+const NOT_TRANSIENT_RENDERS = [
+  'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+  "There's an issue with the selected model (claude-x). It may not exist or you may not have access to it. Run --model to pick a different model.",
+  'API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage, or use --model to switch to standard context',
+  "You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
+];
+
+for (const render of NOT_TRANSIENT_RENDERS) {
+  test(`a render that is not transient is neither an overload nor a limit: ${render.slice(0, 50)}`, () => {
+    assert.equal(detectOverload(render), undefined, 'overload');
+    assert.equal(detectLimit(render, new Date(), 24, { trusted: true }), undefined, 'limit, flagged');
+    assert.equal(detectLimit(render, new Date(), 24, { trusted: false }), undefined, 'limit, unflagged');
+  });
+}
+
+// R2: a "Retrying in ..." line is Claude Code still retrying, so nothing is
+// scheduled on top of it - with or without an attempt counter, in either unit
+// spelling. (The binary builds it inside a React render function only, never a
+// transcript message; ignoring it can therefore not lose a real stop.)
+const IN_FLIGHT_RETRY_LINES = [
+  'API Error (529 {"type":"error"}) · Retrying in 12s',
+  'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
+  'API Error (529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}) · Retrying in 1 seconds… (attempt 1/10)',
+  'API Error: 500 Internal server error · Retrying in 20 seconds',
+];
+
+for (const line of IN_FLIGHT_RETRY_LINES) {
+  test(`a "Retrying in" line is Claude Code still retrying: ${line.slice(-46)}`, () => {
+    assert.equal(detectOverload(line), undefined, line);
+  });
+}
+
+test('the same 529 without a "Retrying in" suffix is still terminal (control for the retry exclusion)', () => {
+  assert.equal(detectOverload('API Error (529 {"type":"error"})')?.rule, 'api-error-status');
+  assert.equal(detectOverload('API Error: 500 Internal server error')?.rule, 'api-error-status');
 });

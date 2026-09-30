@@ -632,8 +632,9 @@ test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a tim
 // ---------------------------------------------------------------------------
 
 test('an in-flight retry does not report overload, even from a flagged entry', () => {
-  // Ruling 2: the in-flight-retry exclusion applies on both paths - Claude
-  // Code is already retrying either way, flagged or not.
+  // Claude Code is already retrying: a flagged entry that carries the
+  // countdown is still not a stop. (Every "Retrying in" form is in the next
+  // test; only flagged entries reach overload detection at all - R3.)
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -642,19 +643,27 @@ test('an in-flight retry does not report overload, even from a flagged entry', (
   assert.equal(make().inspectLine(line, FILE).overload, undefined);
 });
 
-test('an in-flight retry from an unflagged entry also does not report overload', () => {
-  const line = entry({
-    type: 'assistant',
-    message: { content: 'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10' },
-  });
-  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+test('every "Retrying in" form is ignored, with or without an attempt counter (Task 4c R2)', () => {
+  for (const text of [
+    'API Error (529 {"type":"error"}) · Retrying in 12s',
+    'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
+    'API Error (529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}) · Retrying in 1 seconds… (attempt 1/10)',
+  ]) {
+    const line = entry({ type: 'assistant', isApiErrorMessage: true, error: 'server_error', message: { content: text } });
+    const out = make().inspectLine(line, FILE);
+    assert.equal(out.overload, undefined, text);
+    assert.equal(out.limit, undefined, text);
+  }
 });
 
-test('the transient-429 render (non-flagged, non-user entry) schedules an overload retry, not a limit timer', () => {
+test('the transient-429 render (a flagged entry) schedules an overload retry, not a limit timer', () => {
   // Ruling 1: this message must never arm a usage-limit timer, on either
   // path. Routing it to overload gives it the overload treatment instead.
   const line = entry({
     type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    apiErrorStatus: 429,
     message: { content: 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited' },
   });
   const out = make().inspectLine(line, FILE);
@@ -663,9 +672,11 @@ test('the transient-429 render (non-flagged, non-user entry) schedules an overlo
   assert.equal(out.overload.detection.rule, 'transient-429');
 });
 
-test('a sleep-interruption render (non-flagged, non-user entry) schedules an overload retry', () => {
+test('a sleep-interruption render (a flagged entry) schedules an overload retry', () => {
   const line = entry({
     type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'server_error',
     message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
   });
   const out = make().inspectLine(line, FILE);
@@ -797,10 +808,130 @@ test('a flagged banner in a subagents/ file still schedules an overload retry (p
 });
 
 // ---------------------------------------------------------------------------
-// Final review, Important 4: unflagged assistant prose must not arm an
-// overload retry. On the unflagged path every overload rule needs a line that
-// starts with "API Error"; flagged entries keep full recall.
+// Task 4c (R1): every transient render Claude Code documents, as the text of
+// the flagged entry Claude Code writes it in (shape from the 2.1.282 binary,
+// research-api-errors-binary.md Q1, and GitHub #64030 / #68816), is an
+// overload - never a limit.
 // ---------------------------------------------------------------------------
+
+const STATUS_LINK = 'If it persists, check https://status.claude.com.';
+
+/** [render, `error`, `apiErrorStatus`] as the binary writes each. */
+const FLAGGED_RENDERS: [string, string, number | undefined][] = [
+  [`API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment. ${STATUS_LINK}`, 'server_error', 529],
+  [`API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`, 'server_error', 500],
+  [`API Error: Overloaded. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`, 'server_error', 529],
+  [`API Error: Request rejected (429) · this may be a temporary capacity issue. ${STATUS_LINK}`, 'rate_limit', 429],
+  ['API Error: Server is temporarily limiting requests (not your usage limit)', 'rate_limit', 429],
+  ['API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited', 'rate_limit', 429],
+  ['API Error: No response from API (waited 3m, then 10m on the retry). If a proxy or gateway on your network holds responses until they complete, raise API_TIMEOUT_MS or CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS to wait longer.', 'server_error', undefined],
+  ['API Error: Connection to the API was lost (ECONNRESET). This is usually temporary — try again.', 'server_error', undefined],
+  ['Request timed out', 'server_error', undefined],
+  ['API Error: Server error mid-response. The response above may be incomplete.', 'server_error', undefined],
+  ['API Error: Connection lost mid-response. The response above may be incomplete.', 'server_error', undefined],
+  ['API Error: Your computer went to sleep mid-response. The response above may be incomplete.', 'server_error', undefined],
+  ['API Error: The response stopped arriving. The response above may be incomplete.', 'server_error', undefined],
+  ['API Error: Part of the response never arrived. The response above may be incomplete.', 'server_error', undefined],
+  ['API Error: The response stream was malformed. The response above may be incomplete.', 'server_error', undefined],
+];
+
+/** A synthetic API-error entry, the way Claude Code writes one. */
+const flaggedEntry = (text: string, error: string, apiErrorStatus?: number, extra: Record<string, unknown> = {}) =>
+  entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error,
+    ...(apiErrorStatus === undefined ? {} : { apiErrorStatus }),
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    sessionId: '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234',
+    message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text }] },
+    ...extra,
+  });
+
+for (const [render, error, status] of FLAGGED_RENDERS) {
+  test(`a flagged entry carrying the documented render is an overload, not a limit: ${render.slice(0, 56)}`, () => {
+    const out = make().inspectLine(flaggedEntry(render, error, status), FILE);
+    assert.equal(out.limit, undefined, 'never a usage limit');
+    assert.ok(out.overload, 'an overload');
+  });
+}
+
+test('a flagged 429 capacity render WITH rejected quotaLimits is still not a limit', () => {
+  // The binary attaches quotaLimits only to a rejected usage-limit 429 (research
+  // Q2), so Claude Code never writes this entry; the skip is belt and braces,
+  // and this pins that it holds for the "Request rejected (429)" render as it
+  // does for the transient-429 one.
+  const line = flaggedEntry(
+    `API Error: Request rejected (429) · this may be a temporary capacity issue. ${STATUS_LINK}`,
+    'rate_limit',
+    429,
+    { quotaLimits: { status: 'rejected', resetsAt: Math.floor((Date.now() + 3_600_000) / 1000), rateLimitType: 'five_hour' } },
+  );
+  const out = make().inspectLine(line, FILE);
+  assert.equal(out.limit, undefined);
+  assert.ok(out.overload);
+});
+
+// R1b: not transient, so no resume - a flagged entry included.
+const NOT_TRANSIENT: [string, string, number][] = [
+  ['API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', 'authentication_failed', 401],
+  ["There's an issue with the selected model (claude-x). It may not exist or you may not have access to it. Run --model to pick a different model.", 'invalid_request', 404],
+  ['API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage, or use --model to switch to standard context', 'invalid_request', 400],
+  ["You've hit your monthly spend limit · raise it at claude.ai/settings/usage", 'rate_limit', 429],
+];
+for (const [text, error, status] of NOT_TRANSIENT) {
+  test(`a flagged entry that is not transient produces no overload and no resume: ${text.slice(0, 50)}`, () => {
+    const out = make().inspectLine(flaggedEntry(text, error, status), FILE);
+    assert.equal(out.overload, undefined);
+    assert.equal(out.limit, undefined);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 4c (R3): overloads are read only from an entry Claude Code marked as an
+// API error. Every error message the binary writes is built with
+// isApiErrorMessage: true (research Q1), and a scan of the 168 synthetic
+// entries in ~/.claude/projects found 138 flagged (all rate_limit / 429) and
+// 30 unflagged ("No response requested."); none of the unflagged carries an
+// error render. An unflagged entry is someone TALKING ABOUT an error.
+// ---------------------------------------------------------------------------
+
+const RENDER_ON_ITS_OWN_LINE = `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`;
+
+test('an unflagged assistant entry with a render on its own line does not arm an overload', () => {
+  for (const render of [RENDER_ON_ITS_OWN_LINE, 'API Error: Request timed out.', 'API Error: 529 Overloaded']) {
+    const line = entry({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: `That failed again:\n${render}\nI will wait.` }] },
+    });
+    assert.equal(make().inspectLine(line, FILE).overload, undefined, render);
+  }
+});
+
+test('an unflagged assistant entry that is exactly a render does not arm an overload', () => {
+  const line = entry({ type: 'assistant', message: { content: 'API Error: Request timed out.' } });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
+
+test('a tool_result holding grep -n output of the renders does not arm an overload', () => {
+  const grep = `113:API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment. ${STATUS_LINK}`;
+  const line = entry({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_10', content: grep }] },
+  });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+  const plain = entry({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_11', content: RENDER_ON_ITS_OWN_LINE }] },
+  });
+  assert.equal(make().inspectLine(plain, FILE).overload, undefined);
+});
+
+test('a user message pasting a render does not arm an overload', () => {
+  const line = entry({ type: 'user', message: { content: RENDER_ON_ITS_OWN_LINE } });
+  assert.equal(make().inspectLine(line, FILE).overload, undefined);
+});
 
 for (const prose of [
   'npm install failed: fetch failed (proxy). I will retry with the registry mirror.',
@@ -808,18 +939,13 @@ for (const prose of [
   'The staging endpoint returned Internal server error for the upload, so I skipped it.',
   'Earlier we saw API Error: 529 Overloaded, but the retry succeeded.',
 ]) {
-  test(`unflagged assistant prose does not arm an overload retry (final review I4): ${prose.slice(0, 32)}`, () => {
+  test(`unflagged assistant prose does not arm an overload retry: ${prose.slice(0, 32)}`, () => {
     const line = entry({ type: 'assistant', message: { content: [{ type: 'text', text: prose }] } });
     assert.equal(make().inspectLine(line, FILE).overload, undefined, prose);
   });
 }
 
-test('an unflagged entry whose text line starts with API Error still arms an overload retry (final review I4)', () => {
-  const line = entry({ type: 'assistant', message: { content: 'API Error: Request timed out.' } });
-  assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
-});
-
-test('a flagged entry keeps full recall, with no API Error head needed (final review I4)', () => {
+test('a flagged entry keeps full recall, with no API Error head needed', () => {
   const line = entry({ type: 'assistant', isApiErrorMessage: true, message: { content: 'Request timed out.' } });
   assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
 });
