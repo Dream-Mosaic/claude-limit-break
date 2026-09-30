@@ -44,6 +44,15 @@ export interface PendingJob {
    * before the reset, not from the fire.
    */
   transcriptBytesAtDetection?: number;
+  /**
+   * Which usage limit stopped the session (`five_hour`, `seven_day`, ...; see
+   * LimitDetection.rateLimitType), for a limit job whose detection could tell.
+   * decideOnFire reads it: Claude Code's native auto-continue covers the
+   * five-hour limit only, so every other type is offered rather than stood
+   * down for. Undefined for an overload, for a limit whose text named no
+   * type, and for a job persisted before this field existed.
+   */
+  rateLimitType?: string;
 }
 
 export interface MementoLike {

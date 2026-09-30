@@ -490,6 +490,15 @@ export class TranscriptWatcher {
                     quotaLimits && typeof quotaLimits === 'object'
                         ? (quotaLimits as Record<string, unknown>).resetsAt
                         : undefined;
+                // Which limit tripped (Task 4c, R4): the same object names it, in
+                // the vocabulary the binary uses everywhere (five_hour, seven_day,
+                // ...). Taken only when it is a string, and left off the detection
+                // otherwise, so the fire decision can tell the one limit Claude
+                // Code's native auto-continue covers from every other.
+                const limitType =
+                    quotaLimits && typeof quotaLimits === 'object'
+                        ? (quotaLimits as Record<string, unknown>).rateLimitType
+                        : undefined;
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
                     const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
                     // Decisive either way: this is the authoritative field, so a
@@ -497,7 +506,18 @@ export class TranscriptWatcher {
                     // fall back to the text - it is history (or absurd), and the
                     // text does not get a second opinion on that.
                     return resumeAt
-                        ? { limit: { detection: { resumeAt, rule: 'quota-limits', text: 'quotaLimits.resetsAt' }, cwd, file } }
+                        ? {
+                            limit: {
+                                detection: {
+                                    resumeAt,
+                                    rule: 'quota-limits',
+                                    text: 'quotaLimits.resetsAt',
+                                    ...(typeof limitType === 'string' ? { rateLimitType: limitType } : {}),
+                                },
+                                cwd,
+                                file,
+                            },
+                        }
                         : { inputNeeded };
                 }
             }

@@ -84,9 +84,14 @@ class FakeWatcher {
    * resume() now stats it for real, via node:fs, so a test that expects a
    * resume to actually launch needs a real path, not a placeholder string.
    */
-  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD, file?: string): void {
+  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD, file?: string, rateLimitType?: string): void {
     this.hitEmitter.fire({
-      detection: { resumeAt, text: 'Claude AI usage limit reached. Try again in 5 hours' },
+      detection: {
+        resumeAt,
+        text: 'Claude AI usage limit reached. Try again in 5 hours',
+        // Only when the test names one, as the real watcher only sets it when it knows.
+        ...(rateLimitType !== undefined ? { rateLimitType } : {}),
+      },
       cwd,
       // `file` is overridable so a stall test can point at a real transcript
       // it controls: the stall check stats this path for growth.
@@ -4079,3 +4084,99 @@ test('gave up: "Dismiss gave-up notices" clears the records and leaves every wai
     fs.rmSync(transcript, { force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task 4c (R4): the limit type flows detection -> job -> decideOnFire, and
+// survives the persist-and-restore round trip. Claude Code's native
+// auto-continue arms for the five-hour limit only (research-api-errors-
+// binary.md Q4), so a weekly limit in an idle terminal is offered, never
+// stood down for.
+// ---------------------------------------------------------------------------
+
+const storedJobs = (store: Map<string, unknown>): Record<string, unknown>[] =>
+  // The real memento serialises to JSON; the fake does not, so the round trip
+  // is made through JSON here.
+  JSON.parse(JSON.stringify(store.get('claudeLimitBreak.pending') ?? []));
+
+const tickOffer = () => vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+
+test('a detection that names its limit type reaches the persisted job', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000), REAL_CWD, undefined, 'seven_day');
+    const jobs = storedJobs(store);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]?.rateLimitType, 'seven_day');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a detection with no limit type leaves the persisted job without the key', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    const jobs = storedJobs(store);
+    assert.equal(jobs.length, 1);
+    assert.equal(Object.hasOwn(jobs[0] ?? {}, 'rateLimitType'), false);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+for (const [type, offered] of [
+  ['seven_day', true],
+  ['seven_day_opus', true],
+  ['overage', true],
+  ['five_hour', false],
+  [undefined, false],
+] as const) {
+  test(`a persisted ${type} limit job fired into an IDLE terminal with auto-continue on is ${offered ? 'offered, not stood down for' : 'stood down for'} (Task 4c R4)`, async () => {
+    resetVscodeFake();
+    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    autoContinueOn = true;
+    holderRow('cli', 'idle');
+    // Detect, persist, reload: the job is written by one window's scheduler,
+    // round-tripped through JSON, and fired by the next window's.
+    const store = new Map<string, unknown>();
+    const first = contextOver(store);
+    start(first);
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000), REAL_CWD, undefined, type);
+    const persisted = storedJobs(store).map((j) => ({ ...j, resumeAtMs: Date.now() - 1000, baseResumeAtMs: Date.now() - 1000 }));
+    teardown(first);
+    resetVscodeFake();
+    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    const ctx = contextOver(new Map([['claudeLimitBreak.pending', persisted]]));
+    start(ctx);
+    try {
+      await oneTick();
+      assert.equal(vscodeFake.terminals.length, 0, 'an idle terminal is a live second writer: never auto-spawn');
+      if (offered) {
+        assert.ok(tickOffer(), `a ${type} limit is not continued natively, so it must be offered; saw ${JSON.stringify(vscodeFake.info)}`);
+        assert.ok(
+          vscodeFake.outputLines.some((l) => /auto-continue does not cover/.test(l)),
+          'the log must say why nothing was stood down for',
+        );
+        assert.ok(!vscodeFake.outputLines.some((l) => /Checking that it did/.test(l)), 'no native-continue check is armed');
+      } else {
+        assert.equal(tickOffer(), undefined, 'native auto-continue covers it: nothing to offer yet');
+        assert.ok(
+          vscodeFake.outputLines.some((l) => /Checking that it did/.test(l)),
+          'stood down for native auto-continue, with the check armed',
+        );
+      }
+    } finally {
+      autoContinueOn = true;
+      clearHolders();
+      teardown(ctx);
+    }
+  });
+}

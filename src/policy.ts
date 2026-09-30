@@ -11,7 +11,7 @@ export type Plan =
   | { kind: 'ignore'; reason: string };
 
 export function planResume(
-  hit: { detection: { resumeAt?: Date; text: string }; cwd?: string; file: string; entryTimestampMs?: number },
+  hit: { detection: { resumeAt?: Date; text: string; rateLimitType?: string }; cwd?: string; file: string; entryTimestampMs?: number },
   reason: 'limit' | 'overload',
   settings: Settings,
   statBytes: (p: string) => number,
@@ -61,6 +61,11 @@ export function planResume(
       // keeps the persisted job (globalState) exactly as it was for a hit
       // without it.
       ...(hit.entryTimestampMs !== undefined ? { entryTimestampMs: hit.entryTimestampMs } : {}),
+      // Which usage limit stopped the session, when the detection could tell
+      // (Task 4c, R4): decideOnFire stands down for Claude Code's native
+      // auto-continue only when it is the five-hour one. Left off, like the
+      // others, when absent.
+      ...(hit.detection.rateLimitType !== undefined ? { rateLimitType: hit.detection.rateLimitType } : {}),
       // The native auto-continue check's baseline (final review, Important
       // 6). resolveSession reports 0 for a size it could not read; that is
       // "unknown", not a baseline every transcript has grown past.

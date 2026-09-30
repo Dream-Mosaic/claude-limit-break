@@ -1,4 +1,5 @@
 import type { AgentRow, SessionHolder } from './liveSessions';
+import { RATE_LIMIT_LABELS } from './parsers/limitParser';
 
 export interface OnFireDecision {
   /** Whether `resume(job)` should be called. */
@@ -13,11 +14,17 @@ export interface OnFireDecision {
   notice?: { message: string; button: string };
   /**
    * True only when this stood down for Claude Code's own auto-continue (an
-   * idle terminal at a usage LIMIT, the setting reading as on). Whether that
-   * feature really exists for this account is unverified - the key's absence
-   * reads as on, but the research found the toggle offered to some accounts
-   * only - so the caller checks back after the stall-watch grace and offers
-   * the job if the transcript never grew (final review, Important 6).
+   * idle terminal at a FIVE-HOUR usage limit - or one whose type is unknown -
+   * with the setting reading as on). Native auto-continue arms only when the
+   * rejection is `status === "rejected"` and `rateLimitType === "five_hour"`
+   * (2.1.282 binary, research-api-errors-binary.md Q4), so a weekly, Opus,
+   * Sonnet, Fable or usage-credit limit never sets this: it is offered
+   * instead. Whether the feature really exists for this account is
+   * unverified - the key's absence reads as on, but the research found the
+   * toggle offered to some accounts only - so the caller checks back after
+   * the stall-watch grace and offers the job if the transcript never grew
+   * (final review, Important 6). That check is also what keeps an unknown
+   * limit type safe.
    */
   awaitNativeContinue?: true;
 }
@@ -64,12 +71,20 @@ function isIdleStatus(status: string | undefined): boolean {
  *     auto-continue on a bridged panel - so this silently drops the job:
  *     no spawn, no rememberReady, no notification, just a log line (naming
  *     Remote Control when the panel is bridged).
- *   - an idle terminal defers to autoContinueOn for a usage LIMIT: Claude
- *     Code's own auto-continue already covers it when that setting is on
- *     (see autoContinue.ts), so this stays silent there too; only when it
- *     is OFF does this remember the job and offer "Resume in Terminal
- *     Anyway". An OVERLOAD (`reason`) always gets the offer - native
- *     auto-continue covers usage limits only (final review, Critical 1).
+ *   - an idle terminal defers to autoContinueOn for a FIVE-HOUR usage LIMIT
+ *     (and for one whose type is unknown): Claude Code's own auto-continue
+ *     already covers it when that setting is on (see autoContinue.ts), so
+ *     this stays silent there too; only when it is OFF does this remember
+ *     the job and offer "Resume in Terminal Anyway". Native auto-continue
+ *     arms for `rateLimitType === "five_hour"` only (2.1.282 binary,
+ *     research-api-errors-binary.md Q4), so any OTHER limit type - weekly,
+ *     Opus, Sonnet, Fable, usage credit - is never continued natively, and
+ *     gets the offer whatever the setting says, exactly like an OVERLOAD
+ *     (`reason`), which native auto-continue does not cover either (final
+ *     review, Critical 1). An unknown type (`undefined`) is treated as
+ *     five-hour: the native-continue check that follows a stand-down offers
+ *     the job back when nothing grew, so nothing is lost. Neither case
+ *     auto-spawns: an idle terminal is a live second writer.
  *
  * `resume: true` is reserved for 'none' (nobody found), a listing failure
  * ('unknown', which must still resume rather than fail closed and silently
@@ -94,6 +109,8 @@ export function decideOnFire(
   autoContinueOn: boolean,
   shortId: string,
   reason: 'limit' | 'overload',
+  /** The limit type the detection named (LimitDetection.rateLimitType), when it could tell. Read for `reason === 'limit'` only. */
+  rateLimitType?: string,
 ): OnFireDecision {
   if (holder === 'unknown') {
     return {
@@ -153,6 +170,27 @@ export function decideOnFire(
       notice: {
         message:
           `Limit Break: session ${shortId} was stopped by a server error, and it is open in a terminal. ` +
+          `Continue it there.`,
+        button: RESUME_IN_TERMINAL_BUTTON,
+      },
+    };
+  }
+  // A limit type other than five_hour (Task 4c, R4): native auto-continue
+  // will not run, so standing down for it - as the branch below does - would
+  // strand the session. Same shape as the overload offer above. The label is
+  // Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); a type this build
+  // does not know is named by its raw key.
+  if (rateLimitType !== undefined && rateLimitType !== 'five_hour') {
+    const label = RATE_LIMIT_LABELS[rateLimitType] ?? rateLimitType.replace(/_/g, ' ');
+    return {
+      resume: false,
+      remember: true,
+      logMessage:
+        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and hit a ${label} limit, which ` +
+        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
+      notice: {
+        message:
+          `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
           `Continue it there.`,
         button: RESUME_IN_TERMINAL_BUTTON,
       },

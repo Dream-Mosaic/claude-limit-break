@@ -962,3 +962,78 @@ test('an overload hit from an entry with no timestamp carries none', () => {
   assert.ok(out.overload);
   assert.equal(out.overload.entryTimestampMs, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Task 4c (R4): the limit type travels with the detection, so the fire
+// decision can tell a limit Claude Code's native auto-continue covers
+// (five_hour) from one it never continues (weekly, Opus, Sonnet, Fable,
+// usage credit - research-api-errors-binary.md Q4).
+// ---------------------------------------------------------------------------
+
+const typedQuotaEntry = (rateLimitType: unknown, text = "You've hit your limit · resets in 5 hours") =>
+  entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    apiErrorStatus: 429,
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    quotaLimits: {
+      status: 'rejected',
+      resetsAt: Math.floor((Date.now() + 2 * 3_600_000) / 1000),
+      ...(rateLimitType === undefined ? {} : { rateLimitType }),
+    },
+    message: { content: [{ type: 'text', text }] },
+  });
+
+test('a flagged five-hour quotaLimits entry carries rateLimitType five_hour', () => {
+  const out = make().inspectLine(typedQuotaEntry('five_hour'), FILE);
+  assert.equal(out.limit?.detection.rule, 'quota-limits');
+  assert.equal(out.limit?.detection.rateLimitType, 'five_hour');
+});
+
+test('a flagged seven_day quotaLimits entry carries rateLimitType seven_day', () => {
+  const out = make().inspectLine(typedQuotaEntry('seven_day'), FILE);
+  assert.equal(out.limit?.detection.rule, 'quota-limits');
+  assert.equal(out.limit?.detection.rateLimitType, 'seven_day');
+});
+
+test('a quotaLimits entry whose rateLimitType is missing or not a string leaves the type undefined', () => {
+  for (const type of [undefined, 7, null, { a: 1 }]) {
+    const out = make().inspectLine(typedQuotaEntry(type), FILE);
+    assert.equal(out.limit?.detection.rule, 'quota-limits');
+    assert.equal(out.limit?.detection.rateLimitType, undefined, JSON.stringify(type));
+    assert.equal(Object.hasOwn(out.limit!.detection, 'rateLimitType'), false);
+  }
+});
+
+test('the text path maps "weekly limit" to seven_day and "session limit" to five_hour', () => {
+  for (const [label, type] of [
+    ['weekly', 'seven_day'],
+    ['session', 'five_hour'],
+    ['Opus', 'seven_day_opus'],
+  ]) {
+    const line = entry({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'rate_limit',
+      apiErrorStatus: 429,
+      timestamp: new Date().toISOString(),
+      message: { content: [{ type: 'text', text: `You've hit your ${label} limit · resets in 5 hours` }] },
+    });
+    const out = make().inspectLine(line, FILE);
+    assert.equal(out.limit?.detection.rule !== 'quota-limits', true, 'setup: no quotaLimits, so this is the text path');
+    assert.equal(out.limit?.detection.rateLimitType, type, label);
+  }
+});
+
+test('the text path leaves the type undefined when the notice names none', () => {
+  const line = entry({
+    type: 'user',
+    isApiErrorMessage: true,
+    message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
+  });
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit);
+  assert.equal(out.limit.detection.rateLimitType, undefined);
+});
