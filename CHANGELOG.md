@@ -16,8 +16,8 @@ The first release.
 - Coordinates with Claude Code's own session state and with other Claude
   sessions instead of always spawning a second `claude --resume` against the
   same session. An idle Claude Code panel still resumes unattended - the main
-  use case - and the existing stale-tab handling runs after it exactly as
-  before. A panel or terminal that is already busy or waiting is left alone. An
+  use case - and the stale-tab handling described below runs after it. A
+  panel or terminal that is already busy or waiting is left alone. An
   idle terminal at a usage limit defers to Claude Code's own "Continue
   automatically at usage limit" setting when it is on, and offers "Resume in
   Terminal Anyway" when it is off. An idle terminal after an overload always
@@ -70,15 +70,16 @@ The first release.
   never writes to `~/.claude.json`.
 - The status-bar tooltip lists every waiting, ready, and gave-up session as
   its own line.
-- Treats two more cases as an overload (retried after a short backoff) rather
-  than a usage limit: a stream interrupted because the machine went to sleep,
-  the connection dropped or the response stalled, and a transient 429 that
-  explicitly disclaims being a usage limit. A retry Claude Code is already
+- Treats a stream interrupted because the machine went to sleep, the
+  connection dropped or the response stalled, and a transient 429 that
+  explicitly disclaims being a usage limit, as an overload (retried after a
+  short backoff) rather than a usage limit. A retry Claude Code is already
   running itself ("Retrying in 5s · attempt 3/10") is recognised and left
-  alone, so its own backoff is not interrupted. Reads the transcript's own `quotaLimits.resetsAt` field
-  ahead of parsing the banner text when a rate-limit entry carries one, which
-  gets calendar dates, time zones and same-day rollovers right without
-  depending on the wording of a message this extension does not control.
+  alone, so its own backoff is not interrupted. Reads the transcript's own
+  `quotaLimits.resetsAt` field ahead of parsing the banner text when a
+  rate-limit entry carries one, which gets calendar dates, time zones and
+  same-day rollovers right without depending on the wording of a message this
+  extension does not control.
 - Icon and brand assets, including the banner above.
 - After a resume, a session still open in a Claude Code panel tab is
   reported, and optionally reopened for you. That tab keeps its own idea of
