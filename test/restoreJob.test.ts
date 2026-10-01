@@ -15,12 +15,17 @@ import type { MementoLike } from '../src/scheduler';
 const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
 
+// One clock read for the whole file: `valid()` and `full()` are called more
+// than once in a test and compared (deepEqual), so two `Date.now()` reads a
+// millisecond apart made the comparison flaky.
+const NOW = Date.now();
+
 const valid = (): Record<string, unknown> => ({
   sessionId: SESSION,
   transcript: `/h/p/${SESSION}.jsonl`,
   prompt: 'continue',
-  resumeAtMs: Date.now() + 60_000,
-  baseResumeAtMs: Date.now() + 30_000,
+  resumeAtMs: NOW + 60_000,
+  baseResumeAtMs: NOW + 30_000,
   jitterMs: 30_000,
   reason: 'limit',
 });
