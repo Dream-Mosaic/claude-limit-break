@@ -397,12 +397,12 @@ test('a flagged entry whose quotaLimits has no numeric resetsAt falls back to th
   assert.ok(hoursOut > 1.9 && hoursOut < 2.1, `expected ~2h out, got ${hoursOut.toFixed(2)}h`);
 });
 
-test('a structured reset far beyond maxWait is rejected, the same as a parsed one', () => {
-  // "Keep maxWait semantics": a structured reset is not exempt from the same
-  // absurd-result cap a parsed one has always had. make() reports 24h.
+test('a structured reset beyond maxWait is offer-only, the same as a parsed one (wave D, policy B)', () => {
+  // A structured reset gets exactly the outcomes a parsed one does. make()
+  // reports 24h, so 30 hours out is offered at the reset, never automatic.
   const resetsAt = Date.now() + 30 * 3_600_000;
   const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 30 hours"), FILE);
-  assert.equal(out.limit, undefined, 'a 30-hour-out structured reset must not arm a 24h-capped timer');
+  assert.equal(out.limit?.detection.offerOnly, true, 'a 30-hour-out structured reset must not arm a 24h-capped automatic resume');
 });
 
 // ---------------------------------------------------------------------------
@@ -1278,7 +1278,12 @@ test('C1: a STALE reset is history and does not claim "no parseable reset time"'
   const warnings: string[] = [];
   const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
   assert.equal(w.inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE).limit, undefined);
-  assert.deepEqual(warnings, []);
+  // Wave D, D4: never silent - but as history, once per file, not as a miss.
+  assert.equal(w.inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE).limit, undefined);
+  assert.equal(warnings.length, 1, `saw ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0]!, /^Usage limit during compaction in session 0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234 reset at /);
+  assert.match(warnings[0]!, /history/);
+  assert.doesNotMatch(warnings[0]!, /no parseable reset time/);
 });
 
 test('C1: an unrelated compaction failure does not warn about a reset time', () => {
@@ -1541,11 +1546,13 @@ test('M3: a flagged limit that parses does not warn (control)', () => {
   assert.deepEqual(warnings, []);
 });
 
-test('M3: a flagged limit with a readable but STALE reset is history, not a miss: no warning', () => {
+test('M3: a flagged limit with a readable but STALE reset is history, not a miss (wave D, D4: warned once, as history)', () => {
   const { w, warnings } = warnWatcher();
   const stale = flaggedText("You've hit your session limit · resets in 5 hours", { timestamp: hoursAgo(20) });
   assert.equal(w.inspectLine(stale, FILE).limit, undefined);
-  assert.deepEqual(warnings, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /history/);
+  assert.doesNotMatch(warnings[0]!, /no parseable reset time/);
 });
 
 test('M3: a flagged overload does NOT warn, including one that names a limit and one too old to act on', () => {
@@ -1574,4 +1581,89 @@ test('M3: a long file-sized string in a flagged entry is not read for the warnin
   const { w, warnings } = warnWatcher();
   w.inspectLine(flaggedText("You've hit your session limit " + 'x'.repeat(500)), FILE);
   assert.deepEqual(warnings, []);
+});
+
+// ---------------------------------------------------------------------------
+// Wave D, D1 and D4 (policy B): the structured path's three outcomes, and no
+// limit that is detected but not scheduled goes unlogged.
+// ---------------------------------------------------------------------------
+
+test('D1: a structured weekly reset beyond maxWaitHours is picked up as offer-only, type intact', () => {
+  const resetsAt = Date.now() + 3 * 86_400_000;
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    timestamp: new Date().toISOString(),
+    cwd: '/projects/example',
+    quotaLimits: { status: 'rejected', resetsAt: Math.floor(resetsAt / 1000), rateLimitType: 'seven_day' },
+    message: { content: [{ type: 'text', text: "You've hit your weekly limit · resets Oct 4, 1am (America/Chicago)" }] },
+  });
+  const { w, warnings } = warnWatcher();
+  const out = w.inspectLine(line, FILE);
+  assert.ok(out.limit, 'a weekly limit is no longer dropped');
+  assert.equal(out.limit.detection.offerOnly, true);
+  assert.equal(out.limit.detection.rateLimitType, 'seven_day');
+  assert.equal(out.limit.detection.resumeAt.getTime(), Math.floor(resetsAt / 1000) * 1000);
+  assert.deepEqual(warnings, []);
+});
+
+test('D1: a structured reset within maxWaitHours carries no offerOnly key', () => {
+  const out = make().inspectLine(quotaEntry(Date.now() + 2 * 3_600_000, "You've hit your session limit · resets 3pm"), FILE);
+  assert.ok(out.limit);
+  assert.equal(Object.hasOwn(out.limit.detection, 'offerOnly'), false);
+});
+
+test('D1/D4: a structured reset more than 8 days out arms nothing and warns, naming the session and the reason', () => {
+  const { w, warnings } = warnWatcher();
+  const out = w.inspectLine(quotaEntry(Date.now() + 9 * 86_400_000, "You've hit your weekly limit"), FILE);
+  assert.equal(out.limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
+  assert.match(warnings[0]!, /more than 8 days out/);
+});
+
+test('D4: a structured reset in the past warns as history, once per file however many copies the fork holds', () => {
+  const { w, warnings } = warnWatcher();
+  const written = new Date(Date.now() - 12 * 3_600_000);
+  const stale = quotaEntry(written.getTime() + 3_600_000, "You've hit your session limit · resets 1am", written);
+  assert.equal(w.inspectLine(stale, FILE).limit, undefined);
+  assert.equal(w.inspectLine(stale, FILE).limit, undefined);
+  assert.equal(warnings.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
+  assert.match(warnings[0]!, /history/);
+  assert.doesNotMatch(warnings[0]!, /no parseable reset time/);
+  const OTHER = FILE.replace('0b3d1f66', '1c4e2a77');
+  w.inspectLine(stale, OTHER);
+  assert.equal(warnings.length, 2, 'another file (another fork) gets its own one warning');
+});
+
+test('D4: a stale TEXT reset warns once per file too, and shares the once with the structured path', () => {
+  const { w, warnings } = warnWatcher();
+  const stale = flaggedText("You've hit your session limit · resets in 5 hours", { timestamp: hoursAgo(20) });
+  w.inspectLine(stale, FILE);
+  w.inspectLine(stale, FILE);
+  const written = new Date(Date.now() - 12 * 3_600_000);
+  w.inspectLine(quotaEntry(written.getTime() + 3_600_000, 'x limit', written), FILE);
+  assert.equal(warnings.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0]!, /history/);
+});
+
+test('D4: an absurd text reset warns every time it is seen (it is not fork history)', () => {
+  const { w, warnings } = warnWatcher();
+  const far = flaggedText(`You've hit your session limit, resets at ${new Date(Date.now() + 20 * 86_400_000).toISOString()}`);
+  assert.equal(w.inspectLine(far, FILE).limit, undefined);
+  w.inspectLine(far, FILE);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0]!, /more than 8 days out/);
+});
+
+test('D4: the offsets prune forgets a file it no longer tracks, so its warn-once memory does not grow forever', () => {
+  const { w, warnings } = warnWatcher();
+  const written = new Date(Date.now() - 12 * 3_600_000);
+  const stale = quotaEntry(written.getTime() + 3_600_000, 'x limit', written);
+  w.inspectLine(stale, FILE);
+  (w as unknown as { prune(files: readonly string[]): void }).prune([]);
+  w.inspectLine(stale, FILE);
+  assert.equal(warnings.length, 2, 'a file pruned and met again is a new file');
 });

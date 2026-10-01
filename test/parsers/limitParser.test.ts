@@ -11,6 +11,8 @@ import {
   MAX_NOTICE_LENGTH,
   RESET_GRACE_MS,
   resolveStructuredReset,
+  classifyLimit,
+  MAX_RESET_DAYS,
 } from '../../src/parsers/limitParser';
 
 const NOW = new Date('2026-08-03T12:00:00Z');
@@ -83,8 +85,10 @@ test('ignores prose and source code that merely discuss limits', () => {
   }
 });
 
-test('rejects a reset time beyond the wait horizon', () => {
-  assert.equal(detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW), undefined);
+// Wave D (policy B): beyond the wait horizon is no longer dropped - it is
+// offer-only (see the D1 tests below). Only past MAX_RESET_DAYS is rejected.
+test('a reset time beyond the wait horizon is offer-only, not automatic', () => {
+  assert.equal(detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW)?.offerOnly, true);
 });
 
 test('rejects a reset time already in the past', () => {
@@ -390,23 +394,19 @@ test('detectLimit: omitting readAt keeps every existing caller unaffected (readA
 test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
   const now = new Date('2026-08-03T12:00:00Z');
   const atEdge = Math.floor((now.getTime() - RESET_GRACE_MS) / 1000);
-  assert.ok(resolveStructuredReset(atEdge, now, MAXW), 'exactly RESET_GRACE_MS old is still due now');
-  assert.equal(
-    resolveStructuredReset(atEdge - 1, now, MAXW),
-    undefined,
-    'a further second back is history',
-  );
+  assert.equal(resolveStructuredReset(atEdge, now, MAXW).kind, 'auto', 'exactly RESET_GRACE_MS old is still due now');
+  assert.equal(resolveStructuredReset(atEdge - 1, now, MAXW).kind, 'rejected', 'a further second back is history');
 });
 
-test('resolveStructuredReset: wait-horizon boundary accepts an exact tie, rejects beyond it', () => {
+test('resolveStructuredReset: wait-horizon boundary is automatic on an exact tie, offer-only beyond it', () => {
   const now = new Date('2026-08-03T12:00:00Z');
   const atHorizon = Math.floor((now.getTime() + MAXW * 3_600_000) / 1000);
-  assert.ok(resolveStructuredReset(atHorizon, now, MAXW), 'exactly at the horizon must still be accepted');
-  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW), undefined, 'an hour beyond the horizon is rejected');
+  assert.equal(resolveStructuredReset(atHorizon, now, MAXW).kind, 'auto', 'exactly at the horizon is still automatic');
+  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW).kind, 'offerOnly', 'an hour beyond the horizon is offered');
 });
 
 test('resolveStructuredReset: a non-finite value is rejected outright', () => {
-  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW), undefined);
+  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW).kind, 'rejected');
 });
 
 // ---------------------------------------------------------------------------
@@ -554,3 +554,86 @@ for (const [text, type] of LIMIT_TYPE_CASES) {
     assert.equal(Object.hasOwn(hit, 'rateLimitType'), type !== undefined);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Wave D, D1 (policy B, the user's decision): resolveStructuredReset tells its
+// three outcomes apart. Within maxWaitHours: automatic, as before. Beyond it
+// but no more than MAX_RESET_DAYS (8) out - a weekly limit, which is at most
+// 7 days - offer-only. Further out, or further in the past than the grace,
+// rejected with a reason the caller logs.
+// ---------------------------------------------------------------------------
+
+const D1_NOW = new Date('2026-08-03T12:00:00Z');
+const secs = (ms: number) => ms / 1000;
+
+test('D1: a structured reset within maxWaitHours is automatic, a tie at the horizon included', () => {
+  const inTwo = resolveStructuredReset(secs(D1_NOW.getTime() + 2 * 3_600_000), D1_NOW, MAXW);
+  assert.deepEqual(inTwo, { kind: 'auto', at: new Date(D1_NOW.getTime() + 2 * 3_600_000) });
+  const atHorizon = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000), D1_NOW, MAXW);
+  assert.equal(atHorizon.kind, 'auto', 'exactly at the horizon is still automatic');
+});
+
+test('D1: a structured reset one second past maxWaitHours is offer-only', () => {
+  const v = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000) + 1, D1_NOW, MAXW);
+  assert.equal(v.kind, 'offerOnly');
+});
+
+test('D1: a weekly reset (7 days out) is offer-only, and the 8-day bound is inclusive', () => {
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, MAXW).kind, 'offerOnly');
+  const atBound = resolveStructuredReset(secs(D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000), D1_NOW, MAXW);
+  assert.equal(atBound.kind, 'offerOnly', 'exactly 8 days out is still believed');
+  assert.equal(MAX_RESET_DAYS, 8);
+});
+
+test('D1: a structured reset more than 8 days out is rejected as absurd, with its instant', () => {
+  const at = D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000 + 1000;
+  assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'absurd', at: new Date(at) });
+});
+
+test('D1: raising maxWaitHours turns a weekly reset automatic, but never past the 8-day bound', () => {
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, 7 * 24).kind, 'auto');
+  const nineDays = resolveStructuredReset(secs(D1_NOW.getTime() + 9 * 86_400_000), D1_NOW, 10 * 24);
+  assert.equal(nineDays.kind, 'rejected', 'a huge maxWaitHours does not lift the misread bound');
+});
+
+test('D1: a structured reset further back than the grace is rejected as past, with its instant', () => {
+  const at = D1_NOW.getTime() - RESET_GRACE_MS - 1000;
+  assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'past', at: new Date(at) });
+});
+
+test('D1: a non-finite structured reset is rejected as unparseable', () => {
+  assert.deepEqual(resolveStructuredReset(Number.NaN, D1_NOW, MAXW), { kind: 'rejected', reason: 'unparseable' });
+});
+
+test('D1: detectLimit applies the same three outcomes to text', () => {
+  const offer = detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW);
+  assert.equal(offer?.offerOnly, true, '40 hours out is offer-only at maxWaitHours 24');
+  assert.equal(offer?.resumeAt.getTime(), NOW.getTime() + 40 * 3_600_000);
+  const auto = detectLimit('Usage limit reached. Try again in 5 hours', NOW, MAXW);
+  assert.ok(auto);
+  assert.equal(Object.hasOwn(auto, 'offerOnly'), false, 'an automatic detection carries no offerOnly key');
+  const absurd = classifyLimit('You have hit your session limit, resets at 2026-08-20T00:00:00Z', NOW, MAXW);
+  assert.equal(absurd?.kind, 'rejected');
+  assert.equal(absurd?.kind === 'rejected' ? absurd.reason : '', 'absurd');
+  assert.equal(detectLimit('You have hit your session limit, resets at 2026-08-20T00:00:00Z', NOW, MAXW), undefined);
+  // Nor may a clock rule then read the year's "20" as 8pm tonight.
+  const retry = classifyLimit('Usage limit reached. Try again at 2026-08-20T00:00:00Z', NOW, MAXW);
+  assert.equal(retry?.kind === 'rejected' ? retry.reason : JSON.stringify(retry), 'absurd');
+});
+
+test('D1: classifyLimit tells "not a notice at all" (undefined) from a notice it could not use', () => {
+  assert.equal(classifyLimit('Claude finished the task successfully.', NOW, MAXW), undefined);
+  const v = classifyLimit("You've hit your monthly spend limit · raise it at claude.ai/settings/usage", NOW, MAXW);
+  assert.deepEqual(v, { kind: 'rejected', reason: 'unparseable' });
+  const past = classifyLimit(`Claude AI usage limit reached|${epochAt('2026-08-03T09:00:00Z')}`, NOW, MAXW);
+  assert.equal(past?.kind === 'rejected' ? past.reason : '', 'past');
+});
+
+test('D1: an automatic reading from a later rule still beats an offer-only one from an earlier rule', () => {
+  // The iso rule (earlier) reads 3 days out; the duration rule (later) reads
+  // 2 hours. "The first rule that yields a usable instant wins" was always
+  // about the automatic horizon; an offer is only taken when nothing is.
+  const v = detectLimit('Usage limit reached, resets at 2026-08-06T12:00:00Z. Try again in 2 hours', NOW, MAXW);
+  assert.equal(v?.resumeAt.getTime(), NOW.getTime() + 2 * 3_600_000);
+  assert.equal(v?.offerOnly, undefined);
+});

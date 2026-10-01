@@ -5,7 +5,18 @@ import * as vscode from 'vscode';
 
 import { claudeHome } from './claudeHome';
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, compactionLimitText, looksLikeLimitMessage, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
+import {
+    classifyLimit,
+    resolveStructuredReset,
+    compactionLimitText,
+    MAX_NOTICE_LENGTH,
+    MAX_RESET_DAYS,
+    RESET_GRACE_MS,
+    LimitDetection,
+    LimitRejection,
+    normalize,
+    rateLimitTypeFromText,
+} from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 import { classifyNativeStatus, NativeStatus } from './nativeContinue';
@@ -199,6 +210,13 @@ export class TranscriptWatcher {
     private debounce?: NodeJS.Timeout;
     private scanning = false;
     private readonly offsets = new Map<string, OffsetEntry>();
+    /**
+     * Files that have already had their one "reset already passed" warning
+     * (wave D, D4). A fork replays every line of its parent, each stale
+     * limit with it, and one line per file says all there is to say. Pruned
+     * with the offsets, so a file forgotten there and met again warns again.
+     */
+    private readonly warnedPast = new Set<string>();
 
     constructor(
         private readonly getMaxWaitHours: () => number,
@@ -298,6 +316,11 @@ export class TranscriptWatcher {
 
     private prune(existingFiles: readonly string[]): void {
         const survivors = pruneOffsets(this.offsets, new Set(existingFiles), Date.now());
+        for (const file of this.warnedPast) {
+            if (!survivors.has(file)) {
+                this.warnedPast.delete(file);
+            }
+        }
         if (survivors.size === this.offsets.size) {
             return;
         }
@@ -482,6 +505,10 @@ export class TranscriptWatcher {
         // local scan found no such entry.
         const flagged = entry.isApiErrorMessage === true;
         const maxWait = this.getMaxWaitHours();
+        // The first limit notice in a flagged entry that could not be
+        // scheduled, and why: warned about at the end, once no overload
+        // claims the entry (wave C fix round 1, M3; wave D, D4).
+        let textRejection: { verdict: LimitRejection; text: string } | undefined;
         // The real current time: staleness and the grace window are always
         // decided against this, never against the entry's own timestamp.
         const now = new Date();
@@ -552,25 +579,30 @@ export class TranscriptWatcher {
                         ? fieldType
                         : candidates.map((c) => rateLimitTypeFromText(normalize(c.text))).find((t) => t !== undefined);
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
-                    const resumeAt = resolveStructuredReset(resetsAt, now, maxWait);
+                    const verdict = resolveStructuredReset(resetsAt, now, maxWait);
                     // Decisive either way: this is the authoritative field, so a
-                    // value that fails the grace/horizon check is not a cue to
+                    // value that fails the grace/8-day check is not a cue to
                     // fall back to the text - it is history (or absurd), and the
-                    // text does not get a second opinion on that.
-                    return resumeAt
-                        ? {
-                            limit: {
-                                detection: {
-                                    resumeAt,
-                                    rule: 'quota-limits',
-                                    text: 'quotaLimits.resetsAt',
-                                    ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
-                                },
-                                cwd,
-                                file,
+                    // text does not get a second opinion on that. It is logged,
+                    // though (wave D, D4): nothing detected goes unsaid.
+                    if (verdict.kind === 'rejected') {
+                        this.warnUnscheduled('Usage limit', file, verdict, `quotaLimits.resetsAt ${resetsAt}`);
+                        return { inputNeeded };
+                    }
+                    return {
+                        limit: {
+                            detection: {
+                                resumeAt: verdict.at,
+                                rule: 'quota-limits',
+                                text: 'quotaLimits.resetsAt',
+                                ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
+                                // Wave D, D1 (policy B): beyond maxWaitHours, offered at the reset, never resumed on its own.
+                                ...(verdict.kind === 'offerOnly' ? { offerOnly: true as const } : {}),
                             },
-                        }
-                        : { inputNeeded };
+                            cwd,
+                            file,
+                        },
+                    };
                 }
             }
             for (const candidate of candidates) {
@@ -584,9 +616,14 @@ export class TranscriptWatcher {
                 // skips the source-code and quotation guards inside detectLimit,
                 // which exist for text nobody vouched for. The tool_result veto
                 // that used to sit here went with the unflagged path (A1).
-                const detection = detectLimit(candidate.text, basis, maxWait, { trusted: true, readAt: now });
-                if (detection) {
-                    return { limit: { detection, cwd, file } };
+                const verdict = classifyLimit(candidate.text, basis, maxWait, { trusted: true, readAt: now });
+                if (verdict?.kind === 'detected') {
+                    return { limit: { detection: verdict.detection, cwd, file } };
+                }
+                // Held, not warned yet: the entry may still turn out to be an
+                // overload (below), which is not a limit and must not warn.
+                if (verdict) {
+                    textRejection ??= { verdict, text: candidate.text };
                 }
             }
         }
@@ -600,19 +637,16 @@ export class TranscriptWatcher {
         // policy, claims, backoff) is unchanged.
         const compactionText = flagged ? undefined : compactionLimitText(entry);
         if (compactionText !== undefined) {
-            const detection = detectLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
-            if (detection) {
-                return { limit: { detection, cwd, file } };
+            // Wave D: a weekly limit during compaction is read like any other
+            // (the dated form, offer-only), which C1 could not.
+            const verdict = classifyLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
+            if (verdict?.kind === 'detected') {
+                return { limit: { detection: verdict.detection, cwd, file } };
             }
-            // Say why nothing armed, but only when no reset time could be read
-            // at all. A readable time that is merely stale (a fork's copy) or
-            // past the horizon is history, not a miss, and must not log as one.
-            const anyTime = detectLimit(compactionText, basis, Infinity, { trusted: true, readAt: new Date(0) });
-            if (!anyTime) {
-                this.log.warn(
-                    `Usage limit during compaction in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
-                        `not picking it up: ${compactionText.slice(0, MAX_NOTICE_LENGTH)}`,
-                );
+            // Say why nothing armed (wave D, D4): unparseable, absurd, or
+            // history - the last once per file, since a fork repeats it.
+            if (verdict) {
+                this.warnUnscheduled('Usage limit during compaction', file, verdict, compactionText);
             }
             return { inputNeeded };
         }
@@ -641,26 +675,50 @@ export class TranscriptWatcher {
         // Wave C fix round 1 (M3): a FLAGGED entry that reads as a usage limit
         // but yielded no limit and is no overload is a missed resume the user
         // would otherwise never hear about - the log is their only clue - so it
-        // gets the same warning the compaction path does. Only when no reset
-        // time could be read at all: a readable but stale time (a fork's copy)
-        // is history, and an overload render (even one too old to act on, such
-        // as the transient 429 that disclaims being a usage limit) is not a
-        // limit.
-        if (flagged) {
-            const short = candidates.filter((c) => c.text.length <= MAX_NOTICE_LENGTH);
-            const limitText = short.find((c) => looksLikeLimitMessage(c.text))?.text;
-            if (
-                limitText !== undefined &&
-                !short.some((c) => detectOverload(c.text)) &&
-                !detectLimit(limitText, basis, Infinity, { trusted: true, readAt: new Date(0) })
-            ) {
-                this.log.warn(
-                    `Usage limit in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
-                        `not picking it up: ${limitText.slice(0, MAX_NOTICE_LENGTH)}`,
-                );
-            }
+        // gets the same warning the compaction path does. An overload render
+        // (even one too old to act on, such as the transient 429 that
+        // disclaims being a usage limit) is not a limit and never warns.
+        //
+        // Wave D, D4 widens it to every reason a limit goes unscheduled: a
+        // reset more than MAX_RESET_DAYS out (absurd) and one already past
+        // (history - a fork's copy - warned once per file) as well as an
+        // unreadable one.
+        if (textRejection && !candidates.some((c) => c.text.length <= MAX_NOTICE_LENGTH && detectOverload(c.text))) {
+            this.warnUnscheduled('Usage limit', file, textRejection.verdict, textRejection.text);
         }
         return { inputNeeded };
+    }
+
+    /**
+     * The one warning for a limit that was detected but not scheduled (wave
+     * D, D4: never silent), naming the session and the reason. A reset that
+     * already passed - history, which a fork's copy of its parent is full of
+     * - warns at most once per file; the other reasons warn each time.
+     */
+    private warnUnscheduled(what: string, file: string, rejection: LimitRejection, text: string): void {
+        const session = path.basename(file, '.jsonl');
+        const shown = text.slice(0, MAX_NOTICE_LENGTH);
+        const at = rejection.at?.toISOString() ?? 'an unknown time';
+        if (rejection.reason === 'past') {
+            if (this.warnedPast.has(file)) {
+                return;
+            }
+            this.warnedPast.add(file);
+            this.log.warn(
+                `${what} in session ${session} reset at ${at}, more than ${RESET_GRACE_MS / 60_000} minutes ago; ` +
+                    `not picking it up, as history (a fork's copy, say). Further ones in this file are not reported: ${shown}`,
+            );
+            return;
+        }
+        if (rejection.reason === 'absurd') {
+            this.log.warn(
+                `${what} in session ${session} resets at ${at}, more than ${MAX_RESET_DAYS} days out, longer than any ` +
+                    `Claude usage limit; not picking it up as a likely misread: ${shown}`,
+            );
+            return;
+        }
+        const why = rejection.detail ? ` (${rejection.detail})` : '';
+        this.log.warn(`${what} in session ${session} has no parseable reset time${why}; not picking it up: ${shown}`);
     }
 
     stop(): void {
