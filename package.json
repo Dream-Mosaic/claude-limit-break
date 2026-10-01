@@ -115,7 +115,7 @@
         },
         "claudeLimitBreak.resumePrompt": {
           "type": "string",
-          "default": "[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.",
+          "default": "[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.",
           "scope": "machine",
           "description": "Prompt sent when resuming. Passed as a single argument, never through a shell. Machine-scoped: this is the instruction a tool-using agent acts on, so a workspace must not be able to set it."
         },
