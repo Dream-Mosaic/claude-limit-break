@@ -59,6 +59,7 @@ import {
 } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 import { continuedSince } from './continuedSince';
+import { lastNativeCancel, standDownReason, STAND_DOWN_LABEL } from './nativeContinue';
 import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
 
 const NS = 'claudeLimitBreak';
@@ -880,6 +881,45 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
+   * Wave C, C5: stand down when Claude Code's own auto-continue was cancelled
+   * for a reason that means "someone else has this session" or "the user
+   * declined" - the session moved to Claude Desktop, to the cloud or to a
+   * background session, or the user pressed Esc / chose to wait. A resume here
+   * would be a second writer on a session another place now holds, or against
+   * what the user just said.
+   *
+   * Reads the job's transcript from its detection baseline, the same window
+   * continuedSince judges, and takes the LAST cancel line in it. Only the four
+   * reasons in nativeContinue.ts stand down; any other reason (Claude Code
+   * exited or relaunched during the wait) and no cancel line at all leave
+   * every caller exactly as it was, so a string that stops matching falls back
+   * to today's behaviour, and a false match costs a notice instead of a
+   * resume: neither can start a second writer.
+   *
+   * On a stand-down the job is remembered, so Resume Now works from the
+   * palette and from the notice's own button (both manual paths: the user
+   * chose). The claim the fire took is KEPT, like every other fire that
+   * declines to resume (see `!decision.resume` in scheduler.onFire). Reports
+   * whether it stood down.
+   */
+  const standDownOnNativeCancel = (job: PendingJob, claimKey: string, baseline: number | undefined): boolean => {
+    const cancel = lastNativeCancel(job.transcript, baseline);
+    const reason = cancel === undefined ? undefined : standDownReason(cancel);
+    if (reason === undefined) {
+      return false;
+    }
+    const id8 = job.sessionId.slice(0, 8);
+    rememberReady(job);
+    log.info(`Session ${id8}: Claude Code's auto-continue was cancelled (${cancel}); not resuming here.`);
+    offerResumeNow(
+      job,
+      claimKey,
+      `Limit Break: session ${id8} was ${STAND_DOWN_LABEL[reason]}, so it was not resumed here.`,
+    );
+    return true;
+  };
+
+  /**
    * Native auto-continue checks still waiting out their grace (final review,
    * Important 6), kept apart from stallChecks so Cancel can drop them: a
    * check that fires after Cancel would offer back a job the user just
@@ -919,6 +959,12 @@ export function activate(context: vscode.ExtensionContext): void {
       nativeChecks.delete(check);
       if (continuedSince(job.transcript, baseline)) {
         log.info(`Claude Code continued ${job.sessionId} on its own; a new turn follows the limit in its transcript.`);
+        return;
+      }
+      // C5: a cancel line written during the grace (the session moved to
+      // Desktop, the cloud or the background, or the user pressed Esc) is the
+      // answer to "why did it not continue", and it is not a failure.
+      if (standDownOnNativeCancel(job, claimKey, baseline)) {
         return;
       }
       const bytesNow = transcriptBytes(job.transcript);
@@ -1132,6 +1178,14 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduler,
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
+    // Wave C, C4: Claude Code's own auto-continue lines (armed, cancelled,
+    // fired) are observed and logged, never acted on from here. Recognition is
+    // by type, subtype and prefix in the watcher; the text is the log's only
+    // use of it.
+    watcher.onNativeStatus((h) => {
+      const id = resolveSession(h.file, h.cwd, () => 0)?.sessionId ?? h.file;
+      log.info(`Claude Code auto-continue ${h.status.kind} for session ${id}: ${h.status.text}`);
+    }),
     watcher.onInputNeeded((hit) => {
       // A finished turn is evidence the session works again, so a gave-up
       // record for it is stale (fix round 1, ruling 2a). Ahead of both
@@ -1239,6 +1293,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // the claim is KEPT, so every other window drops its copy too.
       if (hasContinued(job)) {
         log.info(`Session ${job.sessionId.slice(0, 8)} has continued since it stopped; not resuming.`);
+        return;
+      }
+      // Wave C, C5: after the continued-since check (a session that moved on
+      // is silent), ahead of the autoResume split and the holder check:
+      // whoever cancelled Claude Code's auto-continue for this reason either
+      // has the session or told us to leave it, and no holder listing can say
+      // that better. Keeps the claim, remembers the job, offers Resume Now.
+      if (standDownOnNativeCancel(job, claimKey, job.transcriptBytesAtDetection)) {
         return;
       }
       if (!s.autoResume) {

@@ -5,9 +5,10 @@ import * as vscode from 'vscode';
 
 import { claudeHome } from './claudeHome';
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, compactionLimitText, looksLikeLimitMessage, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
+import { classifyNativeStatus, NativeStatus } from './nativeContinue';
 
 /** Never read more than this from one file in a single pass. */
 const MAX_READ_BYTES = 2_000_000;
@@ -31,7 +32,9 @@ export interface OverloadHit {
     entryTimestampMs?: number;
 }
 export interface InputHit { detection: InputDetection; cwd?: string; file: string }
-export interface InspectResult { limit?: LimitHit; overload?: OverloadHit; inputNeeded?: InputHit }
+/** One of Claude Code's own auto-continue status lines (wave C, C4). Observed only. */
+export interface NativeStatusHit { status: NativeStatus; cwd?: string; file: string }
+export interface InspectResult { limit?: LimitHit; overload?: OverloadHit; inputNeeded?: InputHit; nativeStatus?: NativeStatusHit }
 
 export type WatchMode = 'machine' | 'workspace';
 
@@ -182,6 +185,14 @@ export class TranscriptWatcher {
     private readonly onInputNeededEmitter = new vscode.EventEmitter<InputHit>();
     /** Fires when an assistant turn ends, which hands the conversation back. */
     readonly onInputNeeded = this.onInputNeededEmitter.event;
+
+    private readonly onNativeStatusEmitter = new vscode.EventEmitter<NativeStatusHit>();
+    /**
+     * Fires for each of Claude Code's own auto-continue status lines (armed,
+     * cancelled, fired). Observation only: nothing is armed from it, and the
+     * text is never parsed for a time (wave C, C4).
+     */
+    readonly onNativeStatus = this.onNativeStatusEmitter.event;
 
     private watcher?: fs.FSWatcher;
     private poll?: NodeJS.Timeout;
@@ -349,6 +360,7 @@ export class TranscriptWatcher {
             offset: from + Buffer.byteLength(text.slice(0, lastNewline + 1), 'utf8'),
             lastActivity: now,
         });
+        let limit: LimitHit | undefined;
         let overload: OverloadHit | undefined;
         let inputNeeded: InputHit | undefined;
         for (const line of text.slice(0, lastNewline).split('\n')) {
@@ -356,18 +368,43 @@ export class TranscriptWatcher {
             if (!trimmed) {
                 continue;
             }
-            const scan = this.inspectLine(trimmed, file);
+            // One bad line must not take a limit already recorded in this
+            // batch with it: the offset above is already consumed, so nothing
+            // would read the batch again.
+            let scan: InspectResult;
+            try {
+                scan = this.inspectLine(trimmed, file);
+            }
+            catch (err) {
+                this.log.warn(`Cannot inspect a line in ${path.basename(file)}: ${String(err)}`);
+                continue;
+            }
+            if (scan.nativeStatus) {
+                // Every such line is logged (C4), including one that follows a
+                // limit in the same batch. The C5 stand-down scan starts at
+                // the size recorded at detection, which is at or past the end
+                // of this batch, so it cannot see such a line (NEXT.md 1.1).
+                this.onNativeStatusEmitter.fire(scan.nativeStatus);
+            }
             if (scan.limit) {
-                // A usage limit outranks everything else in the batch: it means waiting,
-                // and retrying into a limit only burns attempts against a closed door.
-                this.log.info(`Limit detected in transcript ${path.basename(file)}: ${scan.limit.detection.text}`);
-                this.onHitEmitter.fire(scan.limit);
-                return;
+                // The first limit in the batch wins. The loop keeps reading
+                // (wave C, C4) only so that the status lines after it - an
+                // armed line, a cancel line - are still reported; nothing
+                // else in the batch can act once a limit is found.
+                limit ??= scan.limit;
+                continue;
             }
             // Keep the last overload rather than the first: a burst of failures writes
             // several, and the freshest one describes the state the session is in now.
             overload = scan.overload ?? overload;
             inputNeeded = scan.inputNeeded ?? inputNeeded;
+        }
+        if (limit) {
+            // A usage limit outranks everything else in the batch: it means waiting,
+            // and retrying into a limit only burns attempts against a closed door.
+            this.log.info(`Limit detected in transcript ${path.basename(file)}: ${limit.detection.text}`);
+            this.onHitEmitter.fire(limit);
+            return;
         }
         if (overload) {
             this.log.info(`Server overload in transcript ${path.basename(file)}: ${overload.detection.text}`);
@@ -391,6 +428,11 @@ export class TranscriptWatcher {
             // A partially written line; the next pass will see it complete.
             return {};
         }
+        // Valid JSON that is not an object (`null`, a number, an array) is not
+        // a transcript entry, and reading `.cwd` off it would throw.
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            return {};
+        }
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
         // Scope is checked as early as it can be: cwd only exists once the line
         // is parsed, but nothing past this point - candidate collection, the
@@ -411,6 +453,14 @@ export class TranscriptWatcher {
                 file,
             }
             : undefined;
+        // Wave C, C4: Claude Code's own auto-continue status lines. Recognised
+        // by type, subtype and prefix alone (nativeContinue.ts) and reported
+        // for the log; they carry no limit and no overload, so nothing below
+        // applies to them.
+        const nativeStatus = classifyNativeStatus(entry);
+        if (nativeStatus) {
+            return { nativeStatus: { status: nativeStatus, cwd, file }, inputNeeded };
+        }
         const candidates: Candidate[] = [];
         collectStrings(entry, candidates, 0);
         // The one admission gate for a resume, limit and overload alike (final
@@ -540,6 +590,32 @@ export class TranscriptWatcher {
                 }
             }
         }
+        // Wave C, C1: the one unflagged shape admitted - a usage limit hit
+        // during `/compact`, which Claude Code writes as a `system` /
+        // `local_command` entry (see compactionLimitText for every condition
+        // and why model prose can never be one). Read as trusted text from
+        // here on, exactly like a flagged entry's own: the same parser, the
+        // same grace window and horizon, so a fork's copy of an old failure is
+        // history and everything after detection (continuedSince, the holder
+        // policy, claims, backoff) is unchanged.
+        const compactionText = flagged ? undefined : compactionLimitText(entry);
+        if (compactionText !== undefined) {
+            const detection = detectLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
+            if (detection) {
+                return { limit: { detection, cwd, file } };
+            }
+            // Say why nothing armed, but only when no reset time could be read
+            // at all. A readable time that is merely stale (a fork's copy) or
+            // past the horizon is history, not a miss, and must not log as one.
+            const anyTime = detectLimit(compactionText, basis, Infinity, { trusted: true, readAt: new Date(0) });
+            if (!anyTime) {
+                this.log.warn(
+                    `Usage limit during compaction in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
+                        `not picking it up: ${compactionText.slice(0, MAX_NOTICE_LENGTH)}`,
+                );
+            }
+            return { inputNeeded };
+        }
         // No limit here. A transient server error is worth reporting instead,
         // from the same flagged entries only (Task 4c R3, tightened to the
         // literal flag by A2 / final review M1). A scan of the 168
@@ -560,6 +636,28 @@ export class TranscriptWatcher {
                 if (overload) {
                     return { overload: { detection: overload, cwd, file, entryTimestampMs: writtenAt?.getTime() } };
                 }
+            }
+        }
+        // Wave C fix round 1 (M3): a FLAGGED entry that reads as a usage limit
+        // but yielded no limit and is no overload is a missed resume the user
+        // would otherwise never hear about - the log is their only clue - so it
+        // gets the same warning the compaction path does. Only when no reset
+        // time could be read at all: a readable but stale time (a fork's copy)
+        // is history, and an overload render (even one too old to act on, such
+        // as the transient 429 that disclaims being a usage limit) is not a
+        // limit.
+        if (flagged) {
+            const short = candidates.filter((c) => c.text.length <= MAX_NOTICE_LENGTH);
+            const limitText = short.find((c) => looksLikeLimitMessage(c.text))?.text;
+            if (
+                limitText !== undefined &&
+                !short.some((c) => detectOverload(c.text)) &&
+                !detectLimit(limitText, basis, Infinity, { trusted: true, readAt: new Date(0) })
+            ) {
+                this.log.warn(
+                    `Usage limit in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
+                        `not picking it up: ${limitText.slice(0, MAX_NOTICE_LENGTH)}`,
+                );
             }
         }
         return { inputNeeded };
@@ -583,6 +681,7 @@ export class TranscriptWatcher {
         this.onHitEmitter.dispose();
         this.onOverloadEmitter.dispose();
         this.onInputNeededEmitter.dispose();
+        this.onNativeStatusEmitter.dispose();
     }
 }
 

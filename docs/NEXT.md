@@ -180,6 +180,41 @@ synchronous `claude agents` call has moved to 1.1 below.
 
 Planned for the release after 1.0.
 
+- **Act on the armed and fired auto-continue lines.** 1.0 only logs Claude
+  Code's own armed, cancelled and fired status lines and uses the cancel lines
+  to stand down (wave C). A confirmed armed line in the transcript is a better
+  signal than reading `autoContinueAtUsageLimit` from settings: stand down on
+  it, and use a fired line to know Claude Code took the session.
+- **Map the other cancel reasons once there are real samples.** Only
+  `process_exit` has a real transcript line (v2.1.278); the Desktop, cloud,
+  background and Esc wordings come from the 2.1.285 binary, and the
+  "Don't continue automatically" answer is a `user` entry derived from code.
+  Confirm them against real lines, and decide about `relaunch` and the "turned
+  off", "stopped" and "did not run" lines, which are logged and not acted on.
+- **Compaction-failure shapes: resolved.** An automatic compaction failure
+  writes nothing to the transcript (the failed turn's ordinary flagged limit
+  entry follows and is already caught), so the manual `/compact` shape wave C
+  reads is the only one there is. Revisit only if a real automatic-compaction
+  failure entry turns up.
+- **A cancel line written before the detection baseline.** The stand-down scan
+  reads from the size the transcript had when the limit was detected, so a
+  cancel line written between the limit entry and that moment is not seen. In
+  practice they land seconds after the stop and the watcher reads within a
+  poll, but a window that starts at the limit entry itself would close it.
+  A variant: a same-reset re-detection moves the baseline forward
+  (`scheduler.ts`, the `transcriptBytesAtDetection` refresh) and can step past
+  a cancel line written in between. Fix: carry the limit entry's end offset in
+  `LimitHit` (`from` plus the bytes through that line), persist the earliest
+  value across re-detections, and start only the C5 scan there, leaving
+  `continuedSince`'s baseline alone. A same-batch cancel line is logged (C4)
+  today but cannot be seen by C5.
+- **A compaction-limit job in an idle five-hour CLI.** For a C1 job whose
+  session is an idle terminal with native auto-continue on, `decideOnFire`
+  assumes Claude Code will continue it, but a compaction request's rate-limit
+  signal may not arm the native wait. The "Claude Code did not continue ... on
+  its own" notice after the grace covers it (an offer, never an unattended
+  resume). Revisit with real samples; a C1 detection could tell `decideOnFire`
+  not to count on native auto-continue.
 - **Read `CLAUDE_CONFIG_DIR` from Claude Code's settings too.** The extension
   sees the variable only in the environment VS Code was started from. Claude
   Code also honours one set in its user and managed settings `env`; reading
