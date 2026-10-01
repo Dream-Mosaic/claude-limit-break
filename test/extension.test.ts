@@ -5156,3 +5156,309 @@ test('C4: armed, cancelled and fired status lines are logged with the session id
     teardown(ctx);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Wave C, C5: stand down when Claude Code's auto-continue was cancelled
+// because the session moved to Claude Desktop, to the cloud or to the
+// background, or because the user pressed Esc / chose to wait. The cancel
+// lines are real transcript entries in a file this test controls; the strings
+// are the 2.1.285 binary's (research-autocontinue-compaction.md), except the
+// process_exit line, which is byte-exact from a real v2.1.278 transcript.
+// ---------------------------------------------------------------------------
+
+const CANCEL_PREFIX_DOT = 'Automatic continue cancelled · ';
+const CANCEL_TEXT = {
+  desktop: `${CANCEL_PREFIX_DOT}this session moved to Claude Desktop, so the task will not resume on its own when the usage limit resets (continue it there)`,
+  cloud: `${CANCEL_PREFIX_DOT}sending this session to the cloud, so the task will not resume here on its own when the usage limit resets (continue it in the cloud session)`,
+  background: `${CANCEL_PREFIX_DOT}this session moved to the background, so the task will not resume on its own when the usage limit resets`,
+  esc: `${CANCEL_PREFIX_DOT}/rate-limit-options to re-arm`,
+  exited: `${CANCEL_PREFIX_DOT}Claude Code exited during the wait, so the task will not resume on its own when the usage limit resets (send a prompt after the reset to continue)`,
+  relaunch: `${CANCEL_PREFIX_DOT}Claude Code relaunched during the wait, so the task will not resume on its own when the usage limit resets (send a prompt then to continue)`,
+};
+const WAIT_SENTENCE = 'Automatic continue cancelled. Your session will wait for you instead; /rate-limit-options can arm it again.';
+
+/** A system/informational line, as Claude Code's own hook writes it. */
+const informationalLine = (content: string, level = 'warning') =>
+  jsonl({ type: 'system', subtype: 'informational', content, isMeta: false, level, timestamp: new Date().toISOString() });
+/** The /rate-limit-options "Don't continue automatically" answer: a user entry carrying stdout. */
+const waitUserLine = () =>
+  jsonl({ type: 'user', message: { role: 'user', content: `<local-command-stdout>${WAIT_SENTENCE}</local-command-stdout>` } });
+
+const standDownNotice = (label: string) =>
+  `Limit Break: session ${SESSION.slice(0, 8)} was ${label}, so it was not resumed here.`;
+const standDownNoticeOf = () => vscodeFake.info.find((m) => /so it was not resumed here/.test(m.message));
+
+/** Fire a job whose transcript holds `appended` after its 500-byte baseline; no holder, autoResume on. */
+async function fireWithCancel(appended: string, setup: () => void = () => {}): Promise<{ dir: string; store: Map<string, unknown>; ctx: FakeContext; file: string }> {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  setup();
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, appended);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  await oneTick();
+  return { dir, store, ctx, file };
+}
+
+const standDownCases: [string, string, string][] = [
+  ['Claude Desktop', informationalLine(CANCEL_TEXT.desktop), 'moved to Claude Desktop'],
+  ['the cloud', informationalLine(CANCEL_TEXT.cloud), 'moved to the cloud'],
+  ['the background', informationalLine(CANCEL_TEXT.background), 'moved to the background'],
+  ['an Esc / Ctrl+C cancel', informationalLine(CANCEL_TEXT.esc, 'notice'), 'set to wait by you'],
+  ['the /rate-limit-options "Don\'t continue automatically" user entry (derived from code, no real sample)', waitUserLine(), 'set to wait by you'],
+];
+
+for (const [name, appended, label] of standDownCases) {
+  test(`C5: a cancel for ${name} stands the fire down: no resume, remembered, Resume Now offered`, async () => {
+    const released = releasedKeys.length;
+    const { dir, store, ctx } = await fireWithCancel(appended);
+    try {
+      assert.equal(vscodeFake.terminals.length, 0, 'never a second writer');
+      const notice = standDownNoticeOf();
+      assert.ok(notice, `a stand-down notice must be shown; saw ${JSON.stringify(vscodeFake.info)}`);
+      assert.equal(notice.message, standDownNotice(label));
+      assert.deepEqual(notice.items, ['Resume Now']);
+      assert.equal((store.get(READY_KEY) as { sessionId: string }[] | undefined)?.[0]?.sessionId, SESSION, 'remembered for Resume Now');
+      assert.equal(releasedKeys.length, released, 'the claim is kept');
+      assert.ok(
+        vscodeFake.outputLines.some((l) => l.includes(SESSION.slice(0, 8)) && l.includes('auto-continue was cancelled') && l.includes('not resuming here')),
+        `the reason must be logged; saw ${JSON.stringify(vscodeFake.outputLines.slice(-4))}`,
+      );
+    } finally {
+      teardown(ctx);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('C5: the stand-down notice\'s Resume Now button is a manual resume and launches (the user chose)', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop));
+  try {
+    const notice = standDownNoticeOf();
+    assert.ok(notice);
+    notice.answer('Resume Now');
+    await flush();
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'the click resumes it');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: the palette Resume Now command is unaffected by the cancel line', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.cloud));
+  try {
+    assert.equal(vscodeFake.terminals.length, 0);
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
+    assert.ok(resumeNow);
+    await resumeNow();
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: with autoResume off the stand-down notice replaces the plain cooldown notice', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop), () => {
+    vscodeFake.config = { ...manualConfig() };
+  });
+  try {
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(standDownNoticeOf(), 'the specific reason is shown');
+    assert.equal(vscodeFake.info.filter((m) => /cooldown has elapsed/.test(m.message)).length, 0, 'and not a second, plain notice');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a cancel for a reason not on the list (Claude Code exited or relaunched) resumes exactly as before', async () => {
+  for (const text of [CANCEL_TEXT.exited, CANCEL_TEXT.relaunch]) {
+    const { dir, ctx } = await fireWithCancel(informationalLine(text));
+    try {
+      assert.equal(standDownNoticeOf(), undefined, text);
+      assert.equal(vscodeFake.terminals.length, 1, `resumed: ${text}`);
+    } finally {
+      teardown(ctx);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('C5: no cancel line at all resumes exactly as before', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine('Usage limit reached · continuing automatically at 11:10am · esc or type to cancel', 'notice'));
+  try {
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a string mismatch (reworded cancel line) falls back to today\'s behaviour: it resumes', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(`${CANCEL_PREFIX_DOT}handed off to Claude Desktop`));
+  try {
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: the LAST cancel line decides: Desktop then "exited" resumes; "exited" then Desktop stands down', async () => {
+  const first = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop) + informationalLine(CANCEL_TEXT.exited));
+  try {
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(first.ctx);
+    fs.rmSync(first.dir, { recursive: true, force: true });
+  }
+  const second = await fireWithCancel(informationalLine(CANCEL_TEXT.exited) + informationalLine(CANCEL_TEXT.desktop));
+  try {
+    assert.ok(standDownNoticeOf());
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(second.ctx);
+    fs.rmSync(second.dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a cancel line from BEFORE the detection baseline is history and does not stand down', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-'));
+  const file = path.join(dir, `${SESSION}.jsonl`);
+  const history = informationalLine(CANCEL_TEXT.desktop);
+  fs.writeFileSync(file, history);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, history.length)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a job with no baseline (an older build\'s) never stands down', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, informationalLine(CANCEL_TEXT.desktop));
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a quoted cancel line in a prompt, a reply or a tool result is not a cancel', async () => {
+  const quoted = jsonl({ type: 'user', message: { role: 'user', content: CANCEL_TEXT.desktop } }) +
+    jsonl({ type: 'assistant', message: { content: [{ type: 'text', text: CANCEL_TEXT.desktop }] } });
+  // These are real turns, so continuedSince reads the session as moved on and
+  // the fire is silent; what matters is that nothing stands down and nothing launches.
+  const { dir, ctx } = await fireWithCancel(quoted);
+  try {
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a session that moved on after the cancel is silent, not a stand-down notice', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop) + USER_TURN);
+  try {
+    assert.equal(standDownNoticeOf(), undefined, 'continuedSince answers first');
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('has continued since it stopped; not resuming.')));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: at fire, with the native holder row idle, a cancel stands down before the native-continue wait is armed', async () => {
+  const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop), () => {
+    autoContinueOn = true;
+    holderRow('cli', 'idle');
+  });
+  try {
+    assert.ok(standDownNoticeOf());
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined, 'no native-continue check was armed to offer a second notice');
+    assert.ok(!vscodeFake.outputLines.some((l) => /Checking that it did/.test(l)));
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: a cancel written DURING the native-continue grace stands down instead of "did not continue"', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await untilStoodDown();
+    fs.appendFileSync(file, informationalLine(CANCEL_TEXT.cloud));
+    await tickAndGrace();
+    assert.equal(nativeNotice(), undefined, 'not offered as a failure');
+    const notice = standDownNoticeOf();
+    assert.ok(notice, `saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.equal(notice.message, standDownNotice('moved to the cloud'));
+    assert.equal((store.get(READY_KEY) as { sessionId: string }[] | undefined)?.[0]?.sessionId, SESSION);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C5: an unlisted cancel during the native-continue grace still offers the plain "did not continue" notice', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  autoContinueOn = true;
+  holderRow('cli', 'idle');
+  const { dir, file } = transcriptOf(500);
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await untilStoodDown();
+    fs.appendFileSync(file, informationalLine(CANCEL_TEXT.exited));
+    await tickAndGrace();
+    assert.ok(nativeNotice(), 'behaviour unchanged for an unlisted reason');
+    assert.equal(standDownNoticeOf(), undefined);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    autoContinueOn = true;
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
