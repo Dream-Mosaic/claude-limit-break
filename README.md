@@ -24,9 +24,11 @@ documentation does not say), and from `~/.claude.json` otherwise. It only ever
 reads these files.
 
 A usage limit or a server error is acted on only when Claude Code itself
-flagged the transcript entry as an API error. Text the model wrote, a tool
-returned or you pasted never arms a timer, even when it quotes a limit notice
-word for word.
+flagged the transcript entry as an API error, or - for a usage limit hit during
+a manual `/compact`, which Claude Code writes unflagged - when it is the
+`system` entry Claude Code writes for that failure. Text the model wrote, a
+tool returned or you pasted never arms a timer, even when it quotes a limit
+notice word for word.
 
 It also chimes when a Claude turn finishes in a folder open in this window, so
 you can walk away from a long run and hear when it is your turn again.
@@ -68,7 +70,13 @@ resume for it:
 | A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
 | An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute after this window's own resume would have fired (the reset plus its random delay), it looks for a new message in the transcript since the stop was detected; if there is none (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
 | An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. The notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
+| A session whose native auto-continue was **cancelled for a handoff or by you** (moved to Claude Desktop, sent to the cloud, moved to the background, or Esc / Ctrl+C / "Don't continue automatically" in `/rate-limit-options`) | Stands down when the resume would fire, whatever holds the session: it keeps the claim, remembers the job for Resume Now, logs the reason and says "Limit Break: session `<id8>` was moved to Claude Desktop (or: moved to the cloud, moved to the background, set to wait by you), so it was not resumed here." with a Resume Now button. The last cancel line since the stop was detected decides. Any other reason ("Claude Code exited during the wait", "Claude Code relaunched during the wait"), no cancel line, or wording this version does not know: nothing changes. The Resume Now command and buttons are unaffected: you chose. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
+
+Limit Break also reads Claude Code's own auto-continue status lines (armed,
+cancelled, fired) from the transcript and writes each to the output channel
+with its session id; that is observation only, and the text is never parsed
+for a time.
 
 Two VS Code windows watching the same account can still both detect an
 identical reset within milliseconds of each other, before either shows up in
@@ -104,9 +112,9 @@ button. (`<id8>` is the first eight characters of the session id.)
 The check judges the session's final state, not just whether anything was
 written. A retry that ran into the same limit again leaves the session stopped
 again, so it is still resumed. Local slash commands such as `/usage` and
-`/status` make no API call and do not count as continuing. A successful
-`/compact` writes a summary entry, which does count; one that failed writes
-none, so the session is still resumed. When the transcript cannot be read, or
+`/status` make no API call and do not count as continuing, nor does the error
+output of one that failed. A successful `/compact` writes a summary entry, which
+does count; one that failed writes none, so the session is still resumed. When the transcript cannot be read, or
 there is no record of its size at detection (a job saved by an older version),
 the check cannot tell and the resume goes ahead. The one exception: if the
 transcript has grown by more than 2 MB since the stop and ends in a line too big

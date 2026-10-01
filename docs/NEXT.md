@@ -180,6 +180,27 @@ synchronous `claude agents` call has moved to 1.1 below.
 
 Planned for the release after 1.0.
 
+- **Act on the armed and fired auto-continue lines.** 1.0 only logs Claude
+  Code's own armed, cancelled and fired status lines and uses the cancel lines
+  to stand down (wave C). A confirmed armed line in the transcript is a better
+  signal than reading `autoContinueAtUsageLimit` from settings: stand down on
+  it, and use a fired line to know Claude Code took the session.
+- **Map the other cancel reasons once there are real samples.** Only
+  `process_exit` has a real transcript line (v2.1.278); the Desktop, cloud,
+  background and Esc wordings come from the 2.1.285 binary, and the
+  "Don't continue automatically" answer is a `user` entry derived from code.
+  Confirm them against real lines, and decide about `relaunch` and the "turned
+  off", "stopped" and "did not run" lines, which are logged and not acted on.
+- **Compaction-failure shapes: resolved.** An automatic compaction failure
+  writes nothing to the transcript (the failed turn's ordinary flagged limit
+  entry follows and is already caught), so the manual `/compact` shape wave C
+  reads is the only one there is. Revisit only if a real automatic-compaction
+  failure entry turns up.
+- **A cancel line written before the detection baseline.** The stand-down scan
+  reads from the size the transcript had when the limit was detected, so a
+  cancel line written between the limit entry and that moment is not seen. In
+  practice they land seconds after the stop and the watcher reads within a
+  poll, but a window that starts at the limit entry itself would close it.
 - **Read `CLAUDE_CONFIG_DIR` from Claude Code's settings too.** The extension
   sees the variable only in the environment VS Code was started from. Claude
   Code also honours one set in its user and managed settings `env`; reading

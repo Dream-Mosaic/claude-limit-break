@@ -1165,7 +1165,7 @@ const compactionEntry = (over: Record<string, unknown> = {}, ts = new Date(Date.
   isMeta: false,
   userType: 'external',
   entrypoint: 'claude-vscode',
-  cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster',
+  cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/limit-break',
   sessionId: '05690955-d99d-46e1-bc06-109e58dadc2f',
   version: '2.1.267',
   gitBranch: 'main',
@@ -1177,7 +1177,7 @@ test('C1: a usage limit hit during compaction arms a limit, typed from its label
   assert.ok(out.limit, 'the unflagged compaction failure must be detected');
   assert.equal(out.limit.detection.rateLimitType, 'five_hour', 'session -> five_hour');
   assert.equal(out.limit.detection.rule, 'clock-reset');
-  assert.equal(out.limit.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster');
+  assert.equal(out.limit.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/limit-break');
   assert.equal(out.limit.file, FILE);
   const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
   assert.ok(hoursOut > 0 && hoursOut <= 24, `resumeAt ${hoursOut}h out`);
@@ -1311,7 +1311,7 @@ const nativeLine = (content: unknown, over: Record<string, unknown> = {}) =>
     level: 'notice',
     userType: 'external',
     entrypoint: 'cli',
-    cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster',
+    cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/limit-break',
     sessionId: 'fd493448-9183-45bd-865d-ea2ccb227021',
     version: '2.1.278',
     ...over,
@@ -1333,7 +1333,7 @@ test('C4: inspectLine reports armed, cancelled and fired status lines, and arms 
     assert.equal(out.nativeStatus?.status.kind, kind, content);
     assert.equal(out.nativeStatus?.status.text, content);
     assert.equal(out.nativeStatus?.file, FILE);
-    assert.equal(out.nativeStatus?.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster');
+    assert.equal(out.nativeStatus?.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/limit-break');
     assert.equal(out.limit, undefined, 'a status line is not a limit: ' + content);
     assert.equal(out.overload, undefined, content);
   }

@@ -38,7 +38,41 @@ The first release.
   writes, a tool returns, a subagent quotes or you paste never arms a timer: a
   `grep` quoting a banner, a checkpoint note, a percentage-usage warning, even a
   limit notice or an error render quoted word for word. A flagged entry is
-  believed wherever its text appears.
+  believed wherever its text appears. The one other shape believed is a usage
+  limit hit during a manual `/compact` (next entry).
+- Picks up a usage limit hit during compaction. A `/compact` that fails on a
+  usage limit is written unflagged, as a `system` / `local_command` entry
+  reading `<local-command-stderr>Error during compaction: You've hit your
+  session limit · resets 8:30pm (America/Chicago)</local-command-stderr>`, so a
+  session stopped that way had no flagged entry to arm from. Exactly that shape
+  is read now - entry type, subtype, the tag and prefix at the start of the
+  content, and a usage-limit message after them - and then treated like any
+  flagged limit: the same parser, grace window, continued-since check, holder
+  policy and claims. A fork's copy of an old failure is still history. Model
+  prose, a tool result or a paste can never be a `system` entry, so the rule
+  above is unchanged for them. An automatic compaction that fails writes
+  nothing to the transcript; the failed turn's own flagged limit entry follows
+  and is already picked up.
+- Observes Claude Code's own auto-continue status lines - armed ("Usage limit
+  reached · continuing automatically ..."), cancelled ("Automatic continue
+  cancelled · ...") and fired - and writes each to the output channel with its
+  session id. They are recognised by entry type, subtype and prefix only; the
+  text is never parsed for a time.
+- Stands down when Claude Code's auto-continue was cancelled because the
+  session moved somewhere else or because you declined it: handed to Claude
+  Desktop, sent to the cloud, moved to the background, or cancelled with Esc
+  or Ctrl+C or with "Don't continue automatically" in `/rate-limit-options`.
+  When a resume fires (and when the native-continue check looks), the
+  transcript is read from where the stop was detected and the last such cancel
+  line decides. On one of those four, nothing is resumed: the job is kept for
+  Resume Now, the log names the reason, and a notice says "Limit Break: session
+  <id8> was moved to Claude Desktop (or: moved to the cloud, moved to the
+  background, set to wait by you), so it was not resumed here." with a Resume
+  Now button. Any other reason ("Claude Code exited during the wait", "Claude
+  Code relaunched during the wait"), no cancel line, or a wording this version
+  does not know all behave as before, and the manual Resume Now paths are
+  unaffected. The cancel wordings are read from the Claude Code 2.1.285
+  binary, not from real transcripts, apart from the exited line.
 - Claude Code's own auto-continue covers the five-hour usage limit only, so
   Limit Break stands down for it only there. A weekly, Opus, Sonnet, Fable or
   usage-credit limit in an idle terminal is offered as "Resume in Terminal
@@ -226,6 +260,13 @@ The first release.
 
 ### Known limitations
 
+- A usage-limit message with no parseable reset time is not picked up; the
+  output channel logs it.
+- The cancel lines that stand the resume down are matched by wording that was
+  read from the Claude Code 2.1.285 binary. A release that rewords them falls
+  back to the behaviour before this check: the resume goes ahead as it would
+  have. A cancel line written between the stop and the moment the stop was
+  detected is outside the window that is read.
 - A Claude Code panel tab in another VS Code window cannot be closed or
   reopened from here. If a resumed session is open in one, you get the
   warning to reopen it by hand, without the "Reopen session tab" button,

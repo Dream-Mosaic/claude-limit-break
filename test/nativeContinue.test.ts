@@ -51,7 +51,7 @@ const info = (content: unknown, over: Record<string, unknown> = {}) => ({
   level: 'notice',
   userType: 'external',
   entrypoint: 'cli',
-  cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster',
+  cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/limit-break',
   sessionId: 'fd493448-9183-45bd-865d-ea2ccb227021',
   version: '2.1.278',
   ...over,
