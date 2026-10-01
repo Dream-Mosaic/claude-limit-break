@@ -175,6 +175,12 @@ test('the native "Continue from where you left off." answered by a real turn is 
   assert.equal(continuedSince(file, baseline), true);
 });
 
+test('the native isMeta continue on its own, its turn still running, already counts (I1: isMeta is not skipped)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, NATIVE_CONTINUE);
+  assert.equal(continuedSince(file, baseline), true);
+});
+
 test('stopped again, then continued for real after that, is past its stop (C1)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, SDK_PROMPT + LIMIT_ENTRY + SDK_PROMPT + REAL_TURN);
