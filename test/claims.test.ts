@@ -339,3 +339,43 @@ test('a hold never ends before the fire time of the job itself', () => {
   const job = { baseResumeAtMs: 1_000_000_000, resumeAtMs: 1_000_000_000 + 120 * 60_000 };
   assert.equal(claimHoldDeadline(job, 0, 30), job.resumeAtMs);
 });
+
+// --- an unusable claims directory fails open (final fix wave B, B3; final review M3) ---
+
+/** A directory path that can never be created: a child of a regular file. */
+function impossibleDir(): string {
+  const file = path.join(tempDir(), 'not-a-directory');
+  fs.writeFileSync(file, 'x');
+  return path.join(file, 'claims');
+}
+
+test('claimResume fails open when the claims directory cannot be created: claimed, logged, no throw (M3)', () => {
+  const { log, lines } = logger();
+  let result: string | undefined;
+  assert.doesNotThrow(() => {
+    result = claimResume(impossibleDir(), 'sess-1', Date.now(), fs, log);
+  });
+  assert.equal(result, 'claimed');
+  assert.ok(lines.some((l) => /claims directory/i.test(l)), `the failure must be logged; saw ${JSON.stringify(lines)}`);
+});
+
+test('claimResume fails open when mkdirSync throws for any reason (a fake fs, as the other fail-open tests do) (M3)', () => {
+  const { log, lines } = logger();
+  const brokenFs: ClaimFs = {
+    ...fs,
+    mkdirSync: () => {
+      throw Object.assign(new Error('read-only file system'), { code: 'EROFS' });
+    },
+  };
+  assert.equal(claimResume(tempDir(), 'sess-1', Date.now(), brokenFs, log), 'claimed');
+  assert.ok(lines.length > 0);
+});
+
+test('holdClaim fails open the same way: claimed, no throw (M3, Cancel and the automatic fire both use it)', () => {
+  const { log } = logger();
+  let result: string | undefined;
+  assert.doesNotThrow(() => {
+    result = holdClaim(impossibleDir(), 'k', Date.now(), Date.now() + 3 * HOUR_MS, fs, log, 'window-A');
+  });
+  assert.equal(result, 'claimed');
+});

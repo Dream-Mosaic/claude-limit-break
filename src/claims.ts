@@ -182,7 +182,18 @@ export function claimResume(
   log: Logger = noopLog,
   owner?: string,
 ): ClaimResult {
-  fs.mkdirSync(dir, { recursive: true });
+  // Fails open like every other filesystem failure in this module (final fix
+  // wave B, B3; final review M3). Outside any try this threw out of onFire
+  // after the scheduler had already consumed the job, and VS Code swallows a
+  // listener's error: the job was lost without a trace. Cancel reaches this
+  // through holdClaim, so it is covered too. No directory means nothing can
+  // be claimed, so the resume goes ahead as if the claim were ours.
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    log.warn(`Claims directory ${dir} could not be created (${String(err)}); resuming as if the claim for ${key} were ours.`);
+    return 'claimed';
+  }
   const file = claimPath(dir, key);
   const first = attempt(file, key, nowMs, fs, log, owner);
   if (first !== 'retry') {

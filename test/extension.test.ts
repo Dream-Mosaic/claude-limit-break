@@ -5041,3 +5041,26 @@ test('resume() re-checks the session id before building the argv: a non-UUID lau
     teardown(ctx);
   }
 });
+
+test('an unusable claims directory does not stop a resume: the fire still launches (B3, final review M3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  // A "directory" under a regular file: mkdirSync throws, whatever the OS.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-m3-'));
+  const blocker = path.join(base, 'file');
+  fs.writeFileSync(blocker, 'x');
+  fakeClaimResult = 'real';
+  realClaimsDir = path.join(blocker, 'claims');
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, `the resume must go ahead; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.ok(vscodeFake.outputLines.some((l) => /claims directory/i.test(l)), 'and the failure is logged');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
