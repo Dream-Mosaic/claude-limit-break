@@ -613,7 +613,7 @@ export class TranscriptWatcher {
                     continue;
                 }
                 // Every entry read here is flagged, so its text is trusted: it
-                // skips the source-code and quotation guards inside detectLimit,
+                // skips the source-code and quotation guards inside classifyLimit,
                 // which exist for text nobody vouched for. The tool_result veto
                 // that used to sit here went with the unflagged path (A1).
                 const verdict = classifyLimit(candidate.text, basis, maxWait, { trusted: true, readAt: now });
