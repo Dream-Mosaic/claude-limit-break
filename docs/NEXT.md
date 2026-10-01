@@ -201,6 +201,20 @@ Planned for the release after 1.0.
   cancel line written between the limit entry and that moment is not seen. In
   practice they land seconds after the stop and the watcher reads within a
   poll, but a window that starts at the limit entry itself would close it.
+  A variant: a same-reset re-detection moves the baseline forward
+  (`scheduler.ts`, the `transcriptBytesAtDetection` refresh) and can step past
+  a cancel line written in between. Fix: carry the limit entry's end offset in
+  `LimitHit` (`from` plus the bytes through that line), persist the earliest
+  value across re-detections, and start only the C5 scan there, leaving
+  `continuedSince`'s baseline alone. A same-batch cancel line is logged (C4)
+  today but cannot be seen by C5.
+- **A compaction-limit job in an idle five-hour CLI.** For a C1 job whose
+  session is an idle terminal with native auto-continue on, `decideOnFire`
+  assumes Claude Code will continue it, but a compaction request's rate-limit
+  signal may not arm the native wait. The "Claude Code did not continue ... on
+  its own" notice after the grace covers it (an offer, never an unattended
+  resume). Revisit with real samples; a C1 detection could tell `decideOnFire`
+  not to count on native auto-continue.
 - **Read `CLAUDE_CONFIG_DIR` from Claude Code's settings too.** The extension
   sees the variable only in the environment VS Code was started from. Claude
   Code also honours one set in its user and managed settings `env`; reading

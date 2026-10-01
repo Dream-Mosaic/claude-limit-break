@@ -63,8 +63,8 @@ The first release.
   Desktop, sent to the cloud, moved to the background, or cancelled with Esc
   or Ctrl+C or with "Don't continue automatically" in `/rate-limit-options`.
   When a resume fires (and when the native-continue check looks), the
-  transcript is read from where the stop was detected and the last such cancel
-  line decides. On one of those four, nothing is resumed: the job is kept for
+  transcript is read from where the stop was detected and the last cancel
+  line, whatever its reason, decides. On one of those four, nothing is resumed: the job is kept for
   Resume Now, the log names the reason, and a notice says "Limit Break: session
   <id8> was moved to Claude Desktop (or: moved to the cloud, moved to the
   background, set to wait by you), so it was not resumed here." with a Resume

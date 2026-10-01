@@ -75,8 +75,9 @@ resume for it:
 
 Limit Break also reads Claude Code's own auto-continue status lines (armed,
 cancelled, fired) from the transcript and writes each to the output channel
-with its session id; that is observation only, and the text is never parsed
-for a time.
+with its session id. Logging them is observation only, and the text is never
+parsed for a time; the cancel lines listed in the table above are the only ones
+that change what Limit Break does.
 
 Two VS Code windows watching the same account can still both detect an
 identical reset within milliseconds of each other, before either shows up in
@@ -114,9 +115,10 @@ written. A retry that ran into the same limit again leaves the session stopped
 again, so it is still resumed. Local slash commands such as `/usage` and
 `/status` make no API call and do not count as continuing, nor does the error
 output of one that failed. A successful `/compact` writes a summary entry, which
-does count; one that failed writes none, so the session is still resumed. When the transcript cannot be read, or
-there is no record of its size at detection (a job saved by an older version),
-the check cannot tell and the resume goes ahead. The one exception: if the
+does count; one that failed writes none, so the session is still resumed. When
+the transcript cannot be read, or there is no record of its size at detection (a
+job saved by an older version), the check cannot tell and the resume goes
+ahead. The one exception: if the
 transcript has grown by more than 2 MB since the stop and ends in a line too big
 to read, that line is a real prompt (pasted images, say), and the session counts
 as continued.
