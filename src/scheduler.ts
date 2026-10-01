@@ -252,8 +252,15 @@ export class ResumeScheduler {
           job.transcriptBytesAtDetection !== undefined &&
           job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
         ) {
+          const before = existing.transcriptBytesAtDetection;
           existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
           this.persist();
+          // Logged like A9's adoption above (wave B, B8, re-review m-new-2): a
+          // later "has continued since it stopped" skip is measured from here.
+          this.log.info(
+            `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
+              `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
+          );
         }
         this.log.info(
           sameReset

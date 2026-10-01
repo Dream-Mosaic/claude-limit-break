@@ -394,3 +394,21 @@ test('a job persisted without rateLimitType reads back with it undefined', (t) =
   assert.ok(s.current);
   assert.equal(s.current.rateLimitType, undefined);
 });
+
+// Wave B, B8 (wave A re-review, m-new-2): the baseline refresh is logged, as
+// A9's type adoption is, so a skip that follows can be traced to it.
+test('a refreshed detection baseline is logged, once, with the old and new size; an unchanged or absent size is not', (t) => {
+  const lines: string[] = [];
+  const log = { info: (m: string) => lines.push(m), warn() {}, error() {} };
+  const s = new ResumeScheduler(memento(), log);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 5 * 60_000), transcriptBytesAtDetection: 500 });
+  const refreshLines = () => lines.filter((l) => l.includes('detection baseline'));
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 20 * 60_000), transcriptBytesAtDetection: 900 });
+  assert.equal(refreshLines().length, 1, `saw ${JSON.stringify(lines)}`);
+  assert.ok(refreshLines()[0]!.includes(SESSION_A) && refreshLines()[0]!.includes('500') && refreshLines()[0]!.includes('900'));
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 20 * 60_000), transcriptBytesAtDetection: 900 });
+  s.schedule(jobWithBase(SESSION_A, base, base + 20 * 60_000));
+  assert.equal(refreshLines().length, 1, 'the same size, or no size, changes nothing and logs nothing');
+});

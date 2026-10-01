@@ -216,3 +216,35 @@ test('local slash-command entries after a limit are not a continuation (I1)', ()
   );
   assert.equal(continuedSince(file, baseline), false);
 });
+
+// Final fix wave B, B8 (wave A re-review, m-new-1): the read window is the last
+// 2 MB, so a LAST line longer than that leaves only a fragment in it. A real
+// prompt can be that long (the largest line on one dev machine is a 2.13 MB
+// user entry carrying three pasted images); a synthetic error entry never is,
+// it is a few hundred bytes. More than the cap of growth since the stop, and
+// nothing parseable in the window, is a session that moved on.
+test('a 2.1 MB real user line as the last line counts as continued (m-new-1)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  const huge = line({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: 'x'.repeat(2_100_000) }] },
+  });
+  assert.ok(huge.length > MAX_CONTINUED_READ_BYTES, 'setup: the line is longer than the read window');
+  fs.appendFileSync(file, huge);
+  assert.equal(continuedSince(file, baseline), true);
+});
+
+test('the same long line under the cap is read normally, and a flagged stop after it still wins (m-new-1 control)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'x'.repeat(1_000_000) }] } }) + LIMIT_ENTRY,
+  );
+  assert.equal(continuedSince(file, baseline), false, 'a retry that hit the limit again is still stopped');
+});
+
+test('a window that starts at the baseline and holds no parseable line is not continued (m-new-1 control)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, '{"type":"user","message":{"role":"us');
+  assert.equal(continuedSince(file, baseline), false, 'a partial write, not news');
+});

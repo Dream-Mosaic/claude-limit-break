@@ -52,6 +52,7 @@ export function continuedSince(
     return false;
   }
   let text: string;
+  let from = baselineBytes;
   try {
     const size = fs.statSync(transcriptPath).size;
     if (size <= baselineBytes) {
@@ -61,7 +62,7 @@ export function continuedSince(
     // append megabytes before this runs. Never earlier than the baseline -
     // history before the stop is not news. A start inside a line just makes
     // that first fragment unparseable, and it is skipped.
-    const from = Math.max(baselineBytes, size - MAX_CONTINUED_READ_BYTES);
+    from = Math.max(baselineBytes, size - MAX_CONTINUED_READ_BYTES);
     const length = size - from;
     const buffer = Buffer.alloc(length);
     const fd = fs.openSync(transcriptPath, 'r');
@@ -75,6 +76,7 @@ export function continuedSince(
     return false;
   }
   let continued = false;
+  let parsedAny = false;
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -86,10 +88,21 @@ export function continuedSince(
     } catch {
       continue;
     }
+    parsedAny = true;
     const verdict = readEntry(entry);
     if (verdict !== undefined) {
       continued = verdict;
     }
+  }
+  // Wave B, B8 (wave A re-review, m-new-1). The window started past the
+  // baseline, so more than MAX_CONTINUED_READ_BYTES was appended, and not one
+  // line in it parsed: the last line alone is longer than the window. A
+  // synthetic error entry is a few hundred bytes, never megabytes, so a line
+  // that long is a real prompt (pasted images, say) and the session moved on.
+  // When the window starts AT the baseline, an unparseable tail is only a
+  // partial write, which is not news.
+  if (from > baselineBytes && !parsedAny) {
+    return true;
   }
   return continued;
 }
