@@ -4825,3 +4825,39 @@ test('a limit job in between neither resets the overload count nor is delayed by
     teardown(ctx);
   }
 });
+
+test('the budget "Resume anyway" override keeps the overload backoff (A6)', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  // overloadFor's transcript does not exist, and only a real, large one can
+  // be refused on budget, so the event is fired with this one.
+  const fire = (entryTimestampMs: number) =>
+    (FakeWatcher.latest as unknown as { overloadEmitter: FakeEventEmitter<unknown> }).overloadEmitter.fire({
+      detection: { rule: 'api-error-status', status: 529, text: 'API Error: 529 Overloaded' },
+      cwd: REAL_CWD,
+      file: transcript,
+      entryTimestampMs,
+    });
+  try {
+    fire(1);
+    assert.ok(pendingIn(store)[0], 'setup: the first retry is scheduled');
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    vscodeFake.config = { claudeCommand: LAUNCHER, maxResumeTokens: 1 };
+    const before = Date.now();
+    fire(2);
+    await flush();
+    const refusal = vscodeFake.warningOffers.find((w) => w.items.includes('Resume anyway'));
+    assert.ok(refusal, 'setup: the second retry is refused on budget');
+    refusal.answer('Resume anyway');
+    await flush();
+    assertBackoff({ job: pendingIn(store)[0], before, after: Date.now() }, 15, [5, 30], 'the override');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
