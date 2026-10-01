@@ -527,3 +527,41 @@ test('the gave-up reminder lists every way a gave-up notice clears (final review
   assert.match(text, /"Dismiss gave-up notices"/);
   assert.match(text, /"Cancel Pending Resume"/);
 });
+
+// ---------------------------------------------------------------------------
+// Wave D, D3: an offer-only job (a limit resetting beyond maxWaitHours) is
+// still waiting, but nothing will launch at its deadline - Resume Now is
+// offered then. The pill and the tooltip must not say "resumes"/"resuming".
+// ---------------------------------------------------------------------------
+
+test('an offer-only job is listed as waiting for a manual Resume Now, not as resuming', () => {
+  const at = Date.now() + 3 * 86_400_000;
+  const { lines } = buildSessionLines([job({ resumeAtMs: at, baseResumeAtMs: at, offerOnly: true })], [], []);
+  assert.equal(lines.length, 1);
+  assert.doesNotMatch(lines[0]!, /resuming at/);
+  assert.match(lines[0]!, /manual/);
+  assert.match(lines[0]!, /Resume Now offered at \*\*/);
+  assert.ok(lines[0]!.includes(new Date(at).toLocaleString()), 'the offer time is shown');
+});
+
+test('the pill marks an offer-only soonest job as manual rather than counting down to a resume', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  const at = Date.now() + 3 * 86_400_000;
+  bar.update([job({ resumeAtMs: at, baseResumeAtMs: at, offerOnly: true })]);
+  const text = vscodeFake.statusBarItems[0]?.text ?? '';
+  assert.doesNotMatch(text, /resumes in/);
+  assert.match(text, /\(manual\)/);
+  assert.match(tooltipText(), /manual/);
+  bar.dispose();
+});
+
+test('an ordinary soonest job still reads "resumes in", with no manual marker', () => {
+  resetVscodeFake();
+  const bar = new CountdownStatusBar();
+  bar.update([job()]);
+  const text = vscodeFake.statusBarItems[0]?.text ?? '';
+  assert.match(text, /Claude resumes in/);
+  assert.doesNotMatch(text, /manual/);
+  bar.dispose();
+});

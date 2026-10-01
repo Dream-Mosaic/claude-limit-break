@@ -61,6 +61,7 @@ import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 import { continuedSince } from './continuedSince';
 import { lastNativeCancel, standDownReason, STAND_DOWN_LABEL } from './nativeContinue';
 import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
+import { RATE_LIMIT_LABELS } from './parsers/limitParser';
 
 const NS = 'claudeLimitBreak';
 
@@ -301,6 +302,12 @@ export function activate(context: vscode.ExtensionContext): void {
         `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
       );
     }
+    if (job.offerOnly) {
+      // Wave D, D3: "resuming at" would be a lie for a job that only ever
+      // offers. Its own notice replaces it.
+      announceOfferOnly(job, s);
+      return;
+    }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
       const trustNote =
@@ -322,6 +329,38 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage(message);
       }
     }
+  };
+
+  /**
+   * Wave D, D3 (policy B, the user's decision): tell the user, at detection,
+   * that a limit resetting beyond maxWaitHours will not resume on its own.
+   * Always logged. Shown once across windows, not once per window: every
+   * window watching the machine detects and schedules the same reset, so the
+   * notice takes its own claim (the fire's key plus a suffix, so it never
+   * collides with the fire's claim), held to the same deadline the fire's
+   * claim is, and a window that finds it taken stays quiet. A re-detection in
+   * this window never gets here: the scheduler drops the same reset first.
+   * Honours `notify` like the "resuming at" notice it stands in for.
+   */
+  const announceOfferOnly = (job: PendingJob, s: Settings): void => {
+    const label = (job.rateLimitType !== undefined ? RATE_LIMIT_LABELS[job.rateLimitType] : undefined) ?? 'usage';
+    const message =
+      `Limit Break: session ${job.sessionId.slice(0, 8)} hit a ${label} limit that resets ` +
+      `${new Date(job.baseResumeAtMs).toLocaleString()}. That is more than ${s.maxWaitHours} hours away, ` +
+      `so it won't resume automatically; Resume Now will be offered when it resets.`;
+    log.info(message);
+    if (!s.notify) {
+      return;
+    }
+    const noticeKey = `${claimKeyFor(job)}-offer-notice`;
+    const until = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
+    if (holdClaim(claimsDir(), noticeKey, Date.now(), until, fs, log, vscode.env.sessionId) === 'taken') {
+      log.info(
+        `The offer-only notice for ${job.sessionId.slice(0, 8)} was already shown by another window; not repeating it.`,
+      );
+      return;
+    }
+    void vscode.window.showInformationMessage(message);
   };
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
@@ -1303,9 +1342,16 @@ export function activate(context: vscode.ExtensionContext): void {
       if (standDownOnNativeCancel(job, claimKey, job.transcriptBytesAtDetection)) {
         return;
       }
-      if (!s.autoResume) {
+      // Wave D, D3: an offer-only job (a reset beyond maxWaitHours) takes
+      // exactly this path whatever autoResume says - after the claim and the
+      // continued-since check above, so a session that moved on stays silent.
+      if (!s.autoResume || job.offerOnly) {
         rememberReady(job);
-        log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
+        log.info(
+          job.offerOnly
+            ? `Cooldown elapsed for ${job.sessionId}; its limit reset beyond maxWaitHours, so it is offered, not resumed.`
+            : `Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`,
+        );
         offerResumeNow(
           job,
           claimKey,

@@ -61,6 +61,16 @@ export interface PendingJob {
    * kept for the log. Absent for a limit and for a first overload retry.
    */
   backoffMs?: number;
+  /**
+   * Wave D, D3 (policy B, the user's decision): the limit resets beyond
+   * maxWaitHours, so this job is never resumed automatically. It is scheduled
+   * like any other - the claim, the status bar and persistence all come with
+   * that - but its fire offers Resume Now (the autoResume-off path) instead
+   * of launching. Absent, never false, on every other job; restoreJob drops a
+   * stored job whose value is anything but `true`, since losing the flag
+   * would turn an offer into an automatic resume.
+   */
+  offerOnly?: true;
 }
 
 export interface MementoLike {
@@ -127,6 +137,12 @@ export function restoreJob(raw: unknown): RestoreResult {
   }
   if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
     return { dropped: 'its folderTrusted is not a boolean' };
+  }
+  // Wave D, D3: dropped, never repaired. Deleting a bad offerOnly (the way a
+  // bad rateLimitType is repaired below) would turn a resume the user was
+  // told would only be offered into an automatic one.
+  if (j.offerOnly !== undefined && j.offerOnly !== true) {
+    return { dropped: 'its offerOnly is not true' };
   }
   const badType = j.rateLimitType !== undefined && (typeof j.rateLimitType !== 'string' || j.rateLimitType === '');
   if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType) {

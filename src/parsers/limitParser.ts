@@ -22,6 +22,13 @@ export interface LimitDetection {
    * auto-continue covers the five-hour limit only (see holderPolicy.ts).
    */
   rateLimitType?: string;
+  /**
+   * Wave D (policy B, the user's decision): the reset lies beyond
+   * maxWaitHours but no more than {@link MAX_RESET_DAYS} out - a weekly limit,
+   * typically. Such a limit is scheduled but never resumed automatically: at
+   * the reset, Resume Now is offered instead. Absent (not false) otherwise.
+   */
+  offerOnly?: true;
 }
 
 interface Rule {
