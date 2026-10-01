@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 import { claudeHome } from './claudeHome';
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, compactionLimitText, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 
@@ -539,6 +539,32 @@ export class TranscriptWatcher {
                     return { limit: { detection, cwd, file } };
                 }
             }
+        }
+        // Wave C, C1: the one unflagged shape admitted - a usage limit hit
+        // during `/compact`, which Claude Code writes as a `system` /
+        // `local_command` entry (see compactionLimitText for every condition
+        // and why model prose can never be one). Read as trusted text from
+        // here on, exactly like a flagged entry's own: the same parser, the
+        // same grace window and horizon, so a fork's copy of an old failure is
+        // history and everything after detection (continuedSince, the holder
+        // policy, claims, backoff) is unchanged.
+        const compactionText = flagged ? undefined : compactionLimitText(entry);
+        if (compactionText !== undefined) {
+            const detection = detectLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
+            if (detection) {
+                return { limit: { detection, cwd, file } };
+            }
+            // Say why nothing armed, but only when no reset time could be read
+            // at all. A readable time that is merely stale (a fork's copy) or
+            // past the horizon is history, not a miss, and must not log as one.
+            const anyTime = detectLimit(compactionText, basis, Infinity, { trusted: true, readAt: new Date(0) });
+            if (!anyTime) {
+                this.log.warn(
+                    `Usage limit during compaction in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
+                        `not picking it up: ${compactionText.slice(0, MAX_NOTICE_LENGTH)}`,
+                );
+            }
+            return { inputNeeded };
         }
         // No limit here. A transient server error is worth reporting instead,
         // from the same flagged entries only (Task 4c R3, tightened to the

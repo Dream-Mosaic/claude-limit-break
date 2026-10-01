@@ -1137,3 +1137,157 @@ test('an unflagged entry with a top-level error string or a 529 status does not 
     assert.equal(out.limit, undefined, JSON.stringify(marks));
   }
 });
+
+// ---------------------------------------------------------------------------
+// Wave C, C1: a usage limit hit DURING COMPACTION. `/compact` that fails on a
+// limit is written UNFLAGGED - a `system`/`local_command` entry whose content
+// is `<local-command-stderr>Error during compaction: You've hit your ...`.
+// Real lines from this machine (05690955 line 1496, 2.1.267; 1e8a6fb6 lines
+// 5443 and 10360), private text trimmed, structural fields kept. Claude Code
+// writes a `system` entry itself: model prose, a tool result or a user paste
+// can never be one, so admitting exactly this shape keeps the C1 hole shut.
+// ---------------------------------------------------------------------------
+
+const COMPACT_TEXT = "You've hit your session limit · resets 8:30pm (America/Chicago)";
+const compactContent = (text = COMPACT_TEXT) => `<local-command-stderr>Error during compaction: ${text}</local-command-stderr>`;
+
+/** The real entry shape, with a fresh timestamp so its reset is live. */
+const compactionEntry = (over: Record<string, unknown> = {}, ts = new Date(Date.now() - 60_000).toISOString()) => ({
+  parentUuid: '966d7dcf-bf64-490d-a4f5-cdb4be3ee1a8',
+  isSidechain: false,
+  type: 'system',
+  subtype: 'local_command',
+  content: compactContent(),
+  level: 'info',
+  timestamp: ts,
+  uuid: 'e7466dc8-f37f-4842-b810-4b8381491b9a',
+  isMeta: false,
+  userType: 'external',
+  entrypoint: 'claude-vscode',
+  cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster',
+  sessionId: '05690955-d99d-46e1-bc06-109e58dadc2f',
+  version: '2.1.267',
+  gitBranch: 'main',
+  ...over,
+});
+
+test('C1: a usage limit hit during compaction arms a limit, typed from its label', () => {
+  const out = make().inspectLine(entry(compactionEntry()), FILE);
+  assert.ok(out.limit, 'the unflagged compaction failure must be detected');
+  assert.equal(out.limit.detection.rateLimitType, 'five_hour', 'session -> five_hour');
+  assert.equal(out.limit.detection.rule, 'clock-reset');
+  assert.equal(out.limit.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster');
+  assert.equal(out.limit.file, FILE);
+  const hoursOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 3_600_000;
+  assert.ok(hoursOut > 0 && hoursOut <= 24, `resumeAt ${hoursOut}h out`);
+  assert.ok(!out.limit.detection.text.includes('local-command-stderr'), 'the tags are stripped');
+  assert.ok(!out.limit.detection.text.includes('Error during compaction'), 'and so is the prefix');
+});
+
+test('C1: the compaction text is read as trusted, so a relative reset works too', () => {
+  const out = make().inspectLine(entry(compactionEntry({ content: compactContent("You've hit your weekly limit · resets in 5 hours") })), FILE);
+  assert.ok(out.limit);
+  assert.equal(out.limit.detection.rateLimitType, 'seven_day');
+});
+
+test('C1: an unrecognised limit label leaves rateLimitType undefined', () => {
+  const out = make().inspectLine(entry(compactionEntry({ content: compactContent("You've hit your org limit · resets in 5 hours") })), FILE);
+  assert.ok(out.limit);
+  assert.equal(Object.hasOwn(out.limit.detection, 'rateLimitType'), false);
+});
+
+test('C1: a fork copy of an old compaction failure is history, not a limit (stale-reset rule)', () => {
+  // The real timestamp from 05690955 line 1496: that 8:30pm reset passed weeks ago.
+  const out = make().inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE);
+  assert.equal(out.limit, undefined);
+});
+
+// One mutation per match condition: each of these is the real entry with
+// exactly one condition broken.
+test('C1: type must be system', () => {
+  for (const type of ['user', 'assistant', 'progress']) {
+    assert.equal(make().inspectLine(entry(compactionEntry({ type })), FILE).limit, undefined, type);
+  }
+});
+
+test('C1: subtype must be local_command', () => {
+  for (const subtype of ['informational', 'api_error', 'compact_boundary', undefined]) {
+    assert.equal(make().inspectLine(entry(compactionEntry({ subtype })), FILE).limit, undefined, String(subtype));
+  }
+});
+
+test('C1: content must be a string', () => {
+  const blocks = [{ type: 'text', text: compactContent() }];
+  for (const content of [blocks, { text: compactContent() }, 42, null]) {
+    assert.equal(make().inspectLine(entry(compactionEntry({ content })), FILE).limit, undefined, JSON.stringify(content));
+  }
+});
+
+test('C1: content must START with the stderr tag and the compaction prefix', () => {
+  const bad = [
+    // stdout, not stderr
+    `<local-command-stdout>Error during compaction: ${COMPACT_TEXT}</local-command-stdout>`,
+    // the same words, not at the start
+    `Note: <local-command-stderr>Error during compaction: ${COMPACT_TEXT}</local-command-stderr>`,
+    // a different error under the same tag
+    `<local-command-stderr>Compaction failed: ${COMPACT_TEXT}</local-command-stderr>`,
+    // the prefix without its tag
+    `Error during compaction: ${COMPACT_TEXT}`,
+    // bare text
+    COMPACT_TEXT,
+  ];
+  for (const content of bad) {
+    assert.equal(make().inspectLine(entry(compactionEntry({ content })), FILE).limit, undefined, content);
+  }
+});
+
+test('C1: the text must name a usage limit', () => {
+  for (const text of ['Conversation too long. Press esc twice to go up a few messages and try again.', 'Request timed out after 120 seconds', 'Not enough messages to compact.']) {
+    const out = make().inspectLine(entry(compactionEntry({ content: compactContent(text) })), FILE);
+    assert.equal(out.limit, undefined, text);
+  }
+});
+
+test('C1: user prose, an assistant message and a tool result quoting the compaction line never arm', () => {
+  const quoted = compactContent();
+  const shapes = [
+    { type: 'user', message: { role: 'user', content: quoted } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: quoted }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: quoted }] } },
+    // Even dressed as the system entry, a type other than system is not one.
+    { type: 'user', subtype: 'local_command', content: quoted },
+  ];
+  for (const shape of shapes) {
+    assert.equal(make().inspectLine(entry({ ...shape, cwd: 'C:/p', timestamp: new Date().toISOString() }), FILE).limit, undefined, JSON.stringify(shape).slice(0, 60));
+  }
+});
+
+test('C1: a limit-named compaction failure with no parseable reset time arms nothing and warns, naming session and text', () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  const out = w.inspectLine(entry(compactionEntry({ content: compactContent("You've hit your session limit") })), FILE);
+  assert.equal(out.limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
+  assert.match(warnings[0]!, /You've hit your session limit/);
+  assert.match(warnings[0]!, /no parseable reset time/);
+});
+
+test('C1: a STALE reset is history and does not claim "no parseable reset time"', () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  assert.equal(w.inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE).limit, undefined);
+  assert.deepEqual(warnings, []);
+});
+
+test('C1: an unrelated compaction failure does not warn about a reset time', () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  w.inspectLine(entry(compactionEntry({ content: compactContent('Conversation too long.') })), FILE);
+  assert.deepEqual(warnings, []);
+});
+
+test('C1: outside the watch scope a compaction failure is ignored like any other entry', () => {
+  const w = new TranscriptWatcher(() => 24, () => 5, silent, () => ({ mode: 'workspace', folders: ['C:/elsewhere'] }));
+  assert.equal(w.inspectLine(entry(compactionEntry()), FILE).limit, undefined);
+});

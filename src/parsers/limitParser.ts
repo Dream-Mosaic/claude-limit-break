@@ -111,6 +111,46 @@ export function rateLimitTypeFromText(text: string): string | undefined {
     const label = (m[1] ?? '').toLowerCase();
     return Object.entries(RATE_LIMIT_LABELS).find(([, name]) => name.toLowerCase() === label)?.[0];
 }
+
+const COMPACTION_STDERR_OPEN = '<local-command-stderr>';
+const COMPACTION_STDERR_CLOSE = '</local-command-stderr>';
+const COMPACTION_PREFIX = 'Error during compaction:';
+
+/**
+ * The usage-limit text of a failed `/compact`, or undefined when the entry is
+ * not exactly that (wave C, C1).
+ *
+ * A compaction that runs into a usage limit is written UNFLAGGED - no
+ * `isApiErrorMessage` - as a `system`/`local_command` entry whose content is
+ * `<local-command-stderr>Error during compaction: You've hit your session
+ * limit · resets 8:30pm (America/Chicago)</local-command-stderr>` (real lines:
+ * 2.1.252 and 2.1.267). Without this the session has no flagged entry and 1.0
+ * never resumes it.
+ *
+ * The entry is admitted ONLY when every one of these holds: `type` is
+ * `system`, `subtype` is `local_command`, `content` is a string that STARTS
+ * with the stderr tag and the compaction prefix, and what follows names a
+ * usage limit. A `system` entry is something Claude Code itself writes; model
+ * prose, a thinking block, a tool result and a user's paste can never be one,
+ * so the "prose arms a resume" hole that the flagged gate closes (final review
+ * C1) stays closed. Returns the text with the tag and the prefix stripped, to
+ * be read as trusted text like a flagged entry's own.
+ */
+export function compactionLimitText(entry: Record<string, unknown>): string | undefined {
+    if (entry.type !== 'system' || entry.subtype !== 'local_command') {
+        return undefined;
+    }
+    const content = entry.content;
+    if (typeof content !== 'string' || !content.startsWith(COMPACTION_STDERR_OPEN + COMPACTION_PREFIX)) {
+        return undefined;
+    }
+    let text = content.slice(COMPACTION_STDERR_OPEN.length + COMPACTION_PREFIX.length);
+    if (text.endsWith(COMPACTION_STDERR_CLOSE)) {
+        text = text.slice(0, -COMPACTION_STDERR_CLOSE.length);
+    }
+    text = text.trim();
+    return looksLikeLimitMessage(text) ? text : undefined;
+}
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 /** Keywords that legitimately introduce a "come back at/in ..." clause. */
