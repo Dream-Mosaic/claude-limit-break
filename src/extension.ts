@@ -53,6 +53,7 @@ import {
   claimResume,
   claimOwner,
   holdClaim,
+  claimHoldDeadline,
   releaseClaim,
   cleanupStaleClaims,
 } from './claims';
@@ -61,13 +62,6 @@ import { continuedSince } from './continuedSince';
 import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
 
 const NS = 'claudeLimitBreak';
-
-/**
- * How far past the latest possible jittered fire an automatic fire's claim is
- * held (final fix wave A, A5): slack for a window whose tick, `claude agents`
- * listing or launch runs a little late.
- */
-const CLAIM_MARGIN_MS = 10 * 60_000;
 
 /** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
 const TRUST_BUTTON = 'Open Claude to Trust';
@@ -1209,8 +1203,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // ever forward, so a fire long past its reset (an overdue restore)
       // still gets at least the ordinary hour.
       const claimKey = claimKeyFor(job);
-      const maxJitterMs = Math.max(s.randomDelayMinMinutes, s.randomDelayMaxMinutes) * 60_000;
-      const holdUntil = job.baseResumeAtMs + maxJitterMs + CLAIM_MARGIN_MS;
+      const holdUntil = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
       if (holdClaim(claimsDir(), claimKey, Date.now(), holdUntil, fs, log, vscode.env.sessionId) === 'taken') {
         // Worded by who holds it, for the log only - either way the fire is
         // dropped. A claim this window wrote itself (an earlier resume of the
@@ -1428,15 +1421,17 @@ export function activate(context: vscode.ExtensionContext): void {
         // "Resume Now" moves exactly one.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          // Held until the job's own fire time, not the ordinary hour
-          // (final fix wave A, final review M5): every other window's copy
-          // of this job still counts down to about then, and an hour-old
-          // claim would read as abandoned when it fires. Same as Cancel.
+          // Held to the same deadline as the automatic fire's claim, not
+          // the ordinary hour (final fix wave A, final review M5; one
+          // deadline since fix round 1, review m2): every other window's
+          // copy of this job still counts down to somewhere in its jitter,
+          // and an hour-old claim would read as abandoned when it fires.
+          const s = settings();
           const countingClaim = holdClaim(
             claimsDir(),
             key,
             Date.now(),
-            counting.resumeAtMs,
+            claimHoldDeadline(counting, s.randomDelayMinMinutes, s.randomDelayMaxMinutes),
             fs,
             log,
             vscode.env.sessionId,
@@ -1479,10 +1474,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // one-hour life. This only stops the other windows ACTING on their
       // copies; the persisted job lists are shared through globalState in a
       // way that is not merged across windows (pre-existing, docs/NEXT.md).
+      // Held to the same deadline as every other hold (fix round 1, review
+      // m2): another window's copy can fire anywhere up to the longest jitter.
       const cancelled = [...scheduler.jobs, ...readyJobs];
       const nowMs = Date.now();
+      const s = settings();
       for (const job of cancelled) {
-        holdClaim(claimsDir(), claimKeyFor(job), nowMs, job.resumeAtMs, fs, log, vscode.env.sessionId);
+        const until = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
+        holdClaim(claimsDir(), claimKeyFor(job), nowMs, until, fs, log, vscode.env.sessionId);
       }
       if (cancelled.length > 0) {
         log.info(`Claimed ${cancelled.length} cancelled resume(s) so other windows drop them too.`);

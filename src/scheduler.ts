@@ -172,6 +172,18 @@ export class ResumeScheduler {
           this.persist();
           this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
         }
+        // Wave A fix round 1 (review C1): the same for where the stop is. A
+        // retry that ran into the same reset again is newer evidence of the
+        // live stop, and the continued-since check (continuedSince.ts) must
+        // measure from it, not from the first detection.
+        if (
+          sameReset &&
+          job.transcriptBytesAtDetection !== undefined &&
+          job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
+        ) {
+          existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
+          this.persist();
+        }
         this.log.info(
           sameReset
             ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +

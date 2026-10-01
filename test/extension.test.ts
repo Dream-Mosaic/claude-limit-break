@@ -1377,7 +1377,13 @@ test('cancel claims every cancelled job, so another window firing the same reset
       [realClaims.claimKeyFor(counting), realClaims.claimKeyFor(ready)].sort(),
       'every cancelled job - counting down and ready alike - must be claimed',
     );
-    assert.equal(heldClaims.find((h) => h.key === realClaims.claimKeyFor(counting))?.untilMs, counting.resumeAtMs);
+    // Changed by wave A fix round 1 (review m2): held to the same deadline as
+    // the automatic fire's claim (A5) - the reset plus the longest jitter
+    // (0 here) plus ten minutes - not just this window's own fire time.
+    assert.equal(
+      heldClaims.find((h) => h.key === realClaims.claimKeyFor(counting))?.untilMs,
+      counting.baseResumeAtMs + 10 * 60_000,
+    );
     assert.ok(heldClaims.every((h) => h.owner === 'window-A'));
     teardown(ctxA);
     aDown = true;
@@ -2823,9 +2829,12 @@ test('the Resume Now notification button also warns modally on a continued sessi
   }
 });
 
-test('resumeNow on a counting job holds its claim until the job\'s own fire time, as Cancel does (A3, M5)', async () => {
+// Changed by wave A fix round 1 (review m2): the M5 hold now runs to the same
+// deadline as the automatic fire's claim (A5), not this window's resumeAtMs:
+// another window's copy can fire anywhere up to the longest jitter.
+test('resumeNow on a counting job holds its claim to the reset plus the longest jitter plus ten minutes, as the fire and Cancel do (A3, M5, m2)', async () => {
   resetVscodeFake();
-  vscodeFake.config = { ...manualConfig(), autoResume: true };
+  vscodeFake.config = { ...manualConfig(), autoResume: true, randomDelayMaxMinutes: 90 };
   fakeClaimResult = 'claimed';
   heldClaims.length = 0;
   const job = futureJob();
@@ -2836,7 +2845,7 @@ test('resumeNow on a counting job holds its claim until the job\'s own fire time
     assert.equal(vscodeFake.terminals.length, 1, 'setup: it resumed');
     assert.deepEqual(
       heldClaims.map((h) => [h.key, h.untilMs]),
-      [[realClaims.claimKeyFor(job), job.resumeAtMs]],
+      [[realClaims.claimKeyFor(job), job.baseResumeAtMs + 100 * 60_000]],
     );
   } finally {
     teardown(ctx);
@@ -4859,5 +4868,98 @@ test('the budget "Resume anyway" override keeps the overload backoff (A6)', asyn
   } finally {
     teardown(ctx);
     fs.rmSync(transcript, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave A fix round 1 (review C1): a session that took a retry and ran into
+// the same limit again is still stopped, and is still resumed. These are the
+// real sequences the review found on this machine.
+// ---------------------------------------------------------------------------
+
+/** A prompt from the panel or a Remote Control retry (promptSource sdk). */
+const SDK_RETRY = jsonl({ type: 'user', promptSource: 'sdk', message: { role: 'user', content: 'try again' } });
+
+test('a hand retry that hit the same limit again is still resumed by the automatic fire (C1)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const { dir, file } = transcriptOf(500);
+  fs.writeFileSync(file, SYNTHETIC_LIMIT);
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetAt = new Date(Date.now() + 1500);
+    FakeWatcher.latest!.limitFor(SESSION, resetAt, REAL_CWD, file);
+    // The user retries; the retry runs into the same reset, and the watcher
+    // reports it again - a re-detection the scheduler drops as a duplicate.
+    fs.appendFileSync(file, SDK_RETRY + SYNTHETIC_LIMIT);
+    FakeWatcher.latest!.limitFor(SESSION, resetAt, REAL_CWD, file);
+    await oneTick();
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, `the session is still stopped; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.ok(!vscodeFake.outputLines.some((l) => l.includes('has continued since')));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the A8 race across two windows ends with exactly one resume (C1, review concern 1)', async () => {
+  // Window A cancels, the user retries and hits the same reset, and A
+  // re-plans (releasing its own Cancel claim). Window B still holds its
+  // original copy, with the first detection's baseline, and its jitter lands
+  // first. Before C1, B's copy read the retry as "continued", dropped and
+  // KEPT the claim, and A's fresh plan then found it taken: nobody resumed.
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const claims = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-race-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = claims;
+  const { dir, file } = transcriptOf(0);
+  fs.writeFileSync(file, SYNTHETIC_LIMIT);
+  const resetAt = new Date(Date.now() + 60_000);
+  const key = `${SESSION}-${resetAt.getTime()}`;
+  let ctxA: FakeContext | undefined;
+  let ctxB: FakeContext | undefined;
+  let ctxA2: FakeContext | undefined;
+  try {
+    // Window A: detect, Cancel, retry hits the same reset, re-plan.
+    vscodeFake.envSessionId = 'window-A';
+    const storeA = new Map<string, unknown>();
+    ctxA = contextOver(storeA);
+    start(ctxA);
+    FakeWatcher.latest!.limitFor(SESSION, resetAt, REAL_CWD, file);
+    const bCopy = (storeA.get('claudeLimitBreak.pending') as { sessionId: string }[])[0]!;
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    fs.appendFileSync(file, SDK_RETRY + SYNTHETIC_LIMIT);
+    FakeWatcher.latest!.limitFor(SESSION, resetAt, REAL_CWD, file);
+    const aFresh = (storeA.get('claudeLimitBreak.pending') as { sessionId: string }[])[0]!;
+    assert.equal(fs.existsSync(path.join(claims, `${key}.claim`)), false, 'setup: A released its own claim');
+    teardown(ctxA);
+    ctxA = undefined;
+
+    // Window B fires its ORIGINAL copy first (old baseline), now due.
+    vscodeFake.envSessionId = 'window-B';
+    ctxB = contextOver(new Map([['claudeLimitBreak.pending', [{ ...bCopy, resumeAtMs: Date.now() - 1000 }]]]));
+    start(ctxB);
+    await oneTick();
+    teardown(ctxB);
+    ctxB = undefined;
+
+    // Window A's fresh plan fires after.
+    vscodeFake.envSessionId = 'window-A';
+    ctxA2 = contextOver(new Map([['claudeLimitBreak.pending', [{ ...aFresh, resumeAtMs: Date.now() - 1000 }]]]));
+    start(ctxA2);
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, `exactly one resume; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+  } finally {
+    fakeClaimResult = 'claimed';
+    for (const c of [ctxA, ctxB, ctxA2]) {
+      if (c) {
+        teardown(c);
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(claims, { recursive: true, force: true });
   }
 });
