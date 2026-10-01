@@ -12,6 +12,8 @@ import {
   claimsDir,
   claimOwner,
   holdClaim,
+  claimHoldDeadline,
+  CLAIM_MARGIN_MS,
   type ClaimFs,
 } from '../src/claims';
 
@@ -318,4 +320,22 @@ test('claimsDir is machine-wide: under the OS temp dir, not per-workspace', () =
   const dir = claimsDir();
   assert.ok(dir.startsWith(os.tmpdir()));
   assert.match(dir, /claude-limit-break[\\/]claims$/);
+});
+
+// Wave A fix round 1 (review m2): one deadline for every hold - the automatic
+// fire (A5), the counting Resume Now (M5) and Cancel - so none of them lapses
+// before another window's copy, which fires anywhere up to the longest jitter.
+test('a hold runs to the reset plus the longest configured jitter plus the margin', () => {
+  const MIN = 60_000;
+  const job = { baseResumeAtMs: 1_000_000_000, resumeAtMs: 1_000_000_000 + 7 * MIN };
+  assert.equal(CLAIM_MARGIN_MS, 10 * MIN);
+  assert.equal(claimHoldDeadline(job, 5, 30), job.baseResumeAtMs + 40 * MIN);
+  assert.equal(claimHoldDeadline(job, 0, 90), job.baseResumeAtMs + 100 * MIN);
+  assert.equal(claimHoldDeadline(job, 30, 10), job.baseResumeAtMs + 40 * MIN, 'an inverted band is read as the range it describes');
+});
+
+test('a hold never ends before the fire time of the job itself', () => {
+  // A job planned under a wider jitter setting than the one now in force.
+  const job = { baseResumeAtMs: 1_000_000_000, resumeAtMs: 1_000_000_000 + 120 * 60_000 };
+  assert.equal(claimHoldDeadline(job, 0, 30), job.resumeAtMs);
 });

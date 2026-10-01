@@ -159,3 +159,45 @@ test('a detection with no limit type leaves the key off the job, so a persisted 
   if (p.kind !== 'schedule') return;
   assert.equal(Object.hasOwn(p.job, 'rateLimitType'), false);
 });
+
+// Final fix wave A, A6 (the user's decision): an overload retry's backoff is
+// added to the deadline itself, before the usual random delay, so the claim
+// hold (A5) covers it. A limit neither counts nor backs off.
+const overloadHit = { detection: { text: 'API Error: 529 Overloaded' }, cwd: '/projects/example', file: FILE };
+
+test('an overload backoff goes into the deadline, with the usual random delay on top (A6)', () => {
+  const p = planResume(overloadHit, 'overload', settings(), small, NOW, () => 7 * 60_000, undefined, 30 * 60_000);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.baseResumeAtMs, NOW.getTime() + 30 * 60_000);
+  assert.equal(p.job.resumeAtMs, NOW.getTime() + 37 * 60_000);
+  assert.equal(p.job.jitterMs, 7 * 60_000);
+  assert.equal(p.job.backoffMs, 30 * 60_000);
+});
+
+test('the random delay under a backoff is drawn from the configured range (A6)', () => {
+  const seen: [number, number][] = [];
+  const jitter = (min: number, max: number) => {
+    seen.push([min, max]);
+    return min * 60_000;
+  };
+  planResume(overloadHit, 'overload', settings({ randomDelayMinMinutes: 2, randomDelayMaxMinutes: 9 }), small, NOW, jitter, undefined, 15 * 60_000);
+  assert.deepEqual(seen, [[2, 9]]);
+});
+
+test('a limit ignores any overload backoff (A6)', () => {
+  const at = new Date('2026-08-03T17:00:00Z');
+  const p = planResume(hit(at), 'limit', settings(), small, NOW, noJitter, undefined, 60 * 60_000);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.baseResumeAtMs, at.getTime());
+  assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
+});
+
+test('a first overload retry carries no backoff key (A6)', () => {
+  const p = planResume(overloadHit, 'overload', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.baseResumeAtMs, NOW.getTime());
+  assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
+});

@@ -126,7 +126,7 @@ test('the icon is circle-slash', () => {
 });
 
 test('each cause describes itself differently in the tooltip line', () => {
-  const causes: GaveUpCause[] = ['stall', 'launcher', 'cwd', 'budget'];
+  const causes: GaveUpCause[] = ['stall', 'launcher', 'cwd', 'budget', 'overloads'];
   const lines = causes.map((c) => describeGaveUp(rec(A, c)));
   assert.equal(new Set(lines).size, causes.length, `causes must read differently: ${JSON.stringify(lines)}`);
   for (const line of lines) {
@@ -219,4 +219,14 @@ test('dismissing clears every record but keeps the warn-once memory', () => {
   assert.deepEqual(s.list(), []);
   assert.equal(s.record(rec(A, 'stall')), false);
   assert.equal(new GaveUpState().dismissRecords(), false, 'nothing recorded, nothing to re-render');
+});
+
+// Final fix wave A, A6 (the user's decision): a session that kept stopping on
+// server errors through five retries in a row gives up until a turn ends.
+test('the overloads notice names the session, the five retries and when it will try again (A6)', () => {
+  assert.equal(
+    gaveUpNotice({ cause: 'overloads', sessionId: A }),
+    `Limit Break: session ${A.slice(0, 8)} kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`,
+  );
+  assert.match(describeGaveUp(rec(A, 'overloads')), /kept stopping on server errors \(5 resumes in a row\)/);
 });

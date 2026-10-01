@@ -76,12 +76,15 @@ test('an ordinary user question about limits does not arm a timer', () => {
   }
 });
 
-test('an assistant entry describing a limit still arms a timer', () => {
+// Inverted by final fix wave A (A1, final review C1): this used to assert that
+// an UNFLAGGED assistant entry arms a timer. Only an entry Claude Code
+// flagged may; the same text flagged is the first test in this file.
+test('an unflagged assistant entry describing a limit does not arm a timer', () => {
   const line = entry({
     type: 'assistant',
     message: { content: 'Claude AI usage limit reached. Try again in 5 hours' },
   });
-  assert.ok(make().inspectLine(line, FILE).limit);
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -1065,4 +1068,72 @@ test('a quotaLimits entry whose text names no type and whose field has none leav
   const out = make().inspectLine(typedQuotaEntry(undefined, 'Something went wrong with your plan limits'), FILE);
   assert.equal(out.limit?.detection.rule, 'quota-limits');
   assert.equal(Object.hasOwn(out.limit!.detection, 'rateLimitType'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave A, A1 (final review C1): a usage limit is read only from an
+// entry Claude Code flagged (isApiErrorMessage: true). Every limit message in
+// the binary is built by the constructor that sets the flag (research Q1),
+// and all 138 limit entries on this machine carry it (task-4c-report.md).
+// These three sentences each armed a timer on the compiled f40ee41 code.
+// ---------------------------------------------------------------------------
+
+const C1_PROSE = [
+  "The session hit its usage limit and resets at 2:10am, so I'll pick this up after that.",
+  'I hit the GitHub API rate limit. Try again in 45 minutes and it should work.',
+  "You've hit your session limit, resets 11pm. I'll stop here.",
+];
+
+for (const prose of C1_PROSE) {
+  test(`unflagged assistant text does not arm a limit (final review C1): ${prose.slice(0, 40)}`, () => {
+    const line = entry({ type: 'assistant', message: { content: [{ type: 'text', text: prose }] } });
+    assert.equal(make().inspectLine(line, FILE).limit, undefined, prose);
+  });
+}
+
+test('an unflagged thinking block does not arm a limit (final review C1)', () => {
+  const line = entry({
+    type: 'assistant',
+    message: { content: [{ type: 'thinking', thinking: C1_PROSE[1], signature: 'sig' }] },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('an unflagged tool_use input does not arm a limit (final review C1)', () => {
+  const line = entry({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'tool_use', id: 'toolu_c1', name: 'Bash', input: { command: 'sleep 2700', description: C1_PROSE[1] } }],
+    },
+  });
+  assert.equal(make().inspectLine(line, FILE).limit, undefined);
+});
+
+test('an unflagged entry marked only by error: rate_limit or status 429 does not arm a limit', () => {
+  for (const marks of [{ error: 'rate_limit' }, { apiErrorStatus: 429 }, { status: 429 }]) {
+    const line = entry({ type: 'assistant', ...marks, message: { content: "You've hit your session limit · resets 11pm" } });
+    assert.equal(make().inspectLine(line, FILE).limit, undefined, JSON.stringify(marks));
+  }
+});
+
+test('a flagged real render still arms a limit (positive control for C1)', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'rate_limit',
+    apiErrorStatus: 429,
+    message: { content: [{ type: 'text', text: "You've hit your session limit · resets 11pm (America/Chicago)" }] },
+  });
+  assert.ok(make().inspectLine(line, FILE).limit);
+});
+
+// A2 (final review M1): an overload, too, only from isApiErrorMessage: true -
+// a bare `error` string or a 5xx status no longer admits an entry.
+test('an unflagged entry with a top-level error string or a 529 status does not arm an overload (M1)', () => {
+  for (const marks of [{ error: 'server_error' }, { apiErrorStatus: 529 }, { status: 529 }]) {
+    const line = entry({ type: 'assistant', ...marks, message: { content: 'API Error: 529 Overloaded' } });
+    const out = make().inspectLine(line, FILE);
+    assert.equal(out.overload, undefined, JSON.stringify(marks));
+    assert.equal(out.limit, undefined, JSON.stringify(marks));
+  }
 });

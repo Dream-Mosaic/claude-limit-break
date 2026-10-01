@@ -296,6 +296,97 @@ test('a job keeps its rateLimitType across reconstruction from the memento', (t)
   assert.equal(second.current?.rateLimitType, 'seven_day');
 });
 
+// Final fix wave A, A9: a re-detection of the same reset that the dedupe
+// drops can still carry the limit type the first detection could not read
+// (a text-only notice first, the flagged quotaLimits entry second). The
+// existing job adopts it, persisted; its schedule stays exactly as it was.
+test('a dropped re-detection of the same reset hands its rateLimitType to a job that had none', (t) => {
+  // Serialised on write, as VS Code's globalState is: the plain memento()
+  // stores the job objects themselves, so an in-place change would read back
+  // as persisted even if it never was.
+  const stored = new Map<string, string>();
+  const m: MementoLike = {
+    get: <T>(k: string) => (stored.has(k) ? (JSON.parse(stored.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      stored.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(m, silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  const firstResumeAt = base + 5 * 60_000;
+  s.schedule(jobWithBase(SESSION_A, base, firstResumeAt));
+  for (const secondResumeAt of [base + 20 * 60_000, base + 2 * 60_000]) {
+    assert.equal(
+      s.schedule({ ...jobWithBase(SESSION_A, base, secondResumeAt), rateLimitType: 'seven_day' }),
+      false,
+      'the re-detection itself is still dropped',
+    );
+  }
+  assert.equal(s.current?.rateLimitType, 'seven_day');
+  assert.equal(s.current?.resumeAtMs, firstResumeAt, 'the schedule is unchanged');
+  assert.equal(s.current?.baseResumeAtMs, base, 'the deadline is unchanged');
+  const reloaded = new ResumeScheduler(m, silent);
+  t.after(() => reloaded.dispose());
+  assert.equal(reloaded.current?.rateLimitType, 'seven_day', 'the adopted type is persisted');
+});
+
+test('a dropped re-detection never overwrites a rateLimitType the job already has', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 5 * 60_000), rateLimitType: 'five_hour' });
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 20 * 60_000), rateLimitType: 'seven_day' });
+  assert.equal(s.current?.rateLimitType, 'five_hour');
+});
+
+test('a dropped later deadline for a DIFFERENT reset does not hand over its rateLimitType', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  s.schedule(jobWithBase(SESSION_A, base, base));
+  assert.equal(s.schedule({ ...jobWithBase(SESSION_A, base + 600_000, base + 600_000), rateLimitType: 'seven_day' }), false);
+  assert.equal(s.current?.rateLimitType, undefined);
+});
+
+// Wave A fix round 1 (review C1): a dropped same-reset re-detection also
+// hands over its detection-time transcript size. The re-detection is newer
+// evidence of where the stop is; keeping the first one's baseline is what let
+// a retry that hit the same limit again read as "continued".
+test('a dropped re-detection of the same reset refreshes the detection baseline of the job, persisted', (t) => {
+  const stored = new Map<string, string>();
+  const m: MementoLike = {
+    get: <T>(k: string) => (stored.has(k) ? (JSON.parse(stored.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      stored.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(m, silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  const firstResumeAt = base + 5 * 60_000;
+  s.schedule({ ...jobWithBase(SESSION_A, base, firstResumeAt), transcriptBytesAtDetection: 500 });
+  assert.equal(s.schedule({ ...jobWithBase(SESSION_A, base, base + 20 * 60_000), transcriptBytesAtDetection: 900 }), false);
+  assert.equal(s.current?.transcriptBytesAtDetection, 900);
+  assert.equal(s.current?.resumeAtMs, firstResumeAt, 'the schedule is unchanged');
+  const reloaded = new ResumeScheduler(m, silent);
+  t.after(() => reloaded.dispose());
+  assert.equal(reloaded.current?.transcriptBytesAtDetection, 900, 'persisted');
+});
+
+test('a re-detection with no readable size leaves the baseline alone, and a different reset never touches it', (t) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 60_000;
+  s.schedule({ ...jobWithBase(SESSION_A, base, base + 5 * 60_000), transcriptBytesAtDetection: 500 });
+  s.schedule(jobWithBase(SESSION_A, base, base + 20 * 60_000));
+  assert.equal(s.current?.transcriptBytesAtDetection, 500, 'no size: nothing to hand over');
+  s.schedule({ ...jobWithBase(SESSION_A, base + 600_000, base + 600_000), transcriptBytesAtDetection: 900 });
+  assert.equal(s.current?.transcriptBytesAtDetection, 500, 'a later, different reset is not this stop');
+});
+
 test('a job persisted without rateLimitType reads back with it undefined', (t) => {
   const m = memento({ 'claudeLimitBreak.pending': [job(Date.now() + 60_000)] });
   const s = new ResumeScheduler(m, silent);

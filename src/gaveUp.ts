@@ -1,3 +1,5 @@
+import { MAX_OVERLOAD_RESUMES } from './overloadBackoff';
+
 /**
  * The "gave up" state (plan Task 4, synthesis A8/A9).
  *
@@ -17,13 +19,17 @@
  * - `cwd`      the session's recorded folder is gone (or is a file), so
  *              nothing launched.
  * - `budget`   the budget refusal was dismissed without "Resume anyway".
+ * - `overloads` the session kept stopping on server errors: a 6th
+ *              consecutive overload retry would have been scheduled (final
+ *              fix wave A, A6; overloadBackoff.ts). Cleared by a finished
+ *              turn, like every other cause.
  *
  * Pure: no VS Code, no filesystem, no clock (callers pass `atMs`). One record
  * per session, because the status bar lists sessions, and Task 5b folds these
  * records into the same one-line-per-session tooltip list as pending jobs.
  */
 
-export type GaveUpCause = 'stall' | 'launcher' | 'cwd' | 'budget';
+export type GaveUpCause = 'stall' | 'launcher' | 'cwd' | 'budget' | 'overloads';
 
 export interface GaveUpRecord {
   sessionId: string;
@@ -149,6 +155,7 @@ export const REASON: Record<GaveUpCause, string> = {
   launcher: 'could not find the claude executable',
   cwd: 'its folder no longer exists',
   budget: 'over the token budget, and the refusal was dismissed',
+  overloads: `kept stopping on server errors (${MAX_OVERLOAD_RESUMES} resumes in a row)`,
 };
 
 /**
@@ -173,7 +180,7 @@ export function describeGaveUp(r: GaveUpRecord): string {
 export function gaveUpNotice(
   n:
     | { cause: 'stall'; sessionId: string; cwd?: string; folderTrusted?: boolean }
-    | { cause: 'launcher' | 'cwd'; sessionId: string; cwd?: string },
+    | { cause: 'launcher' | 'cwd' | 'overloads'; sessionId: string; cwd?: string },
 ): string {
   const s = short(n.sessionId);
   switch (n.cause) {
@@ -197,6 +204,11 @@ export function gaveUpNotice(
       return (
         `Limit Break: the folder for session ${s} no longer exists: ${n.cwd}. ` +
         'The resume was not started. Use "Resume Now" again once the folder is back, or check the transcript.'
+      );
+    case 'overloads':
+      return (
+        `Limit Break: session ${s} kept stopping on server errors (${MAX_OVERLOAD_RESUMES} resumes in a row); ` +
+        'giving up until it finishes a turn.'
       );
   }
 }

@@ -229,12 +229,47 @@ export function holdClaim(
 }
 
 /**
+ * How far past the latest possible jittered fire a held claim lasts (final
+ * fix wave A, A5): slack for a window whose tick, `claude agents` listing or
+ * launch runs a little late.
+ */
+export const CLAIM_MARGIN_MS = 10 * 60_000;
+
+/**
+ * The one deadline every hold of a job's claim runs to (wave A fix round 1,
+ * review m2): the automatic fire's own claim (A5), the counting Resume Now
+ * (M5) and Cancel. Every window watching the machine holds its own copy of
+ * the job, padded by its own jitter roll, so another copy can fire anywhere
+ * up to the reset plus the longest jitter the setting allows; a hold to THIS
+ * window's fire time lapsed early whenever that roll was short. The A6
+ * overload backoff sits inside `baseResumeAtMs`, so it is covered too.
+ *
+ * The band is read as `randomJitterMs` reads it - an inverted one is the
+ * range it describes - and the deadline is never earlier than the job's own
+ * `resumeAtMs` (a job planned under a wider band than the one now in force).
+ * Pure; holdClaim only ever moves a claim's mtime forward, so a deadline
+ * already in the past still leaves an ordinary claim.
+ */
+export function claimHoldDeadline(
+  job: { baseResumeAtMs: number; resumeAtMs: number },
+  randomDelayMinMinutes: number,
+  randomDelayMaxMinutes: number,
+): number {
+  const maxJitterMs = Math.max(randomDelayMinMinutes, randomDelayMaxMinutes) * 60_000;
+  return Math.max(job.resumeAtMs, job.baseResumeAtMs + maxJitterMs + CLAIM_MARGIN_MS);
+}
+
+/**
  * The window identity recorded in `key`'s claim file by claimResume's
  * `owner`, or undefined when there is no such file, it cannot be read, or it
- * was written without one (an older build). Only ever used to word a log
- * line - "already claimed by this window" rather than "by another window"
- * (final review, Important 3) - never to decide anything: a claim is a claim,
- * whoever holds it.
+ * was written without one (an older build).
+ *
+ * Used for two things. It words a log line - "already claimed by this
+ * window" rather than "by another window" (final review, Important 3). And
+ * since final fix wave A, A8, it DECIDES one thing: a fresh plan in this
+ * window releases a claim on its key only when this window owns it (a
+ * Cancel's hold), never one another window holds. Anything unreadable reads
+ * as undefined, i.e. not ours, so a doubt never releases a claim.
  */
 export function claimOwner(
   dir: string,

@@ -53,6 +53,13 @@ export interface PendingJob {
    * type, and for a job persisted before this field existed.
    */
   rateLimitType?: string;
+  /**
+   * The A6 overload backoff this job was planned with (final fix wave A; the
+   * user's decision: +15/+30/+60/+120 minutes for a session's 2nd-5th
+   * consecutive overload resume). Already included in `baseResumeAtMs`;
+   * kept for the log. Absent for a limit and for a first overload retry.
+   */
+  backoffMs?: number;
 }
 
 export interface MementoLike {
@@ -155,6 +162,28 @@ export class ResumeScheduler {
     if (existing && existing.resumeAtMs >= Date.now()) {
       const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
       if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
+        // Final fix wave A, A9: the dropped re-detection may know which limit
+        // this is when the first detection did not (a text-only notice, then
+        // the flagged entry's quotaLimits). decideOnFire reads the type, so
+        // the job adopts it - only onto a job with none, only for the same
+        // reset, and never its schedule or deadline.
+        if (sameReset && existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
+          existing.rateLimitType = job.rateLimitType;
+          this.persist();
+          this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
+        }
+        // Wave A fix round 1 (review C1): the same for where the stop is. A
+        // retry that ran into the same reset again is newer evidence of the
+        // live stop, and the continued-since check (continuedSince.ts) must
+        // measure from it, not from the first detection.
+        if (
+          sameReset &&
+          job.transcriptBytesAtDetection !== undefined &&
+          job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
+        ) {
+          existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
+          this.persist();
+        }
         this.log.info(
           sameReset
             ? `Ignoring re-detection of the same reset for ${job.sessionId} (base ` +
@@ -168,7 +197,9 @@ export class ResumeScheduler {
     }
     this.pending.set(job.sessionId, job);
     this.persist();
-    const jitter = job.jitterMs > 0 ? `, +${Math.round(job.jitterMs / 60_000)}m random delay` : '';
+    const jitter =
+      (job.backoffMs ? `, +${Math.round(job.backoffMs / 60_000)}m overload backoff` : '') +
+      (job.jitterMs > 0 ? `, +${Math.round(job.jitterMs / 60_000)}m random delay` : '');
     this.log.info(
       `Resume scheduled for ${new Date(job.resumeAtMs).toLocaleString()} ` +
         `(reason=${job.reason}, sessionId=${job.sessionId}${jitter}, cwd=${job.cwd ?? 'n/a'})`,

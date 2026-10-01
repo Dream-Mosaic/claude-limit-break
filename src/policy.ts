@@ -23,6 +23,14 @@ export function planResume(
    * ever been written to the file. See estimateResumeTokens.
    */
   readUsage?: (transcript: string) => UsageRecord | undefined,
+  /**
+   * Extra wait for an overload retry, on top of the usual random delay
+   * (final fix wave A, A6 - the user's decision; see overloadBackoff.ts). It
+   * goes into the un-jittered deadline itself, so everything keyed on that
+   * deadline - the cross-window claim's hold (A5) above all - covers it.
+   * Ignored for a limit, which neither counts nor backs off.
+   */
+  overloadBackoffMs = 0,
 ): Plan {
   if (!settings.enabled) {
     return { kind: 'ignore', reason: 'Extension disabled.' };
@@ -42,8 +50,10 @@ export function planResume(
       cwd: session.cwd,
     };
   }
-  // An overload has no stated reset time, so the jitter *is* the backoff.
-  const base = hit.detection.resumeAt?.getTime() ?? now.getTime();
+  // An overload has no stated reset time, so the jitter *is* the backoff -
+  // plus, for a session that keeps failing, the A6 step backoff.
+  const backoffMs = reason === 'overload' && overloadBackoffMs > 0 ? overloadBackoffMs : 0;
+  const base = (hit.detection.resumeAt?.getTime() ?? now.getTime()) + backoffMs;
   const jitterMs = jitter(settings.randomDelayMinMinutes, settings.randomDelayMaxMinutes);
   return {
     kind: 'schedule',
@@ -57,6 +67,9 @@ export function planResume(
       resumeAtMs: base + jitterMs,
       jitterMs,
       reason,
+      // Recorded so the log and a reader of the persisted job can tell a
+      // backed-off retry from an ordinary one; already inside baseResumeAtMs.
+      ...(backoffMs > 0 ? { backoffMs } : {}),
       // Only set when the watcher had one: an absent key, not `undefined`,
       // keeps the persisted job (globalState) exactly as it was for a hit
       // without it.

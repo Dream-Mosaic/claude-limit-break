@@ -32,6 +32,14 @@ export interface OnFireDecision {
 const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
 
 /**
+ * Appended to every notice that carries {@link RESUME_IN_TERMINAL_BUTTON}
+ * (final fix wave A, A4; final review I2): the button opens a NEW terminal on
+ * a conversation the existing one still holds, and "Continue it there" alone
+ * never said so.
+ */
+const SECOND_TERMINAL = ' Resuming here opens a second terminal on the same conversation.';
+
+/**
  * Whether a holder's status counts as idle for Task 2's purposes.
  *
  * Fix round 1, controller ruling: an unknown or MISSING status counts as
@@ -170,7 +178,7 @@ export function decideOnFire(
       notice: {
         message:
           `Limit Break: session ${shortId} was stopped by a server error, and it is open in a terminal. ` +
-          `Continue it there.`,
+          `Continue it there.${SECOND_TERMINAL}`,
         button: RESUME_IN_TERMINAL_BUTTON,
       },
     };
@@ -194,7 +202,7 @@ export function decideOnFire(
       notice: {
         message:
           `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
-          `Continue it there.`,
+          `Continue it there.${SECOND_TERMINAL}`,
         button: RESUME_IN_TERMINAL_BUTTON,
       },
     };
@@ -219,10 +227,30 @@ export function decideOnFire(
     notice: {
       message:
         `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
-        `Continue it there.`,
+        `Continue it there.${SECOND_TERMINAL}`,
       button: RESUME_IN_TERMINAL_BUTTON,
     },
   };
+}
+
+/**
+ * What "Resume in Terminal Anyway" says instead of resuming, when the holder
+ * re-read at click time is busy or waiting (final fix wave A, A4; final
+ * review I2), or undefined to go ahead.
+ *
+ * The offer is made on a holder snapshot from the fire, and the notification
+ * does not auto-dismiss: by the click, hours later, the user may be back at
+ * that terminal typing, and a second `claude --resume` on it is a fork. The
+ * button is the confirmation for the idle case it was offered on, so an idle
+ * holder (by {@link isIdleStatus}: fail open), no holder and a failed listing
+ * all go ahead. Worded by where the holder is; a busy panel is stopped too.
+ */
+export function busyAtClickNotice(holder: SessionHolder | 'unknown', shortId: string): string | undefined {
+  if (holder === 'unknown' || holder.kind === 'none' || isIdleStatus(holder.status)) {
+    return undefined;
+  }
+  const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
+  return `Limit Break: session ${shortId} is now busy in ${where}; not starting a second writer.`;
 }
 
 /**
