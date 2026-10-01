@@ -118,8 +118,13 @@ export interface ContinuedFs {
   closeSync(fd: number): void;
 }
 
-/** Where a `user` entry carrying a local slash command's output starts (review I1). */
-const LOCAL_COMMAND_RE = /^\s*<(?:command-name|local-command-stdout|local-command-caveat)>/;
+/**
+ * Where a `user` entry carrying a local slash command's output starts (review
+ * I1). `local-command-stderr` joined in wave C (C2): a command that fails -
+ * a `/compact` that hit the limit again - writes its error there, and it is
+ * no more the session moving on than stdout is.
+ */
+const LOCAL_COMMAND_RE = /^\s*<(?:command-name|local-command-stdout|local-command-stderr|local-command-caveat)>/;
 
 /**
  * What one appended entry says about the stop: true for the session moving

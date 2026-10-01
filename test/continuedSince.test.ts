@@ -248,3 +248,105 @@ test('a window that starts at the baseline and holds no parseable line is not co
   fs.appendFileSync(file, '{"type":"user","message":{"role":"us');
   assert.equal(continuedSince(file, baseline), false, 'a partial write, not news');
 });
+
+// ---------------------------------------------------------------------------
+// Wave C, C2 and C3.
+// ---------------------------------------------------------------------------
+
+// C2: a slash command that fails writes its output under <local-command-stderr>
+// (a failed /compact is the case that matters here). Like stdout it makes no
+// API call that got past the stop, so it is not the session moving on.
+test('a <local-command-stderr> user entry after the stop is not a continuation (C2)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: "<local-command-stderr>Error during compaction: You've hit your session limit · resets 8:30pm (America/Chicago)</local-command-stderr>",
+      },
+    }),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('the same stderr text as the first block of a content array is not a continuation either (C2)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stderr>boom</local-command-stderr>' }] } }),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('stderr text that is not at the start of a user message is a real prompt (C2 control)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, line({ type: 'user', message: { role: 'user', content: 'what does <local-command-stderr> mean?' } }));
+  assert.equal(continuedSince(file, baseline), true);
+});
+
+// C3: a SUCCESSFUL /compact after the reset means the session moved on. Claude
+// Code writes a `compact_boundary` system entry and then a `user` entry with
+// `isCompactSummary: true` (real shape, 05690955 lines 1504-1505; the wave A
+// re-review found 45 of these on this machine). The `system` entry is neither
+// a turn nor a stop; the summary is a real, unflagged user entry, so it counts.
+// The sample even follows a failed compaction: its logicalParentUuid is the
+// failed entry's uuid.
+const COMPACT_BOUNDARY = line({
+  parentUuid: null,
+  logicalParentUuid: 'e7466dc8-f37f-4842-b810-4b8381491b9a',
+  isSidechain: false,
+  type: 'system',
+  subtype: 'compact_boundary',
+  content: 'Conversation compacted',
+  isMeta: false,
+  timestamp: '2026-09-12T01:41:21.161Z',
+  uuid: '6bde8c49-c5a8-4e90-8f61-2f17a21234b9',
+  level: 'info',
+  compactMetadata: { trigger: 'manual', preTokens: 370914, durationMs: 144227, postTokens: 13057 },
+  userType: 'external',
+  entrypoint: 'claude-vscode',
+  sessionId: '05690955-d99d-46e1-bc06-109e58dadc2f',
+  version: '2.1.267',
+});
+const COMPACT_SUMMARY = line({
+  parentUuid: '6bde8c49-c5a8-4e90-8f61-2f17a21234b9',
+  isSidechain: false,
+  promptId: '5c03d38d-9760-4629-b1a0-5fdc113569d6',
+  type: 'user',
+  message: { role: 'user', content: 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent: (trimmed)' },
+  isVisibleInTranscriptOnly: true,
+  isCompactSummary: true,
+  uuid: '9c1aee65-2125-45ab-9bfd-4cb48593c2e0',
+  timestamp: '2026-09-12T01:41:21.157Z',
+  userType: 'external',
+  entrypoint: 'claude-vscode',
+  sessionId: '05690955-d99d-46e1-bc06-109e58dadc2f',
+  version: '2.1.267',
+});
+
+test('a successful /compact after the stop counts as the session moving on (C3)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, COMPACT_BOUNDARY + COMPACT_SUMMARY);
+  assert.equal(continuedSince(file, baseline), true);
+});
+
+test('the compact_boundary entry on its own, before its summary is written, is not yet a continuation (C3)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, COMPACT_BOUNDARY);
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('a compaction that failed on the limit again, then nothing, is still stopped (C3 control)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({
+      type: 'system',
+      subtype: 'local_command',
+      content: "<local-command-stderr>Error during compaction: You've hit your session limit · resets 8:30pm (America/Chicago)</local-command-stderr>",
+    }),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
