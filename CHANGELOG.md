@@ -31,8 +31,9 @@ The first release.
   same-day rollovers right without depending on the wording of a message this
   extension does not control.
 - A reset time given with no explicit time zone is resolved to the later side
-  of a daylight-saving change, never an hour early. East of UTC, a
-  spring-forward reset can resume up to an hour late.
+  of a daylight-saving change, never an hour early. A time that falls in the
+  hour a spring-forward skips is read as the same time just after the jump
+  (2:30am becomes 3:30am), east of UTC as well as west of it.
 - A usage limit or an overload is armed only by a transcript entry that Claude
   Code itself flagged as an API error (`isApiErrorMessage`). Text the model
   writes, a tool returns, a subagent quotes or you paste never arms a timer: a
@@ -73,6 +74,25 @@ The first release.
   does not know all behave as before, and the manual Resume Now paths are
   unaffected. The cancel wordings are read from the Claude Code 2.1.285
   binary, not from real transcripts, apart from the exited line.
+- Limits that reset more than `maxWaitHours` (24 hours by default) out, such
+  as a weekly limit, are no longer dropped. Within `maxWaitHours` a limit is
+  resumed automatically, as before. A later reset is scheduled and kept like
+  any other (status bar, reload) but never resumed automatically: you are told
+  once at detection - "Limit Break: session <id8> hit a weekly limit that
+  resets <date and time>. That is more than 24 hours away, so it won't resume
+  automatically; Resume Now will be offered when it resets." - the status bar
+  marks it `(manual)`, and at the reset Resume Now is offered, exactly as with
+  `autoResume` off. Raising `maxWaitHours` makes a longer reset automatic.
+  A reset more than 8 days out (longer than any Claude limit, so a misread),
+  one that already passed (a fork's copy, say) and one with no readable time
+  are not picked up, and every one of them is logged with the session and the
+  reason - a passed one once per transcript.
+- Reads the dated reset text Claude Code writes for a reset more than a day
+  out when the entry has no `quotaLimits`: `resets Aug 4, 1am
+  (America/Chicago)`, `resets Jun 3 at 4pm (Europe/Berlin)` and the weekday
+  form `resets Mon 12:00am (...)`, in the zone the notice names, through
+  daylight-saving changes and across the new year. A dated reset with no zone
+  is not guessed at. A usage limit hit during `/compact` is read the same way.
 - Claude Code's own auto-continue covers the five-hour usage limit only, so
   Limit Break stands down for it only there. A weekly, Opus, Sonnet, Fable or
   usage-credit limit in an idle terminal is offered as "Resume in Terminal
@@ -261,7 +281,11 @@ The first release.
 ### Known limitations
 
 - A usage-limit message with no parseable reset time is not picked up; the
-  output channel logs it.
+  output channel logs it. That includes a dated reset that names no time zone
+  (`resets Mon 12:00am`), which is never read in this machine's zone.
+- A limit that resets more than `maxWaitHours` out is offered at the reset,
+  never resumed automatically, and one more than 8 days out is not picked up
+  at all (see Added).
 - The cancel lines that stand the resume down are matched by wording that was
   read from the Claude Code 2.1.285 binary. A release that rewords them falls
   back to the behaviour before this check: the resume goes ahead as it would

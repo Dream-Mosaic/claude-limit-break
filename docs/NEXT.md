@@ -75,18 +75,14 @@ auto-continue check reading any growth as "it continued") are removed, and the
 synchronous `claude agents` call has moved to 1.1 below.
 
 **Detection / parsing** (Task 1 and 4a reviews)
-- A flagged rate-limit entry whose `quotaLimits.resetsAt` fails the
-  grace/horizon check returns early and never falls through to the overload
-  check below it (`src/transcriptWatcher.ts` ~478-480, the
-  `return resumeAt ? {...} : { inputNeeded }` branch). Cost if wrong: one
-  missed overload retry on a doubly-flagged entry.
+- A flagged rate-limit entry whose `quotaLimits.resetsAt` is rejected (past
+  the grace, or more than 8 days out) logs a warning and returns early, never
+  falling through to the overload check below it (`src/transcriptWatcher.ts`,
+  the `verdict.kind === 'rejected'` branch). Cost if wrong: one missed
+  overload retry on a doubly-flagged entry.
 - `MAX_OVERLOAD_AGE_MS`'s boundary is tested with a 5s margin
   (`GRACE_TEST_MARGIN_MS`, `test/transcriptWatcher.test.ts`), not pinned at
   the exact millisecond. Cost if wrong: an off-by-ms edge.
-- DST spring-forward resolution east of UTC (e.g. London 01:30 → 03:30 BST)
-  overshoots by an extra hour; only Chicago is under test
-  (`src/parsers/limitParser.ts`, Task 4a report). Safe direction (later, not
-  earlier), so low urgency.
 - The in-flight-retry regex's narrowness is unpinned — no test asserts a
   terminal case containing the literal word "attempt" that should NOT match
   (`src/parsers/overloadParser.ts`).
@@ -223,6 +219,11 @@ Planned for the release after 1.0.
   prompt is longer than the read window and only attachment entries follow it,
   the window holds no verdict and the session reads as still stopped. Step the
   read window back until a verdict is found.
+- **A per-limit-type setting.** Policy B (wave D) offers Resume Now for any
+  limit that resets beyond `maxWaitHours` and auto-resumes only within it,
+  whatever the limit type. If users ask, consider a per-type setting - for
+  example "auto-resume weekly limits" - rather than raising `maxWaitHours` for
+  every type at once.
 - **Purge dropped restored jobs.** A restored job that fails validation is
   dropped from memory but never removed from the stored pending list, so it is
   logged again at every activation until the list is next rewritten.
