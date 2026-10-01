@@ -48,33 +48,11 @@ export function continuedSince(
   baselineBytes: number | undefined,
   fs: ContinuedFs = nodeFs,
 ): boolean {
-  if (baselineBytes === undefined || !Number.isFinite(baselineBytes) || baselineBytes < 0) {
+  const window = readAppendedWindow(transcriptPath, baselineBytes, fs);
+  if (!window) {
     return false;
   }
-  let text: string;
-  let from = baselineBytes;
-  try {
-    const size = fs.statSync(transcriptPath).size;
-    if (size <= baselineBytes) {
-      return false;
-    }
-    // The TAIL, bounded: the last entry decides, and a resumed session can
-    // append megabytes before this runs. Never earlier than the baseline -
-    // history before the stop is not news. A start inside a line just makes
-    // that first fragment unparseable, and it is skipped.
-    from = Math.max(baselineBytes, size - MAX_CONTINUED_READ_BYTES);
-    const length = size - from;
-    const buffer = Buffer.alloc(length);
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      fs.readSync(fd, buffer, 0, length, from);
-    } finally {
-      fs.closeSync(fd);
-    }
-    text = buffer.toString('utf8');
-  } catch {
-    return false;
-  }
+  const { text, from } = window;
   let continued = false;
   let parsedAny = false;
   for (const line of text.split('\n')) {
@@ -101,10 +79,53 @@ export function continuedSince(
   // that long is a real prompt (pasted images, say) and the session moved on.
   // When the window starts AT the baseline, an unparseable tail is only a
   // partial write, which is not news.
-  if (from > baselineBytes && !parsedAny) {
+  if (from > (baselineBytes ?? 0) && !parsedAny) {
     return true;
   }
   return continued;
+}
+
+/**
+ * What was appended to a transcript since `baselineBytes`, bounded to the last
+ * {@link MAX_CONTINUED_READ_BYTES} and never reaching back before the
+ * baseline. The window {@link continuedSince} judges, shared (wave C, C5) with
+ * the native auto-continue cancel scan so both read exactly the same bytes.
+ * `from` is where the text starts: past the baseline when the cap bit, in
+ * which case its first line may be a fragment. Undefined when it cannot be
+ * read: no or an invalid baseline (a job from an older build), an unreadable
+ * transcript, or one no longer than its baseline (nothing appended, or
+ * replaced).
+ */
+export function readAppendedWindow(
+  transcriptPath: string,
+  baselineBytes: number | undefined,
+  fs: ContinuedFs = nodeFs,
+): { text: string; from: number } | undefined {
+  if (baselineBytes === undefined || !Number.isFinite(baselineBytes) || baselineBytes < 0) {
+    return undefined;
+  }
+  try {
+    const size = fs.statSync(transcriptPath).size;
+    if (size <= baselineBytes) {
+      return undefined;
+    }
+    // The TAIL, bounded: the last entry decides, and a resumed session can
+    // append megabytes before this runs. Never earlier than the baseline -
+    // history before the stop is not news. A start inside a line just makes
+    // that first fragment unparseable, and it is skipped.
+    const from = Math.max(baselineBytes, size - MAX_CONTINUED_READ_BYTES);
+    const length = size - from;
+    const buffer = Buffer.alloc(length);
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      fs.readSync(fd, buffer, 0, length, from);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { text: buffer.toString('utf8'), from };
+  } catch {
+    return undefined;
+  }
 }
 
 /** How much of what was appended since detection is read. */

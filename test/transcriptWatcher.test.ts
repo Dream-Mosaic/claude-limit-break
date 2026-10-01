@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { installVscodeStub } from './helpers/vscode';
@@ -1290,4 +1291,143 @@ test('C1: an unrelated compaction failure does not warn about a reset time', () 
 test('C1: outside the watch scope a compaction failure is ignored like any other entry', () => {
   const w = new TranscriptWatcher(() => 24, () => 5, silent, () => ({ mode: 'workspace', folders: ['C:/elsewhere'] }));
   assert.equal(w.inspectLine(entry(compactionEntry()), FILE).limit, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Wave C, C4: Claude Code's native auto-continue status lines are observed.
+// Real armed and cancelled lines from fd493448 (2026-09-23, v2.1.278).
+// ---------------------------------------------------------------------------
+
+const nativeLine = (content: unknown, over: Record<string, unknown> = {}) =>
+  entry({
+    parentUuid: '966972dc-f14b-4f93-a0a0-75b00c0410f2',
+    isSidechain: false,
+    type: 'system',
+    subtype: 'informational',
+    content,
+    isMeta: false,
+    timestamp: '2026-09-23T11:58:48.136Z',
+    uuid: 'a033b426-bcef-4fd3-9953-0b9a7cebb303',
+    level: 'notice',
+    userType: 'external',
+    entrypoint: 'cli',
+    cwd: 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster',
+    sessionId: 'fd493448-9183-45bd-865d-ea2ccb227021',
+    version: '2.1.278',
+    ...over,
+  });
+
+const NATIVE_ARMED = 'Usage limit reached · continuing automatically at 11:10am · esc or type to cancel';
+const NATIVE_CANCELLED =
+  'Automatic continue cancelled · Claude Code exited during the wait, so the task will not resume on its own when the usage limit resets (send a prompt after the reset to continue)';
+
+test('C4: inspectLine reports armed, cancelled and fired status lines, and arms nothing from them', () => {
+  const cases: [string, string][] = [
+    [NATIVE_ARMED, 'armed'],
+    ['Usage limit reached again · continuing automatically at 4:10pm · esc or type to cancel', 'armed'],
+    [NATIVE_CANCELLED, 'cancelled'],
+    ['Usage limit reset · continuing automatically', 'fired'],
+  ];
+  for (const [content, kind] of cases) {
+    const out = make().inspectLine(nativeLine(content), FILE);
+    assert.equal(out.nativeStatus?.status.kind, kind, content);
+    assert.equal(out.nativeStatus?.status.text, content);
+    assert.equal(out.nativeStatus?.file, FILE);
+    assert.equal(out.nativeStatus?.cwd, 'C:/Users/thegr/Dream-Mosaic/Projects/claude-limit-buster');
+    assert.equal(out.limit, undefined, 'a status line is not a limit: ' + content);
+    assert.equal(out.overload, undefined, content);
+  }
+});
+
+test('C4: the same words in a user entry, an assistant entry or another subtype are not status', () => {
+  const shapes = [
+    nativeLine(NATIVE_ARMED, { type: 'user' }),
+    nativeLine(NATIVE_ARMED, { type: 'assistant' }),
+    nativeLine(NATIVE_CANCELLED, { subtype: 'local_command' }),
+    nativeLine([{ type: 'text', text: NATIVE_CANCELLED }]),
+    entry({ type: 'user', message: { role: 'user', content: NATIVE_CANCELLED } }),
+  ];
+  for (const line of shapes) {
+    assert.equal(make().inspectLine(line, FILE).nativeStatus, undefined, line.slice(0, 80));
+  }
+});
+
+test('C4: outside the watch scope a status line is ignored like any other entry', () => {
+  const w = new TranscriptWatcher(() => 24, () => 5, silent, () => ({ mode: 'workspace', folders: ['C:/elsewhere'] }));
+  assert.equal(w.inspectLine(nativeLine(NATIVE_ARMED), FILE).nativeStatus, undefined);
+});
+
+test('C4: a scan fires onNativeStatus for each status line, ahead of a limit in the same batch', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
+  try {
+    const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
+    fs.writeFileSync(
+      file,
+      nativeLine(NATIVE_ARMED) + '\n' +
+        entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', message: { content: 'Claude AI usage limit reached. Try again in 5 hours' } }) + '\n' +
+        nativeLine(NATIVE_CANCELLED) + '\n',
+    );
+    const w = make();
+    const seen: string[] = [];
+    let limits = 0;
+    w.onNativeStatus((h: { status: { kind: string } }) => seen.push(h.status.kind));
+    w.onHit(() => limits++);
+    await (w as unknown as { scanFile(f: string): Promise<void> }).scanFile(file);
+    // The limit does not hide the cancel line that follows it in the batch.
+    assert.deepEqual(seen, ['armed', 'cancelled']);
+    assert.equal(limits, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C4: a scan of status lines alone reports every one, in order', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
+  try {
+    const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
+    fs.writeFileSync(
+      file,
+      nativeLine(NATIVE_ARMED) + '\n' + nativeLine(NATIVE_CANCELLED) + '\n' + nativeLine('Usage limit reset · continuing automatically') + '\n',
+    );
+    const w = make();
+    const seen: string[] = [];
+    w.onNativeStatus((h: { status: { kind: string } }) => seen.push(h.status.kind));
+    await (w as unknown as { scanFile(f: string): Promise<void> }).scanFile(file);
+    assert.deepEqual(seen, ['armed', 'cancelled', 'fired']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C4: with two limits in one batch the FIRST still decides (unchanged by the status-line pass)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
+  try {
+    const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
+    const limitLine = (hours: number) =>
+      entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', message: { content: `Claude AI usage limit reached. Try again in ${hours} hours` } });
+    fs.writeFileSync(file, limitLine(5) + '\n' + limitLine(3) + '\n');
+    const w = make();
+    const hits: string[] = [];
+    w.onHit((h: { detection: { text: string } }) => hits.push(h.detection.text));
+    await (w as unknown as { scanFile(f: string): Promise<void> }).scanFile(file);
+    assert.equal(hits.length, 1);
+    assert.match(hits[0]!, /in 5 hours/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('C4: the /rate-limit-options "Don\'t continue automatically" user entry and the log-only lines are reported too (derived from the 2.1.285 binary)', () => {
+  const wait = 'Automatic continue cancelled. Your session will wait for you instead; /rate-limit-options can arm it again.';
+  const userEntry = entry({
+    type: 'user',
+    message: { role: 'user', content: `<local-command-stdout>${wait}</local-command-stdout>` },
+    cwd: 'C:/p',
+    timestamp: new Date().toISOString(),
+  });
+  const out = make().inspectLine(userEntry, FILE);
+  assert.deepEqual(out.nativeStatus?.status, { kind: 'cancelled', text: wait });
+  assert.equal(out.limit, undefined);
+  const other = make().inspectLine(nativeLine('Usage limit available again · continuing now'), FILE);
+  assert.equal(other.nativeStatus?.status.kind, 'other');
 });

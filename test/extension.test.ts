@@ -33,10 +33,12 @@ class FakeWatcher {
   private readonly hitEmitter = new FakeEventEmitter<unknown>();
   private readonly overloadEmitter = new FakeEventEmitter<unknown>();
   private readonly inputEmitter = new FakeEventEmitter<{ cwd?: string; file: string }>();
+  private readonly nativeEmitter = new FakeEventEmitter<unknown>();
 
   readonly onHit = this.hitEmitter.event;
   readonly onOverload = this.overloadEmitter.event;
   readonly onInputNeeded = this.inputEmitter.event;
+  readonly onNativeStatus = this.nativeEmitter.event;
 
   started = false;
 
@@ -62,6 +64,11 @@ class FakeWatcher {
       file: `/h/.claude/projects/p/${sessionId}.jsonl`,
       entryTimestampMs,
     });
+  }
+
+  /** Pretend Claude Code wrote one of its auto-continue status lines (wave C, C4). */
+  nativeStatusFor(sessionId: string, kind: 'armed' | 'cancelled' | 'fired', text: string, cwd: string = REAL_CWD): void {
+    this.nativeEmitter.fire({ status: { kind, text }, cwd, file: `/h/.claude/projects/p/${sessionId}.jsonl` });
   }
 
   /** Pretend a Claude turn just ended in `cwd`. */
@@ -107,6 +114,7 @@ class FakeWatcher {
     this.hitEmitter.dispose();
     this.overloadEmitter.dispose();
     this.inputEmitter.dispose();
+    this.nativeEmitter.dispose();
   }
 }
 
@@ -5111,5 +5119,40 @@ test('an automatic fire on a continued overload job logs the neutral line (B5)',
     clearHolders();
     teardown(ctx);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave C, C4: Claude Code's auto-continue status lines are logged with the
+// session id and the text, and nothing else happens.
+// ---------------------------------------------------------------------------
+
+test('C4: armed, cancelled and fired status lines are logged with the session id and text, and start nothing', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const watcher = FakeWatcher.latest;
+    assert.ok(watcher, 'activate must have constructed a watcher');
+    const noticesBefore = vscodeFake.info.length;
+    const texts = {
+      armed: 'Usage limit reached · continuing automatically at 11:10am · esc or type to cancel',
+      cancelled: 'Automatic continue cancelled · Claude Code exited during the wait, so the task will not resume on its own',
+      fired: 'Usage limit reset · continuing automatically',
+    } as const;
+    for (const kind of ['armed', 'cancelled', 'fired'] as const) {
+      watcher.nativeStatusFor(SESSION, kind, texts[kind]);
+    }
+    for (const kind of ['armed', 'cancelled', 'fired'] as const) {
+      assert.ok(
+        vscodeFake.outputLines.some((l) => l.includes(`auto-continue ${kind} for session ${SESSION}: ${texts[kind]}`)),
+        `${kind} must be logged; saw ${JSON.stringify(vscodeFake.outputLines.slice(-4))}`,
+      );
+    }
+    assert.equal(vscodeFake.terminals.length, 0, 'observing never launches');
+    assert.equal(vscodeFake.info.length, noticesBefore, 'and never shows a notice');
+  } finally {
+    teardown(ctx);
   }
 });

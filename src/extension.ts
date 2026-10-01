@@ -1132,6 +1132,14 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduler,
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
+    // Wave C, C4: Claude Code's own auto-continue lines (armed, cancelled,
+    // fired) are observed and logged, never acted on from here. Recognition is
+    // by type, subtype and prefix in the watcher; the text is the log's only
+    // use of it.
+    watcher.onNativeStatus((h) => {
+      const id = resolveSession(h.file, h.cwd, () => 0)?.sessionId ?? h.file;
+      log.info(`Claude Code auto-continue ${h.status.kind} for session ${id}: ${h.status.text}`);
+    }),
     watcher.onInputNeeded((hit) => {
       // A finished turn is evidence the session works again, so a gave-up
       // record for it is stale (fix round 1, ruling 2a). Ahead of both
