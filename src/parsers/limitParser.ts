@@ -316,8 +316,16 @@ function renderedWallClock(timeZone: string, at: Date): string | undefined {
  * is the unsafe direction by the same reasoning as the fall-back case above,
  * so it is detected the same way a missed target is always detected here -
  * the resolved candidate's own wall-clock reading no longer matches what was
- * asked for - and corrected by stepping forward one hour onto the safe side
- * of the gap instead.
+ * asked for - and corrected onto the safe side of the gap instead.
+ *
+ * The correction is the reading taken with the offset in force BEFORE the
+ * jump: the requested time pushed forward by the gap ("02:30" in Chicago
+ * reads 03:30 CDT). It used to be a flat hour onto the candidate, which is
+ * the same thing west of UTC but not east of it (wave D): there the two
+ * passes already land past the gap, reading 03:30 in Berlin for "02:30", and
+ * the extra hour made it 04:30 - an hour late (NEXT.md's deferred London
+ * finding). The offsets a day either side are the two in play; the one
+ * before a spring-forward is always the smaller.
  */
 function zonedWallClockToInstant(
     timeZone: string,
@@ -343,12 +351,17 @@ function zonedWallClockToInstant(
     }
     // Spring-forward gap: the resolved instant does not read back the hour
     // and minute that were actually asked for, proof the requested wall
-    // clock fell inside a skipped hour. Step forward one hour - the only
-    // gap size any zone Claude Code's own banners have been seen in uses -
-    // onto the safe, later side of the jump.
+    // clock fell inside a skipped hour. Read it with the offset from before
+    // the jump, which lands the requested time plus the gap on the safe,
+    // later side of it (see the doc comment for why not a flat hour).
     const requested = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
     if (renderedWallClock(timeZone, candidate)?.slice(-5) !== requested) {
-        return oneHourLater;
+        const dayBefore = zoneOffsetMs(timeZone, new Date(target - DAY_MS));
+        const dayAfter = zoneOffsetMs(timeZone, new Date(target + DAY_MS));
+        if (dayBefore === undefined || dayAfter === undefined) {
+            return oneHourLater;
+        }
+        return new Date(target - Math.min(dayBefore, dayAfter));
     }
     return candidate;
 }
@@ -404,6 +417,32 @@ const RULES: Rule[] = [
         resolve(m, now) {
             const minutes = Number(m[1] ?? '');
             return minutes > 0 ? new Date(now.getTime() + minutes * MINUTE_MS) : undefined;
+        },
+    },
+    {
+        // Wave D, D2. "resets Aug 4, 1am (America/Chicago)" - the form Claude
+        // Code's own `Zd` writes for a reset more than 24h out (real
+        // transcripts: v2.1.220 and v2.1.270) - and "resets Jun 3 at 4pm
+        // (Europe/Berlin)" (GitHub #68816). Exactly the forms those sources
+        // show: a short English month, a day, then a comma or " at", an
+        // hour with an optional ":MM", and am/pm. The zone is optional in the
+        // pattern only so that a notice WITHOUT one is recognised and
+        // rejected with a reason rather than passed over in silence.
+        id: 'dated-reset',
+        re: /reset(?:s|ting)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:,|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(\s*([^()\s]+)\s*\))?/i,
+        resolve(m, now) {
+            return resolveDatedReset(m, now);
+        },
+    },
+    {
+        // Wave D, D2. "resets Mon 12:00am" - the weekday form the errors
+        // docs quote. Read only with a zone in parentheses, like the dated
+        // form; the docs' own example has none and is rejected with that
+        // reason.
+        id: 'weekday-reset',
+        re: /reset(?:s|ting)?\s+(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(\s*([^()\s]+)\s*\))?/i,
+        resolve(m, now) {
+            return resolveWeekdayReset(m, now);
         },
     },
     {
@@ -463,6 +502,104 @@ function nextZonedOccurrence(
     }
     return undefined;
 }
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+/**
+ * The 24-hour hour for a 1-12 reading and its meridiem, or undefined when the
+ * reading is not a real time ("13pm", "0am", ":75").
+ */
+function meridiemHour(hourText: string | undefined, minuteText: string | undefined, meridiem: string | undefined): number | undefined {
+    const hour = Number(hourText ?? '');
+    const minute = minuteText ? Number(minuteText) : 0;
+    if (!Number.isInteger(hour) || hour < 1 || hour > 12 || minute > 59) {
+        return undefined;
+    }
+    return (hour % 12) + (meridiem?.toLowerCase() === 'pm' ? 12 : 0);
+}
+
+/**
+ * The zone a dated or weekday notice names, checked against the runtime's
+ * own zone data, or why it cannot be used. Required (wave D, D2): a date
+ * more than a day out read in the wrong zone is wrong by hours, and this
+ * machine's zone is only a guess at the one Claude Code wrote it in.
+ */
+function noticeZone(zone: string | undefined, now: Date): { zone: string; today: { y: number; m: number; d: number } } | Unparseable {
+    if (!zone) {
+        return { unparseable: 'a dated reset with no time zone' };
+    }
+    const today = zoneToday(zone, now);
+    return today ? { zone, today } : { unparseable: `an unknown time zone (${zone})` };
+}
+
+/**
+ * "Aug 4, 1am (America/Chicago)": that wall-clock reading in that zone, in
+ * the first year whose occurrence is on or after `now` (the entry's own
+ * timestamp) less {@link RESET_GRACE_MS} - so a December entry's "Jan 2" is
+ * next year's, and a reset that struck minutes before its entry was written
+ * stays this year's and is due now. The year starts from the zone's own
+ * calendar, not UTC's. A day the month does not have is rejected, not
+ * rolled into the next month the way Date.UTC would.
+ */
+function resolveDatedReset(m: RegExpExecArray, now: Date): Date | Unparseable {
+    const month = MONTHS.indexOf((m[1] ?? '').toLowerCase());
+    const day = Number(m[2] ?? '');
+    const hour = meridiemHour(m[3], m[4], m[5]);
+    const minute = m[4] ? Number(m[4]) : 0;
+    const zoned = noticeZone(m[6], now);
+    if ('unparseable' in zoned) {
+        return zoned;
+    }
+    if (hour === undefined) {
+        return { unparseable: 'not a real time' };
+    }
+    let latest: Date | undefined;
+    for (const year of [zoned.today.y, zoned.today.y + 1]) {
+        if (day < 1 || new Date(Date.UTC(year, month, day)).getUTCMonth() !== month) {
+            continue;
+        }
+        const at = zonedWallClockToInstant(zoned.zone, year, month, day, hour, minute);
+        if (!at) {
+            return { unparseable: `an unknown time zone (${zoned.zone})` };
+        }
+        latest = at;
+        if (at.getTime() >= now.getTime() - RESET_GRACE_MS) {
+            return at;
+        }
+    }
+    return latest ?? { unparseable: 'not a real date' };
+}
+
+/**
+ * "Mon 12:00am (America/Chicago)": the first such weekday, from the zone's
+ * own today, whose reading is on or after `now` less {@link RESET_GRACE_MS}.
+ * Eight days are walked so that today's weekday whose time has passed rolls
+ * to the same weekday next week.
+ */
+function resolveWeekdayReset(m: RegExpExecArray, now: Date): Date | Unparseable {
+    const weekday = WEEKDAYS.indexOf((m[1] ?? '').toLowerCase());
+    const hour = meridiemHour(m[2], m[3], m[4]);
+    const minute = m[3] ? Number(m[3]) : 0;
+    const zoned = noticeZone(m[5], now);
+    if ('unparseable' in zoned) {
+        return zoned;
+    }
+    if (hour === undefined) {
+        return { unparseable: 'not a real time' };
+    }
+    const { y, m: month, d } = zoned.today;
+    for (let offset = 0; offset <= 7; offset++) {
+        if (new Date(Date.UTC(y, month, d + offset)).getUTCDay() !== weekday) {
+            continue;
+        }
+        const at = zonedWallClockToInstant(zoned.zone, y, month, d + offset, hour, minute);
+        if (at && at.getTime() >= now.getTime() - RESET_GRACE_MS) {
+            return at;
+        }
+    }
+    return { unparseable: `an unknown time zone (${zoned.zone})` };
+}
+
 /**
  * Turn a bare clock reading into the next future instant.
  *

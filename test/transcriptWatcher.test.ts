@@ -1667,3 +1667,69 @@ test('D4: the offsets prune forgets a file it no longer tracks, so its warn-once
   w.inspectLine(stale, FILE);
   assert.equal(warnings.length, 2, 'a file pruned and met again is a new file');
 });
+
+// ---------------------------------------------------------------------------
+// Wave D, D2 through the watcher: the dated weekly-limit text, which Claude
+// Code writes with no quotaLimits on older builds, on both the flagged and
+// the compaction path.
+// ---------------------------------------------------------------------------
+
+/** "Oct 4" for an instant `days` from now, as Claude Code's Zd renders it in Chicago. */
+const chicagoDate = (days: number) => {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric' }).formatToParts(
+    new Date(Date.now() + days * 86_400_000),
+  );
+  return `${parts.find((p) => p.type === 'month')!.value} ${parts.find((p) => p.type === 'day')!.value}`;
+};
+
+test('D2: a flagged weekly limit in the dated form, with no quotaLimits, is picked up as offer-only', () => {
+  const { w, warnings } = warnWatcher();
+  const out = w.inspectLine(
+    flaggedText(`You've hit your weekly limit · resets ${chicagoDate(3)}, 1am (America/Chicago)`, { error: 'rate_limit' }),
+    FILE,
+  );
+  assert.ok(out.limit, `not picked up; warnings: ${JSON.stringify(warnings)}`);
+  assert.equal(out.limit.detection.offerOnly, true);
+  assert.equal(out.limit.detection.rateLimitType, 'seven_day');
+  const daysOut = (out.limit.detection.resumeAt.getTime() - Date.now()) / 86_400_000;
+  assert.ok(daysOut > 1.5 && daysOut < 3.5, `expected ~2-3 days out, got ${daysOut.toFixed(2)}`);
+  assert.deepEqual(warnings, []);
+});
+
+test('D2: a compaction failure at a weekly limit is picked up too (C1 could not read the dated form)', () => {
+  const out = make().inspectLine(
+    entry(compactionEntry({ content: compactContent(`You've hit your weekly limit · resets ${chicagoDate(3)} at 9am (America/Chicago)`) })),
+    FILE,
+  );
+  assert.ok(out.limit);
+  assert.equal(out.limit.detection.offerOnly, true);
+});
+
+test('D2/D4: a dated weekly limit with no zone arms nothing and warns that the zone is missing', () => {
+  const { w, warnings } = warnWatcher();
+  assert.equal(w.inspectLine(flaggedText(`You've hit your weekly limit · resets ${chicagoDate(3)}, 1am`), FILE).limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /no parseable reset time \(a dated reset with no time zone\)/);
+  assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
+});
+
+test('D2/D4: the real v2.1.220 line, met today in a fork, is history: not picked up, one warning', () => {
+  // Verbatim from session 1e8a6fb6 (2026-07-31), less the usage block.
+  const real = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-07-31T04:55:10.016Z',
+    message: { model: '<synthetic>', role: 'assistant', stop_reason: 'stop_sequence', content: [{ type: 'text', text: "You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)" }] },
+    error: 'rate_limit',
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+    cwd: 'C:\\Users\\thegr\\Dream-Mosaic\\Projects\\unwritten-chronicles\\.claude\\worktrees\\feat+scrollback-filter-rebuild',
+    sessionId: '1e8a6fb6-15d6-4acd-b0c5-fc5baec78f32',
+    version: '2.1.220',
+  });
+  const { w, warnings } = warnWatcher();
+  assert.equal(w.inspectLine(real, FILE).limit, undefined);
+  assert.equal(w.inspectLine(real, FILE).limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /reset at 2026-08-04T06:00:00\.000Z/);
+  assert.match(warnings[0]!, /history/);
+});
