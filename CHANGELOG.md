@@ -89,8 +89,11 @@ The first release.
   `Resume Now` / `Cancel Pending Resume` / `Show Log` commands. A single click
   on the status bar opens a menu (Resume Now / Cancel Pending Resume / Show
   Log / Dismiss gave-up notices when something has given up).
-- `CLAUDE_CONFIG_DIR` is honoured everywhere `~/.claude` would otherwise be
-  read (trust status and Claude Code's own auto-continue setting).
+- `CLAUDE_CONFIG_DIR`, when set and non-empty, replaces `~/.claude` for every
+  file the extension reads: the transcripts it watches, the per-process session
+  records it checks before resuming, Claude Code's own `settings.json` (the
+  auto-continue setting) and the trust record in `.claude.json`. The extension
+  only ever reads these files.
 - Project paths are case-folded only on filesystems that are actually
   case-insensitive.
 - Checks Claude Code's own session state, and other Claude sessions, before
