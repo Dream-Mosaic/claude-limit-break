@@ -36,8 +36,8 @@ export interface NativeStatus {
   text: string;
 }
 
-// U+00B7 MIDDLE DOT is the separator Claude Code writes ("·"), kept as an
-// escape so a re-encoded file cannot silently change what is matched.
+// U+00B7 MIDDLE DOT ("·") is the separator Claude Code writes. One named
+// constant, so every pattern below is built from the same character.
 const DOT = '·';
 const ARMED_RE = new RegExp(`^Usage limit reached(?: again)? ${DOT} continuing automatically`);
 const FIRED_RE = new RegExp(`^Usage limit reset ${DOT} continuing automatically`);
@@ -95,7 +95,10 @@ function classifyMenuCancel(e: Record<string, unknown>): NativeStatus | undefine
     raw = content;
   } else if (Array.isArray(content)) {
     const first = content[0] as Record<string, unknown> | undefined;
-    raw = first && typeof first === 'object' && typeof first.text === 'string' ? first.text : undefined;
+    raw =
+      first && typeof first === 'object' && first.type === 'text' && typeof first.text === 'string'
+        ? first.text
+        : undefined;
   }
   if (raw === undefined || !raw.startsWith(LOCAL_STDOUT_OPEN + CANCELLED_PREFIX)) {
     return undefined;

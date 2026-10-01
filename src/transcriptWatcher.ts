@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 import { claudeHome } from './claudeHome';
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
-import { detectLimit, resolveStructuredReset, compactionLimitText, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
+import { detectLimit, resolveStructuredReset, compactionLimitText, looksLikeLimitMessage, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
 import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 import { classifyNativeStatus, NativeStatus } from './nativeContinue';
@@ -368,11 +368,22 @@ export class TranscriptWatcher {
             if (!trimmed) {
                 continue;
             }
-            const scan = this.inspectLine(trimmed, file);
+            // One bad line must not take a limit already recorded in this
+            // batch with it: the offset above is already consumed, so nothing
+            // would read the batch again.
+            let scan: InspectResult;
+            try {
+                scan = this.inspectLine(trimmed, file);
+            }
+            catch (err) {
+                this.log.warn(`Cannot inspect a line in ${path.basename(file)}: ${String(err)}`);
+                continue;
+            }
             if (scan.nativeStatus) {
-                // Every such line is reported, ahead of the limit early-return
-                // below: a cancel line must not be swallowed by a limit that
-                // happens to sit in the same batch.
+                // Every such line is logged (C4), including one that follows a
+                // limit in the same batch. The C5 stand-down scan starts at
+                // the size recorded at detection, which is at or past the end
+                // of this batch, so it cannot see such a line (NEXT.md 1.1).
                 this.onNativeStatusEmitter.fire(scan.nativeStatus);
             }
             if (scan.limit) {
@@ -415,6 +426,11 @@ export class TranscriptWatcher {
         }
         catch {
             // A partially written line; the next pass will see it complete.
+            return {};
+        }
+        // Valid JSON that is not an object (`null`, a number, an array) is not
+        // a transcript entry, and reading `.cwd` off it would throw.
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
             return {};
         }
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
@@ -620,6 +636,28 @@ export class TranscriptWatcher {
                 if (overload) {
                     return { overload: { detection: overload, cwd, file, entryTimestampMs: writtenAt?.getTime() } };
                 }
+            }
+        }
+        // Wave C fix round 1 (M3): a FLAGGED entry that reads as a usage limit
+        // but yielded no limit and is no overload is a missed resume the user
+        // would otherwise never hear about - the log is their only clue - so it
+        // gets the same warning the compaction path does. Only when no reset
+        // time could be read at all: a readable but stale time (a fork's copy)
+        // is history, and an overload render (even one too old to act on, such
+        // as the transient 429 that disclaims being a usage limit) is not a
+        // limit.
+        if (flagged) {
+            const short = candidates.filter((c) => c.text.length <= MAX_NOTICE_LENGTH);
+            const limitText = short.find((c) => looksLikeLimitMessage(c.text))?.text;
+            if (
+                limitText !== undefined &&
+                !short.some((c) => detectOverload(c.text)) &&
+                !detectLimit(limitText, basis, Infinity, { trusted: true, readAt: new Date(0) })
+            ) {
+                this.log.warn(
+                    `Usage limit in session ${path.basename(file, '.jsonl')} has no parseable reset time; ` +
+                        `not picking it up: ${limitText.slice(0, MAX_NOTICE_LENGTH)}`,
+                );
             }
         }
         return { inputNeeded };

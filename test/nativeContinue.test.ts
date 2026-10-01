@@ -264,3 +264,8 @@ test('unparseable and partial lines are skipped', () => {
   fs.appendFileSync(file, 'garbage\n' + line(info(DESKTOP)) + '{"type":"system","subtype":"informational","content":"Automatic con');
   assert.equal(lastNativeCancel(file, baseline), DESKTOP);
 });
+
+test('a content block that is not a text block is not a cancel, even with the right text field', () => {
+  const content = [{ type: 'tool_result', text: `<local-command-stdout>${WAIT}</local-command-stdout>` }];
+  assert.equal(classifyNativeStatus(waitEntry({ message: { role: 'user', content } })), undefined);
+});

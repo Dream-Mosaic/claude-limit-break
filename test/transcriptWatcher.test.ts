@@ -1431,3 +1431,147 @@ test('C4: the /rate-limit-options "Don\'t continue automatically" user entry and
   const other = make().inspectLine(nativeLine('Usage limit available again · continuing now'), FILE);
   assert.equal(other.nativeStatus?.status.kind, 'other');
 });
+
+// ---------------------------------------------------------------------------
+// Wave C fix round 1.
+// I1: the batch-priority guarantees of scanFile, which the wave C restructure
+// (no early return at the first limit) now holds up by the placement of the
+// `if (limit)` block alone. M1: one bad line cannot drop a recorded limit.
+// M3: a flagged entry that reads as a usage limit but yields nothing warns.
+// ---------------------------------------------------------------------------
+
+type ScanCounts = { hits: number; overloads: number; inputs: number };
+
+/** Write `lines` as one batch to a fresh transcript and scan it once. */
+async function scanBatch(lines: string[], watcher = make()): Promise<ScanCounts> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-batch-'));
+  try {
+    const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
+    fs.writeFileSync(file, lines.join('\n') + '\n');
+    const counts: ScanCounts = { hits: 0, overloads: 0, inputs: 0 };
+    watcher.onHit(() => counts.hits++);
+    watcher.onOverload(() => counts.overloads++);
+    watcher.onInputNeeded(() => counts.inputs++);
+    await (watcher as unknown as { scanFile(f: string): Promise<void> }).scanFile(file);
+    return counts;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const batchOverload = () =>
+  entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', timestamp: new Date().toISOString(), message: { content: 'API Error: 529 Overloaded' } });
+const batchLimit = () =>
+  entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', timestamp: new Date().toISOString(), message: { content: 'Claude AI usage limit reached. Try again in 5 hours' } });
+const batchTurnEnd = () => entry({ type: 'assistant', cwd: 'C:/p', message: { stop_reason: 'end_turn', content: 'Done.' } });
+
+test('I1: a limit outranks every overload and turn end in the same batch', async () => {
+  const counts = await scanBatch([batchOverload(), batchLimit(), batchOverload(), batchTurnEnd()]);
+  assert.deepEqual(counts, { hits: 1, overloads: 0, inputs: 0 });
+});
+
+test('I1: a limit that comes first or last in the batch outranks the same way', async () => {
+  assert.deepEqual(await scanBatch([batchLimit(), batchOverload(), batchTurnEnd()]), { hits: 1, overloads: 0, inputs: 0 });
+  assert.deepEqual(await scanBatch([batchTurnEnd(), batchOverload(), batchLimit()]), { hits: 1, overloads: 0, inputs: 0 });
+});
+
+test('I1: an overload in the batch suppresses the turn end ("your turn" would be a lie)', async () => {
+  const counts = await scanBatch([batchOverload(), batchTurnEnd()]);
+  assert.deepEqual(counts, { hits: 0, overloads: 1, inputs: 0 });
+});
+
+test('I1: a turn end on its own still reports input needed (control)', async () => {
+  assert.deepEqual(await scanBatch([batchTurnEnd()]), { hits: 0, overloads: 0, inputs: 1 });
+});
+
+test('M1: a line that is valid JSON but not an object is not an entry', () => {
+  for (const line of ['null', '7', '"text"', '[1,2]', 'true']) {
+    assert.deepEqual(make().inspectLine(line, FILE), {}, line);
+  }
+});
+
+test('M1: a limit already recorded in a batch still fires when a later line is JSON null', async () => {
+  const counts = await scanBatch([batchLimit(), 'null', '[1]', batchTurnEnd()]);
+  assert.deepEqual(counts, { hits: 1, overloads: 0, inputs: 0 });
+});
+
+test('M1: a line that makes inspectLine throw is skipped and logged, and the batch still fires its limit', async () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  const real = w.inspectLine.bind(w);
+  (w as unknown as { inspectLine: typeof w.inspectLine }).inspectLine = (line: string, file: string) => {
+    if (line.includes('BOOM')) {
+      throw new Error('boom');
+    }
+    return real(line, file);
+  };
+  const counts = await scanBatch([batchLimit(), entry({ type: 'user', message: { content: 'BOOM' } }), batchTurnEnd()], w);
+  assert.deepEqual(counts, { hits: 1, overloads: 0, inputs: 0 });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /Cannot inspect a line/);
+});
+
+// M3 -------------------------------------------------------------------------
+const warnWatcher = () => {
+  const warnings: string[] = [];
+  return { warnings, w: new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} }) };
+};
+const flaggedText = (text: string, over: Record<string, unknown> = {}) =>
+  entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text }] }, ...over });
+
+test('M3: a flagged entry that reads as a usage limit with no parseable reset time arms nothing and warns', () => {
+  const { w, warnings } = warnWatcher();
+  const out = w.inspectLine(flaggedText("You've hit your session limit"), FILE);
+  assert.equal(out.limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
+  assert.match(warnings[0]!, /You've hit your session limit/);
+  assert.match(warnings[0]!, /no parseable reset time/);
+});
+
+test('M3: it warns once per entry even when the text repeats in several fields', () => {
+  const { w, warnings } = warnWatcher();
+  w.inspectLine(flaggedText("You've hit your session limit", { error: "You've hit your session limit", detail: "You've hit your session limit" }), FILE);
+  assert.equal(warnings.length, 1);
+});
+
+test('M3: a flagged limit that parses does not warn (control)', () => {
+  const { w, warnings } = warnWatcher();
+  assert.ok(w.inspectLine(flaggedText("You've hit your session limit · resets in 5 hours"), FILE).limit);
+  assert.deepEqual(warnings, []);
+});
+
+test('M3: a flagged limit with a readable but STALE reset is history, not a miss: no warning', () => {
+  const { w, warnings } = warnWatcher();
+  const stale = flaggedText("You've hit your session limit · resets in 5 hours", { timestamp: hoursAgo(20) });
+  assert.equal(w.inspectLine(stale, FILE).limit, undefined);
+  assert.deepEqual(warnings, []);
+});
+
+test('M3: a flagged overload does NOT warn, including one that names a limit and one too old to act on', () => {
+  const { w, warnings } = warnWatcher();
+  assert.ok(w.inspectLine(flaggedText('API Error: 529 Overloaded'), FILE).overload);
+  const transient = flaggedText('API Error: Server is temporarily limiting requests (not your usage limit) \u00b7 Rate limited', { error: 'rate_limit', apiErrorStatus: 429 });
+  assert.ok(w.inspectLine(transient, FILE).overload, 'routed to overload');
+  const oldTransient = flaggedText('API Error: Server is temporarily limiting requests (not your usage limit) \u00b7 Rate limited', {
+    error: 'rate_limit',
+    apiErrorStatus: 429,
+    timestamp: new Date(Date.now() - 2 * MAX_OVERLOAD_AGE_MS).toISOString(),
+  });
+  assert.equal(w.inspectLine(oldTransient, FILE).overload, undefined, 'too old to retry');
+  assert.deepEqual(warnings, []);
+});
+
+test('M3: a flagged entry that is not about a limit does not warn, and neither does unflagged prose', () => {
+  const { w, warnings } = warnWatcher();
+  w.inspectLine(flaggedText('No response requested.'), FILE);
+  w.inspectLine(entry({ type: 'assistant', message: { content: [{ type: 'text', text: "You've hit your session limit" }] } }), FILE);
+  w.inspectLine(entry({ type: 'user', message: { content: "my usage limit resets at 3pm, right?" } }), FILE);
+  assert.deepEqual(warnings, []);
+});
+
+test('M3: a long file-sized string in a flagged entry is not read for the warning either', () => {
+  const { w, warnings } = warnWatcher();
+  w.inspectLine(flaggedText("You've hit your session limit " + 'x'.repeat(500)), FILE);
+  assert.deepEqual(warnings, []);
+});
