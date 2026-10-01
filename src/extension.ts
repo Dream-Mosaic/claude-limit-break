@@ -782,7 +782,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const button = 'Resume Anyway';
     const pick = await Promise.resolve(
       vscode.window.showWarningMessage(
-        `Limit Break: session ${job.sessionId.slice(0, 8)} has continued since the limit was detected. ` +
+        `Limit Break: session ${job.sessionId.slice(0, 8)} has continued since it stopped. ` +
           'Resuming now will fork the conversation.',
         { modal: true },
         button,
@@ -1238,7 +1238,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // from one left idle at the limit. Nothing is remembered or shown, and
       // the claim is KEPT, so every other window drops its copy too.
       if (hasContinued(job)) {
-        log.info(`Session ${job.sessionId.slice(0, 8)} has continued since the limit was detected; not resuming.`);
+        log.info(`Session ${job.sessionId.slice(0, 8)} has continued since it stopped; not resuming.`);
         return;
       }
       if (!s.autoResume) {
