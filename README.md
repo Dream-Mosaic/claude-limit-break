@@ -13,8 +13,11 @@ notices, waits out the clock, and picks the session back up where it left off.
 Detection reads Claude Code's own session transcripts rather than watching a
 terminal, so it works whether Claude is running in the VS Code panel or in a
 terminal, and whether or not the session was started from VS Code at all. It
-reads those files from `$CLAUDE_CONFIG_DIR` when that is set, and from
-`~/.claude` otherwise, and it only ever reads them.
+reads Claude Code's files (the transcripts, the per-process session records,
+`settings.json`) from `$CLAUDE_CONFIG_DIR` when that is set, and from
+`~/.claude` otherwise. The folder-trust record follows the same variable, as it
+does in Claude Code itself: `$CLAUDE_CONFIG_DIR/.claude.json` when it is set,
+`~/.claude.json` otherwise. It only ever reads these files.
 
 A usage limit or a server error is acted on only when Claude Code itself
 flagged the transcript entry as an API error. Text the model wrote, a tool
@@ -60,7 +63,7 @@ resume for it:
 | An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The stale-tab handling (below) runs afterwards. |
 | A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
 | An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute after this window's own resume would have fired (the reset plus its random delay), it looks for a new message in the transcript since the stop was detected; if there is none (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
-| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. The notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so and nothing is started. |
+| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. The notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
 
 Two VS Code windows watching the same account can still both detect an
@@ -85,14 +88,14 @@ A resume is for a session that is still stopped. If something has continued it
 since the stop was detected (you typed into the panel or the terminal, Claude
 Code's own auto-continue ran, another window resumed it), resuming on top of it
 would fork the conversation. So when a resume fires on its own, a session that
-has moved on is left alone: one line in the log (`Session <id> has continued
-since it stopped; not resuming.`), nothing offered, nothing launched.
+has moved on is left alone: one line in the log, nothing offered, nothing
+launched.
 
 On the manual paths (the Resume Now command, the Resume Now notification, the
 "Claude Code did not continue" offer, and "Resume in Terminal Anyway") you are
-asked first, in a modal: `Limit Break: session <id> has continued since it
+asked first, in a modal: `Limit Break: session <id8> has continued since it
 stopped. Resuming now will fork the conversation.` with a "Resume Anyway"
-button.
+button. (`<id8>` is the first eight characters of the session id.)
 
 The check judges the session's final state, not just whether anything was
 written. A retry that ran into the same limit again leaves the session stopped
@@ -101,7 +104,10 @@ again, so it is still resumed. Local slash commands such as `/usage` and
 `/compact` writes a summary entry, which does count; one that failed writes
 none, so the session is still resumed. When the transcript cannot be read, or
 there is no record of its size at detection (a job saved by an older version),
-the check cannot tell and the resume goes ahead.
+the check cannot tell and the resume goes ahead. The one exception: if the
+transcript has grown by more than 2 MB since the stop and ends in a line too big
+to read, that line is a real prompt (pasted images, say), and the session counts
+as continued.
 
 ## Server errors
 
@@ -114,7 +120,7 @@ resumes in a row for one session, since it last finished a turn:
 |---|---|
 | 1st | After the usual random delay. |
 | 2nd to 5th | The usual delay plus 15, 30, 60 and 120 minutes. |
-| 6th | Not retried. A warning says `Limit Break: session <id> kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`, and the status bar lists it as gave up. Nothing is kept for Resume Now; continue it by hand. |
+| 6th | Not retried. A warning says `Limit Break: session <id8> kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`, and the status bar lists it as gave up. Nothing is kept for Resume Now; continue it by hand. |
 
 A finished turn starts the count over. A usage limit in between neither counts
 nor resets it, and is never backed off. The count lives in memory, per window,

@@ -89,9 +89,14 @@ The first release.
   Log / Dismiss gave-up notices when something has given up).
 - `CLAUDE_CONFIG_DIR`, when set and non-empty, replaces `~/.claude` for every
   file the extension reads: the transcripts it watches, the per-process session
-  records it checks before resuming, Claude Code's own `settings.json` (the
-  auto-continue setting) and the trust record in `.claude.json`. The extension
-  only ever reads these files.
+  records it checks before resuming, and Claude Code's own `settings.json` (the
+  auto-continue setting). The trust record is read from
+  `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`: Claude Code
+  itself resolves that file as `path.join(process.env.CLAUDE_CONFIG_DIR ||
+  homedir(), ".claude.json")`, so the variable stands in for the home
+  directory, and the extension follows it. An unset or empty variable falls
+  back to `~/.claude` and `~/.claude.json`. The extension only ever reads these
+  files.
 - Project paths are case-folded only on filesystems that are actually
   case-insensitive.
 - Checks Claude Code's own session state, and other Claude sessions, before
@@ -114,9 +119,9 @@ The first release.
 - Checks that Claude Code's own auto-continue really did continue a session
   it stood down for. The setting reads as on when it is absent, but it is not
   offered to every account. The check runs a minute after this window's own
-  resume fires, which is the reset plus this window's random delay, and looks
-  for a new message in the transcript since the stop was detected. If there is
-  none, Limit Break says "Claude Code did not continue ... on its own" and
+  resume time, which is the reset plus this window's random delay (not a minute
+  after the reset), and looks for a new message in the transcript since the
+  stop was detected. If there is none, Limit Break says "Claude Code did not continue ... on its own" and
   offers Resume Now instead of dropping the session silently.
 - Never resumes a session that has moved on since its stop was detected. If a
   turn (yours, Claude Code's own auto-continue, another window's resume) has
@@ -124,20 +129,24 @@ The first release.
   rather than forking the conversation. The manual paths (the Resume Now
   command and notification, the "Claude Code did not continue" offer, and
   "Resume in Terminal Anyway") ask first, in a modal: "Limit Break: session
-  <id> has continued since it stopped. Resuming now will fork the
-  conversation." with a "Resume Anyway" button. The check judges the session's
-  final state: a retry that ran into the same limit again leaves it stopped, so
-  it is still resumed. Local slash commands (`/usage`, `/status`) do not count
-  as continuing. A successful `/compact` writes a summary entry and does count;
-  a failed one writes none. When the transcript cannot be read, or its size at
+  <id8> has continued since it stopped. Resuming now will fork the
+  conversation." with a "Resume Anyway" button (`<id8>` is the first eight
+  characters of the session id). The check judges the session's final state: a
+  retry that ran into the same limit again leaves it stopped, so it is still
+  resumed. Local slash commands (`/usage`, `/status`) do not count as
+  continuing. A successful `/compact` writes a summary entry and does count; a
+  failed one writes none. When the transcript cannot be read, or its size at
   detection was not recorded, the check cannot tell and the resume goes ahead.
-- Bounds server-error retries: a session's consecutive overload resumes are backed off
-  and then given up. The first retry uses the usual random delay; the second to
-  fifth add 15, 30, 60 and 120 minutes; the sixth is not retried, with the
-  warning "Limit Break: session <id> kept stopping on server errors (5 resumes
-  in a row); giving up until it finishes a turn." and a gave-up entry in the
-  status bar. A finished turn starts the count over; a usage limit neither
-  counts nor resets it.
+  The exception is a transcript that has grown by more than 2 MB since the stop
+  and ends in a line too big to read: that is a real prompt (pasted images,
+  say), so the session counts as continued.
+- Bounds server-error retries: a session's consecutive overload resumes are
+  backed off and then given up. The first retry uses the usual random delay; the
+  second to fifth add 15, 30, 60 and 120 minutes; the sixth is not retried,
+  with the warning "Limit Break: session <id8> kept stopping on server errors
+  (5 resumes in a row); giving up until it finishes a turn." and a gave-up entry
+  in the status bar. A finished turn starts the count over; a usage limit
+  neither counts nor resets it.
 - A machine-wide, filesystem-based claim so that two VS Code windows watching
   the same account do not both launch a resume for the same reset. Without it,
   two windows can detect an identical limit within milliseconds of each other

@@ -1,6 +1,6 @@
 # Next steps
 
-State as of 2026-09-30, after the Limit Break 1.0 plan (both lanes), its
+State as of 2026-10-01, after the Limit Break 1.0 plan (both lanes), its
 final review fix wave, and the two field-report fix waves (A and B) landed on
 `fix/1.0-field-reports`. Read
 [design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
@@ -68,8 +68,11 @@ What is not covered:
 ## Deferred review findings
 
 Grouped by area; each was accepted as a deferred Minor rather than a required
-fix, with the reviewer's stated cost of being wrong. Checked against current
-`HEAD` on 2026-09-25 — none of these has since been fixed by a later task.
+fix, with the reviewer's stated cost of being wrong. Checked against `HEAD` on
+2026-09-25. The two the field-report waves have since fixed (the default
+`resumePrompt` naming a usage limit for an overload retry, and the native
+auto-continue check reading any growth as "it continued") are removed, and the
+synchronous `claude agents` call has moved to 1.1 below.
 
 **Detection / parsing** (Task 1 and 4a reviews)
 - A flagged rate-limit entry whose `quotaLimits.resetsAt` fails the
@@ -184,9 +187,34 @@ Planned for the release after 1.0.
   none`, so anything that would prompt is denied instead of hanging. It also
   surfaces `permission_denials` from the JSON output, so silent partial work is
   reported, and it is version-gated at Claude Code 2.1.259, which introduced
-  `--permission-prompts`. Four design calls are still open with the user; the
-  options table is section 7 of `research-headless-permissions.md` in the
-  untracked SDD workspace.
+  `--permission-prompts`. Four design calls are still open with the user: an
+  empty `headlessPermissionMode` means "mirror the session"; a recorded
+  `bypassPermissions` falls back to `default` rather than being mirrored; the
+  `--permission-prompts none` gate at 2.1.259; and a warning on
+  `permission_denials` with a button to continue in a terminal. The options
+  table is section 7 of `research-headless-permissions.md` in the maintainer's
+  local, untracked SDD workspace, not in this repository.
+- **Following a headless run.** Today a headless resume runs in a shown VS Code
+  terminal with `--output-format json`: silent until it finishes, no input, no
+  done notice, and the panel tab for that session is stale meanwhile (typing
+  into it forks the conversation). Wanted with headless C: `stream-json`
+  progress plus a "running headless" status-bar item; a done notice with the
+  denial count and "Open session" / "Resume in terminal" buttons; a check
+  whether `-p` processes show up in `claude agents --json` and
+  `~/.claude/sessions`, and if not, Limit Break marking its own headless runs as
+  holders; and a warning if the panel for that session is focused while a
+  headless run owns it.
+- **Ways to get the user's attention.** Ideas, not a design (to be shaped in
+  1.1), checked against `@types/vscode` 1.138. Available: `MessageOptions.modal`
+  (with `detail`, modal only), `ProgressLocation.Notification` (optional cancel,
+  no icons) and `ProgressLocation.Window` (status bar, no cancel),
+  `StatusBarItem.backgroundColor` (limited to the error and warning
+  backgrounds), a `ViewBadge` on our own view (needs the sidebar below), and
+  `createWebviewPanel`. `WindowState.focused` / `.active` with
+  `onDidChangeWindowState` would let Limit Break notice whether the user is
+  there, and hold a notice until they return. Not in the API: a taskbar flash
+  or request-attention call, Do Not Disturb behaviour, OS toasts (per-OS code).
+  Whether a modal blocks the whole window is not stated in the types.
 - **M6: the claims directory in a shared `/tmp` on Linux.** The claims live
   under `os.tmpdir()` (`src/claims.ts`), which on Linux is a `/tmp` every local
   user shares: another user could pre-create `claude-limit-break/claims` and
@@ -200,6 +228,14 @@ Planned for the release after 1.0.
   the resumed terminal closes.
 - **Terminal reuse.** Continue inside our own idle resume terminal rather than
   opening a new one.
+- **Cancel, then a retry, across a reload (wave A review m4).** Cancel followed
+  by a re-detection of the same reset releases this window's own claim so the
+  new plan can fire (wave A, A8), but it recognises "this window" by
+  `vscode.env.sessionId`, which changes on a reload. After Cancel, reload, then
+  a retry that hits the same limit, the fresh plan finds its own pre-reload
+  claim, reads it as another window's, and is dropped until the cancelled job's
+  fire time plus an hour. Rare. Recording the cancelled keys in `globalState`
+  instead of relying on window identity would close it. Parked.
 - **The "Fable limit" message.** "You've reached your Fable 5 limit" carries no
   reset time, so nothing is armed for it today (the same bucket's "You've hit
   your Fable limit · resets ..." form is). Needs a policy for a limit that
