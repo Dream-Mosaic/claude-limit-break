@@ -87,15 +87,16 @@ The first release.
   `Resume Now` / `Cancel Pending Resume` / `Show Log` commands. A single click
   on the status bar opens a menu (Resume Now / Cancel Pending Resume / Show
   Log / Dismiss gave-up notices when something has given up).
-- `CLAUDE_CONFIG_DIR`, when set and non-empty, replaces `~/.claude` for every
-  file the extension reads: the transcripts it watches, the per-process session
-  records it checks before resuming, and Claude Code's own `settings.json` (the
-  auto-continue setting). The trust record is read from
-  `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`: Claude Code
-  itself resolves that file as `path.join(process.env.CLAUDE_CONFIG_DIR ||
-  homedir(), ".claude.json")`, so the variable stands in for the home
-  directory, and the extension follows it. An unset or empty variable falls
-  back to `~/.claude` and `~/.claude.json`. The extension only ever reads these
+- `CLAUDE_CONFIG_DIR`, when set and non-empty in the environment VS Code was
+  started from, replaces `~/.claude` for every file the extension reads: the
+  transcripts it watches, the per-process session records it checks before
+  resuming, and Claude Code's own `settings.json` (the auto-continue setting).
+  The trust record is read from `$CLAUDE_CONFIG_DIR/.claude.json` when the
+  variable is set, where current Claude Code builds keep it (checked against
+  the CLI; Claude Code's documentation does not say). An unset or empty
+  variable falls back to `~/.claude` and `~/.claude.json`. A variable set only
+  in Claude Code's settings `env`, or in a shell profile that VS Code's
+  launcher never loads, is not seen. The extension only ever reads these
   files.
 - Project paths are case-folded only on filesystems that are actually
   case-insensitive.
@@ -213,9 +214,9 @@ The first release.
   holds the session, or a launch failed in a way that keeps it retryable)
   survives a window reload: it persists alongside the scheduler's state and is
   restored at activation, unless another window on the same VS Code profile has
-  overwritten the stored list (see Known limitations). A stored job that fails
-  validation (a session id that is not a UUID, a missing or non-numeric time,
-  an unknown reason) is dropped with a log line rather than restored, and the
+  overwritten the stored list (see Known limitations). A stored pending or
+  ready job that fails validation (a session id that is not a UUID, a missing
+  or non-numeric resume time, an unknown reason) is dropped with a log line rather than restored, and the
   session id is checked once more immediately before `claude --resume` is
   launched.
 - Extension icon, logo and README banner.
@@ -236,5 +237,7 @@ The first release.
   that list. See `docs/NEXT.md` in the repository.
 - The count of consecutive overload resumes, which drives the backoff and the
   give-up after five, lives in memory, per window. A window reload, or a window
-  opened partway through a streak, starts the count again at zero and can skip
-  one backoff step.
+  opened partway through a streak, starts its count again at zero: its next
+  retry gets no backoff, and the streak can run up to five more automatic
+  resumes before that window gives up. An older window may already show the
+  give-up warning while the fresh one is still retrying.

@@ -14,10 +14,14 @@ Detection reads Claude Code's own session transcripts rather than watching a
 terminal, so it works whether Claude is running in the VS Code panel or in a
 terminal, and whether or not the session was started from VS Code at all. It
 reads Claude Code's files (the transcripts, the per-process session records,
-`settings.json`) from `$CLAUDE_CONFIG_DIR` when that is set, and from
-`~/.claude` otherwise. The folder-trust record follows the same variable, as it
-does in Claude Code itself: `$CLAUDE_CONFIG_DIR/.claude.json` when it is set,
-`~/.claude.json` otherwise. It only ever reads these files.
+`settings.json`) from `$CLAUDE_CONFIG_DIR` when that is set in the environment
+VS Code was started from, and from `~/.claude` otherwise. A variable set only
+in Claude Code's settings `env`, or in a shell profile VS Code's launcher never
+loads, is not seen. The folder-trust record is read from
+`$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set, where current
+Claude Code builds keep it (checked against the CLI; Claude Code's
+documentation does not say), and from `~/.claude.json` otherwise. It only ever
+reads these files.
 
 A usage limit or a server error is acted on only when Claude Code itself
 flagged the transcript entry as an API error. Text the model wrote, a tool

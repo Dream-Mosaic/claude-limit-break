@@ -180,6 +180,18 @@ synchronous `claude agents` call has moved to 1.1 below.
 
 Planned for the release after 1.0.
 
+- **Read `CLAUDE_CONFIG_DIR` from Claude Code's settings too.** The extension
+  sees the variable only in the environment VS Code was started from. Claude
+  Code also honours one set in its user and managed settings `env`; reading
+  those as well would close the gap.
+- **A huge text-only last prompt reads as "not continued".** When the last
+  prompt is longer than the read window and only attachment entries follow it,
+  the window holds no verdict and the session reads as still stopped. Step the
+  read window back until a verdict is found.
+- **Purge dropped restored jobs.** A restored job that fails validation is
+  dropped from memory but never removed from the stored pending list, so it is
+  logged again at every activation until the list is next rewritten.
+
 - **Headless option C.** Today `resumeMode: headless` does not inherit the
   session's permission mode, so unattended tool work is denied unless
   `headlessPermissionMode` is set. Option C resumes headless with the mode the
