@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { createLogger } from './log';
 import { readSettings, type Settings } from './config';
 import { TranscriptWatcher, isSubagentFile } from './transcriptWatcher';
-import { ResumeScheduler, type PendingJob } from './scheduler';
+import { ResumeScheduler, restoreJobs, type PendingJob } from './scheduler';
 import { CountdownStatusBar } from './statusBar';
 import { planResume } from './policy';
 import { randomJitterMs } from './randomDelay';
@@ -33,7 +33,7 @@ import {
   RELEASE_TAG_URL,
   type FirstRunPromptChoice,
 } from './updateCheck';
-import { resolveSession } from './sessionResolver';
+import { isSessionId, resolveSession } from './sessionResolver';
 import {
   livePanelDetector,
   agentRowsDetector,
@@ -221,7 +221,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // Restored before anything can add to the list. A job read back here is one
   // the previous window offered and nobody answered; it stays claimable from
   // "Resume Now", which is what the setting's description promises.
-  const restoredReady = context.globalState.get<PendingJob[]>(READY_KEY) ?? [];
+  // Validated like the scheduler's own list (final fix wave B, B2): this
+  // is globalState too, and a job that fails is dropped with a log line.
+  const restoredReady = restoreJobs(context.globalState.get<unknown>(READY_KEY), log, 'ready');
   if (restoredReady.length > 0) {
     readyJobs.push(...restoredReady);
     log.info(`Restored ${restoredReady.length} resume(s) still waiting to be started by hand.`);
@@ -667,6 +669,15 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!cwdExists(job.cwd, cwdIsDirectory)) {
       log.error(`Cannot resume ${job.sessionId}: cwd "${job.cwd}" no longer exists (recorded in ${job.transcript}).`);
       giveUp(job, 'cwd', (m) => vscode.window.showErrorMessage(m), manual);
+      return false;
+    }
+    // Constraint 4, asserted where it matters: `claude --resume` only ever
+    // receives a UUID. Every job is validated when it is restored or resolved,
+    // so this should never fire; it is here because the argv is the one place a
+    // bad id could do harm, and a job that reached it by some path nobody
+    // thought of must stop here, not launch (final review M2).
+    if (!isSessionId(job.sessionId)) {
+      log.error(`Refusing to resume: "${String(job.sessionId)}" is not a session id.`);
       return false;
     }
     // Headless is opt-in and machine-scoped, and does NOT inherit the

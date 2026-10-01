@@ -4963,3 +4963,81 @@ test('the A8 race across two windows ends with exactly one resume (C1, review co
     fs.rmSync(claims, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Final fix wave B, B2 (final review M2): jobs restored from globalState are
+// validated, and resume() asserts the session id once more before it builds
+// the argv (constraint 4: `claude --resume` only ever receives a UUID).
+// ---------------------------------------------------------------------------
+
+test('restored ready jobs that fail validation are dropped, one log line each, and only the valid one is resumable (B2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const store = new Map<string, unknown>([
+    [
+      READY_KEY,
+      [
+        { ...pastJob(), sessionId: '--dangerously-skip-permissions', transcript: '/h/p/x.jsonl' },
+        pastJob(),
+        { ...pastJob(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl`, resumeAtMs: 'tomorrow' },
+        { ...pastJob(), sessionId: '11111111-2222-4333-8444-555555555555', reason: 'sunspots' },
+        null,
+      ],
+    ],
+  ]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    const dropped = vscodeFake.outputLines.filter((l) => l.includes('Dropped a stored ready resume'));
+    assert.equal(dropped.length, 4, `one line per dropped job; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('Restored 1 resume(s) still waiting')),
+      'only the valid job is restored',
+    );
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.deepEqual(argsOf(0), ['--resume', SESSION, PROMPT]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a restored pending job that fails validation never fires, and is logged as dropped (B2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const store = new Map<string, unknown>([
+    ['claudeLimitBreak.pending', [{ ...pastJob(), sessionId: '../../evil' }]],
+  ]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a job with a non-UUID id must never launch');
+    assert.equal(vscodeFake.outputLines.filter((l) => l.includes('Dropped a stored pending resume')).length, 1);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resume() re-checks the session id before building the argv: a non-UUID launches nothing (B2, defence in depth)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ready = pastJob();
+  const store = new Map<string, unknown>([[READY_KEY, [ready]]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    // The job passed validation at restore. The stored object is changed
+    // after that - globalState edited under a running window - to stand in for
+    // any path that could hand resume() a bad id.
+    ready.sessionId = '--dangerously-skip-permissions';
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 0, 'no terminal, so no argv, for a non-UUID id');
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('not a session id') && l.includes('--dangerously-skip-permissions')),
+      `the refusal must be logged; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
