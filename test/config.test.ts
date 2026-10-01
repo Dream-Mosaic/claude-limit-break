@@ -52,7 +52,7 @@ test('a non-string resumePrompt falls back to the default prompt', () => {
   const fallback = readSettings(source({ resumePrompt: 42 })).resumePrompt;
   assert.equal(
     fallback,
-    '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+    '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.',
   );
 });
 

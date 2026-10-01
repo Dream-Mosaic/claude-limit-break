@@ -1,5 +1,6 @@
-import * as os from 'node:os';
 import * as path from 'node:path';
+
+import { claudeHome } from './claudeHome';
 
 /**
  * One field lookup in `~/.claude/sessions/<pid>.json`, the file Claude Code
@@ -33,7 +34,7 @@ export interface SessionRecord {
 }
 
 export function sessionRegistryDir(): string {
-  return path.join(os.homedir(), '.claude', 'sessions');
+  return path.join(claudeHome(), 'sessions');
 }
 
 export function readSessionRecord(

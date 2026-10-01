@@ -1,8 +1,8 @@
 # Next steps
 
-State as of 2026-09-25, after the Limit Break 1.0 plan (both lanes) and its
-final review fix wave landed on
-`claude/limit-break-1.0-cloud`. Read
+State as of 2026-10-01, after the Limit Break 1.0 plan (both lanes), its
+final review fix wave, and the two field-report fix waves (A and B) landed on
+`fix/1.0-field-reports`. Read
 [design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
 
 ## Settled (unlikely to need revisiting)
@@ -29,8 +29,8 @@ filesystem claim (`src/claims.ts`, `fs.openSync(path, 'wx')`, first one wins)
 runs before every automatic fire and every manual bypass path (Resume Now in
 both `autoResume` states, "Resume Anyway", "Resume in Terminal Anyway") —
 Task 10, 3 review rounds, all four manual paths verified symmetric
-(`.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`, Task 10
-re-review 3). The slower case Task 2's holder check already covered
+(git history: `d90f032:.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`,
+Task 10 re-review 3). The slower case Task 2's holder check already covered
 (one window sees the other's resume alive in `claude agents`, minutes later)
 is unaffected by any of this and still works as before.
 
@@ -45,11 +45,15 @@ What is not covered:
   fix it.
 - A claim is kept whenever the holder decision stands down or offers
   "Resume in Terminal Anyway" (final review, Important 2), and Cancel holds
-  one until each cancelled job's own fire time (Important 7). The ruled cost:
-  the same reset re-detected in the same window within that time is dropped
-  as "already claimed by this window", and a failed launch from the "Resume
-  in Terminal Anyway" button leaves the fire's own claim in place (it only
-  releases a claim it took itself). Manual resumes bypass claims either way.
+  one for each cancelled job's whole random-delay window (Important 7; the
+  deadline is `claimHoldDeadline` in `src/claims.ts`). The ruled cost: a
+  failed launch from the "Resume in Terminal Anyway" button leaves the fire's
+  own claim in place (it only releases a claim it took itself). Manual
+  resumes bypass claims either way. The same reset re-detected in the window
+  that cancelled it is planned afresh and releases that window's own claim
+  (wave A, A8); a copy of the job in another window can still fire first, in
+  which case the other window resumes it and this one drops on its claim, so
+  there is still one resume per reset.
 - The claim's atomicity guarantee is `O_EXCL`, which is real, but Task 10's
   own two-claimer test only exercises it sequentially in one process, not
   with two real concurrent processes racing the syscall (Task 10 review 1
@@ -64,8 +68,11 @@ What is not covered:
 ## Deferred review findings
 
 Grouped by area; each was accepted as a deferred Minor rather than a required
-fix, with the reviewer's stated cost of being wrong. Checked against current
-`HEAD` on 2026-09-25 — none of these has since been fixed by a later task.
+fix, with the reviewer's stated cost of being wrong. Checked against `HEAD` on
+2026-09-25. The two the field-report waves have since fixed (the default
+`resumePrompt` naming a usage limit for an overload retry, and the native
+auto-continue check reading any growth as "it continued") are removed, and the
+synchronous `claude agents` call has moved to 1.1 below.
 
 **Detection / parsing** (Task 1 and 4a reviews)
 - A flagged rate-limit entry whose `quotaLimits.resetsAt` fails the
@@ -83,10 +90,6 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
 - The in-flight-retry regex's narrowness is unpinned — no test asserts a
   terminal case containing the literal word "attempt" that should NOT match
   (`src/parsers/overloadParser.ts`).
-- The default `resumePrompt` says "I hit my usage limit" even when the job
-  is an overload retry (`src/config.ts`, `src/policy.ts` - the job carries
-  `reason`, the prompt ignores it). A reason-specific default would read
-  better; harmless as it stands, since the resumed model just continues.
 
 **Trust hotlink** (Task 5a review)
 - `claudeLimitBreak.openClaudeToTrust` opens a terminal with no `cwdExists`
@@ -139,9 +142,6 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
   coordination sentence shown on a manual retry.
 
 **Final review minors** (ruled OK to ship)
-- `claude agents --json` runs through `execFileSync` with a 10s timeout, on
-  the extension host thread (`src/extension.ts` `runAgentsListing`): a hung
-  CLI blocks the host for up to 10s per fire or manual resume.
 - `which`/`readShim` are defined twice in `src/extension.ts` (once at
   activation for `findLauncher`, again inside `resume()`).
 - The unit suite's extension tests run on real timers (the scheduler's 1s
@@ -153,11 +153,6 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
   exercise the resolver a little more generously than reality.
 - `test/readmeSettings.test.ts` rejects column-padded table rows with a
   misleading "missing" message (Task 9b review).
-- The native auto-continue check's baseline is the transcript size at
-  detection. Anything written between detection and the check - including
-  you typing into the terminal during the wait - reads as "it continued",
-  and the check stays silent. That is the safe direction (the old,
-  pre-check behaviour), not a false alarm.
 
 ## Open questions
 
@@ -181,21 +176,100 @@ fix, with the reviewer's stated cost of being wrong. Checked against current
   concurrency**, not just the sequential two-claimer test Task 10 shipped
   with? See "Known limitations" above.
 
-## v1.1 ideas
+## 1.1
 
+Planned for the release after 1.0.
+
+- **Read `CLAUDE_CONFIG_DIR` from Claude Code's settings too.** The extension
+  sees the variable only in the environment VS Code was started from. Claude
+  Code also honours one set in its user and managed settings `env`; reading
+  those as well would close the gap.
+- **A huge text-only last prompt reads as "not continued".** When the last
+  prompt is longer than the read window and only attachment entries follow it,
+  the window holds no verdict and the session reads as still stopped. Step the
+  read window back until a verdict is found.
+- **Purge dropped restored jobs.** A restored job that fails validation is
+  dropped from memory but never removed from the stored pending list, so it is
+  logged again at every activation until the list is next rewritten.
+
+- **Headless option C.** Today `resumeMode: headless` does not inherit the
+  session's permission mode, so unattended tool work is denied unless
+  `headlessPermissionMode` is set. Option C resumes headless with the mode the
+  session itself recorded, never a bypass mode, plus `--permission-prompts
+  none`, so anything that would prompt is denied instead of hanging. It also
+  surfaces `permission_denials` from the JSON output, so silent partial work is
+  reported, and it is version-gated at Claude Code 2.1.259, which introduced
+  `--permission-prompts`. Four design calls are still open with the user: an
+  empty `headlessPermissionMode` means "mirror the session"; a recorded
+  `bypassPermissions` falls back to `default` rather than being mirrored; the
+  `--permission-prompts none` gate at 2.1.259; and a warning on
+  `permission_denials` with a button to continue in a terminal. The options
+  table is section 7 of `research-headless-permissions.md` in the maintainer's
+  local, untracked SDD workspace, not in this repository.
+- **Following a headless run.** Today a headless resume runs in a shown VS Code
+  terminal with `--output-format json`: silent until it finishes, no input, no
+  done notice, and the panel tab for that session is stale meanwhile (typing
+  into it forks the conversation). Wanted with headless C: `stream-json`
+  progress plus a "running headless" status-bar item; a done notice with the
+  denial count and "Open session" / "Resume in terminal" buttons; a check
+  whether `-p` processes show up in `claude agents --json` and
+  `~/.claude/sessions`, and if not, Limit Break marking its own headless runs as
+  holders; and a warning if the panel for that session is focused while a
+  headless run owns it.
+- **Ways to get the user's attention.** Ideas, not a design (to be shaped in
+  1.1), checked against `@types/vscode` 1.138. Available: `MessageOptions.modal`
+  (with `detail`, modal only), `ProgressLocation.Notification` (optional cancel,
+  no icons) and `ProgressLocation.Window` (status bar, no cancel),
+  `StatusBarItem.backgroundColor` (limited to the error and warning
+  backgrounds), a `ViewBadge` on our own view (needs the sidebar below), and
+  `createWebviewPanel`. `WindowState.focused` / `.active` with
+  `onDidChangeWindowState` would let Limit Break notice whether the user is
+  there, and hold a notice until they return. Not in the API: a taskbar flash
+  or request-attention call, Do Not Disturb behaviour, OS toasts (per-OS code).
+  Whether a modal blocks the whole window is not stated in the types.
+- **M6: the claims directory in a shared `/tmp` on Linux.** The claims live
+  under `os.tmpdir()` (`src/claims.ts`), which on Linux is a `/tmp` every local
+  user shares: another user could pre-create `claude-limit-break/claims` and
+  plant fresh claim files to suppress resumes. A denial of service only. A
+  per-user location (`$XDG_RUNTIME_DIR`, say) would close it.
+- **M10: synchronous `claude agents` and `where` calls on the extension host.**
+  `claude agents --json` runs through `execFileSync` with a timeout of up to
+  10s, and `where` has none, on the extension host thread: once per fire, once
+  per manual resume and on each turn end of a session resumed in this window.
+  `execFile` (async) would fix it, and `resumedSessions` should be pruned when
+  the resumed terminal closes.
+- **Terminal reuse.** Continue inside our own idle resume terminal rather than
+  opening a new one.
+- **Cancel, then a retry, across a reload (wave A review m4).** Cancel followed
+  by a re-detection of the same reset releases this window's own claim so the
+  new plan can fire (wave A, A8), but it recognises "this window" by
+  `vscode.env.sessionId`, which changes on a reload. After Cancel, reload, then
+  a retry that hits the same limit, the fresh plan finds its own pre-reload
+  claim, reads it as another window's, and is dropped until the cancelled job's
+  fire time plus an hour. Rare. Recording the cancelled keys in `globalState`
+  instead of relying on window identity would close it. Parked.
+- **The "Fable limit" message.** "You've reached your Fable 5 limit" carries no
+  reset time, so nothing is armed for it today (the same bucket's "You've hit
+  your Fable limit · resets ..." form is). Needs a policy for a limit that
+  gives no time to wait for.
+- **A folder picker for "Open Claude to Trust".** The command is hidden from
+  the palette because it needs a folder argument (it logs and ignores a call
+  without one); a picker would let it run from there.
 - **A Limit Break sidebar.** An activity-bar view container with a view
   listing pending, ready and gave-up sessions — the tooltip's
   `buildSessionLines` model already has the data shape for this
   (`src/statusBar.ts`). Icon: `media/logo-mono.svg` (the user's "no square"
   redraw — frame, "Limit", gauge in `currentColor` on transparent, without
   the solid tile the square variant read as at 24px next to the codicons;
-  ruling and Chromium-mock validation in
-  `.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`, Task 7
-  section). The activity bar takes an SVG directly as a CSS mask
+  ruling and Chromium-mock validation in git history at
+  `d90f032:.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`,
+  Task 7 section). The activity bar takes an SVG directly as a CSS mask
   (`paneCompositeBar.ts`), no icon font needed. Open question carried from
   that ruling: legibility at 24px with ~2px margin — consider a gauge-only
   crop if the full mark reads too busy that small; a redraw is a one-file
   cost either way.
+
+## Further ideas
 
 From the 2026-09-23 prior-art synthesis
 (`docs/research/2026-09-23-prior-art-auto-retry-preheat.md`), "Consider" list

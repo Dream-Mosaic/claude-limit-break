@@ -16,7 +16,17 @@ const reader = (contents: Record<string, string>) => (p: string) => {
 };
 
 test('sessionRegistryDir points at .claude/sessions under the home directory', () => {
-  assert.equal(sessionRegistryDir(), path.join(os.homedir(), '.claude', 'sessions'));
+  // claudeHome.test.ts covers the CLAUDE_CONFIG_DIR case; this is the default,
+  // so a developer's own exported variable must not leak into it.
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    assert.equal(sessionRegistryDir(), path.join(os.homedir(), '.claude', 'sessions'));
+  } finally {
+    if (saved !== undefined) {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+    }
+  }
 });
 
 test('readSessionRecord returns the session and entrypoint for a pid', () => {

@@ -316,7 +316,7 @@ const WORKSPACE = path.join(os.tmpdir(), 'clb-workspace');
 /** The pid the fake terminal reports, i.e. the resume this extension launched. */
 const TERMINAL_PID = 4242;
 const PROMPT =
-  '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.';
+  '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.';
 
 // resume() now checks the cwd on the real filesystem before launching, so
 // fixtures that expect a launch need a directory that is actually there.
@@ -2548,7 +2548,7 @@ test('a turn since detection - native auto-continue already ran before this wind
     assert.equal(nativeNotice(), undefined, 'it continued: native auto-continue did its job');
     assert.equal(store.get(READY_KEY), undefined, 'and nothing is remembered');
     assert.ok(
-      vscodeFake.outputLines.some((l) => l.includes('has continued since the limit was detected; not resuming.')),
+      vscodeFake.outputLines.some((l) => l.includes('has continued since it stopped; not resuming.')),
       'but the log says so',
     );
   } finally {
@@ -2697,9 +2697,9 @@ test('only a synthetic error entry appended during the grace is not native auto-
 // silently (keeping its claim); every manual path asks first.
 // ---------------------------------------------------------------------------
 
-const CONTINUED_LOG = `Session ${SESSION.slice(0, 8)} has continued since the limit was detected; not resuming.`;
+const CONTINUED_LOG = `Session ${SESSION.slice(0, 8)} has continued since it stopped; not resuming.`;
 const CONTINUED_MODAL =
-  `Limit Break: session ${SESSION.slice(0, 8)} has continued since the limit was detected. ` +
+  `Limit Break: session ${SESSION.slice(0, 8)} has continued since it stopped. ` +
   'Resuming now will fork the conversation.';
 
 test('an automatic fire on a session continued since detection resumes nothing, remembers nothing, notifies nothing and keeps its claim (A3, I1)', async () => {
@@ -4961,5 +4961,155 @@ test('the A8 race across two windows ends with exactly one resume (C1, review co
     }
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(claims, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave B, B2 (final review M2): jobs restored from globalState are
+// validated, and resume() asserts the session id once more before it builds
+// the argv (constraint 4: `claude --resume` only ever receives a UUID).
+// ---------------------------------------------------------------------------
+
+test('restored ready jobs that fail validation are dropped, one log line each, and only the valid one is resumable (B2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const store = new Map<string, unknown>([
+    [
+      READY_KEY,
+      [
+        { ...pastJob(), sessionId: '--dangerously-skip-permissions', transcript: '/h/p/x.jsonl' },
+        pastJob(),
+        { ...pastJob(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl`, resumeAtMs: 'tomorrow' },
+        { ...pastJob(), sessionId: '11111111-2222-4333-8444-555555555555', reason: 'sunspots' },
+        null,
+      ],
+    ],
+  ]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    const dropped = vscodeFake.outputLines.filter((l) => l.includes('Dropped a stored ready resume'));
+    assert.equal(dropped.length, 4, `one line per dropped job; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('Restored 1 resume(s) still waiting')),
+      'only the valid job is restored',
+    );
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.deepEqual(argsOf(0), ['--resume', SESSION, PROMPT]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('a restored pending job that fails validation never fires, and is logged as dropped (B2)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const store = new Map<string, unknown>([
+    ['claudeLimitBreak.pending', [{ ...pastJob(), sessionId: '../../evil' }]],
+  ]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a job with a non-UUID id must never launch');
+    assert.equal(vscodeFake.outputLines.filter((l) => l.includes('Dropped a stored pending resume')).length, 1);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('resume() re-checks the session id before building the argv: a non-UUID launches nothing (B2, defence in depth)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ready = pastJob();
+  const store = new Map<string, unknown>([[READY_KEY, [ready]]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    // The job passed validation at restore. The stored object is changed
+    // after that - globalState edited under a running window - to stand in for
+    // any path that could hand resume() a bad id.
+    ready.sessionId = '--dangerously-skip-permissions';
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(vscodeFake.terminals.length, 0, 'no terminal, so no argv, for a non-UUID id');
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes('not a session id') && l.includes('--dangerously-skip-permissions')),
+      `the refusal must be logged; saw ${JSON.stringify(vscodeFake.outputLines)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('an unusable claims directory does not stop a resume: the fire still launches (B3, final review M3)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  // A "directory" under a regular file: mkdirSync throws, whatever the OS.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-m3-'));
+  const blocker = path.join(base, 'file');
+  fs.writeFileSync(blocker, 'x');
+  fakeClaimResult = 'real';
+  realClaimsDir = path.join(blocker, 'claims');
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1, `the resume must go ahead; saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.ok(vscodeFake.outputLines.some((l) => /claims directory/i.test(l)), 'and the failure is logged');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('an overload job gets the same neutral wording, in the log and in the modal (B5)', async () => {
+  // The A3 strings used to say "since the limit was detected", which is wrong
+  // for a server-error job. They are shared, so they say "since it stopped".
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const { dir, file } = transcriptOf(500);
+  const overload = { ...nativeContinueJob(file, 500), reason: 'overload' as const };
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', overload]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(offers()[0], 'setup: the overload job is remembered and offered');
+    fs.appendFileSync(file, USER_TURN);
+    const pending = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    const modal = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(modal, 'a modal warning must be shown');
+    assert.equal(modal.message, CONTINUED_MODAL);
+    assert.doesNotMatch(modal.message, /the limit|usage limit/i, 'nothing in it names a limit');
+    modal.answer(undefined);
+    await pending;
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an automatic fire on a continued overload job logs the neutral line (B5)', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  holderRow('claude-vscode', 'idle');
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
+  const overload = { ...nativeContinueJob(file, 500), reason: 'overload' as const };
+  const ctx = contextOver(new Map([['claudeLimitBreak.pending', overload]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+    const line = vscodeFake.outputLines.find((l) => l.endsWith(CONTINUED_LOG));
+    assert.ok(line, `saw ${JSON.stringify(vscodeFake.outputLines)}`);
+    assert.doesNotMatch(line, /the limit|usage limit/i);
+  } finally {
+    clearHolders();
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -69,7 +69,7 @@ suite('claude-limit-break activation', () => {
     assert.equal(config.get('claudeCommand'), '');
     assert.equal(
       config.get('resumePrompt'),
-      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+      '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.',
     );
     assert.equal(config.get('maxResumeTokens'), 500000);
     assert.equal(config.get('maxWaitHours'), 24);

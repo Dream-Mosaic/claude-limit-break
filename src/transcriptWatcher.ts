@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
-import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { claudeHome } from './claudeHome';
 import { isTurnEndEntry, InputDetection } from './parsers/inputParser';
 import { detectLimit, resolveStructuredReset, MAX_NOTICE_LENGTH, LimitDetection, normalize, rateLimitTypeFromText } from './parsers/limitParser';
 import type { Logger } from './log';
@@ -13,7 +13,7 @@ import { detectOverload, OverloadDetection } from './parsers/overloadParser';
 const MAX_READ_BYTES = 2_000_000;
 
 export function transcriptRoot(): string {
-    return path.join(os.homedir(), '.claude', 'projects');
+    return path.join(claudeHome(), 'projects');
 }
 
 export interface LimitHit { detection: LimitDetection; cwd?: string; file: string }

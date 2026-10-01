@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { Logger } from './log';
+import { isSessionId } from './sessionResolver';
 
 const STATE_KEY = 'claudeLimitBreak.pending';
 const TICK_MS = 1000;
@@ -67,22 +68,96 @@ export interface MementoLike {
   update(key: string, value: unknown): Thenable<void>;
 }
 
-/**
- * The shape a job may have as read back from the memento. A job saved by a
- * version that predates the random delay has neither `baseResumeAtMs` nor
- * `jitterMs`; the constructor migrates it into a full `PendingJob`.
- */
-type StoredJob = Omit<PendingJob, 'baseResumeAtMs' | 'jitterMs'> &
-  Partial<Pick<PendingJob, 'baseResumeAtMs' | 'jitterMs'>>;
+/** What `restoreJob` makes of one stored entry: the job to keep, or why it was dropped. */
+export type RestoreResult = { job: PendingJob } | { dropped: string };
 
-/** Fill in the fields a job saved before the random delay existed does not have. */
-function migrate(stored: StoredJob): PendingJob {
-  // Treating its deadline as the unpadded one keeps dedupe working.
-  return {
-    ...stored,
-    baseResumeAtMs: stored.baseResumeAtMs ?? stored.resumeAtMs,
-    jitterMs: stored.jitterMs ?? 0,
-  };
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Validate one entry read back from globalState (final review M2, wave B).
+ *
+ * The pending and ready lists are the one place a job reaches `claude
+ * --resume` without having been parsed from a transcript this run, and
+ * globalState is a JSON file anyone can edit, or an older build can have
+ * written badly. So nothing is trusted: the session id must pass
+ * `isSessionId` (constraint 4: `--resume` only ever receives a UUID), the
+ * strings must be strings, the times finite, and `reason` one of the two
+ * values the code branches on. A job that fails any of that is dropped, and
+ * the caller logs one line for it.
+ *
+ * Two things are tolerated rather than dropped. A job saved before the random
+ * delay existed has neither `baseResumeAtMs` nor `jitterMs`; they are filled
+ * in (treating its deadline as the unpadded one keeps the dedupe working). A
+ * `rateLimitType` that is not a non-empty string is only a hint to
+ * decideOnFire, so the field is deleted and the job kept: dropping a live
+ * resume over a label would cost the user more than the label is worth.
+ *
+ * Returns the very same object when nothing needed changing, so a caller
+ * holding the stored array keeps its references.
+ */
+export function restoreJob(raw: unknown): RestoreResult {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { dropped: 'it is not an object' };
+  }
+  const j = raw as Record<string, unknown>;
+  if (typeof j.sessionId !== 'string' || !isSessionId(j.sessionId)) {
+    return { dropped: 'its session id is not a UUID' };
+  }
+  if (typeof j.transcript !== 'string') {
+    return { dropped: 'its transcript is not a string' };
+  }
+  if (typeof j.prompt !== 'string') {
+    return { dropped: 'its prompt is not a string' };
+  }
+  // Required, unlike baseResumeAtMs: the tick compares against it, and a job
+  // with no usable deadline would sit in the list forever without firing.
+  if (!isFiniteNumber(j.resumeAtMs)) {
+    return { dropped: 'its resume time is not a finite number' };
+  }
+  if (j.reason !== 'limit' && j.reason !== 'overload') {
+    return { dropped: 'its reason is neither "limit" nor "overload"' };
+  }
+  for (const key of ['baseResumeAtMs', 'jitterMs', 'entryTimestampMs', 'transcriptBytesAtDetection', 'backoffMs']) {
+    if (j[key] !== undefined && !isFiniteNumber(j[key])) {
+      return { dropped: `its ${key} is not a finite number` };
+    }
+  }
+  if (j.cwd !== undefined && typeof j.cwd !== 'string') {
+    return { dropped: 'its cwd is not a string' };
+  }
+  if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
+    return { dropped: 'its folderTrusted is not a boolean' };
+  }
+  const badType = j.rateLimitType !== undefined && (typeof j.rateLimitType !== 'string' || j.rateLimitType === '');
+  if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType) {
+    return { job: j as unknown as PendingJob };
+  }
+  const job = {
+    ...j,
+    baseResumeAtMs: j.baseResumeAtMs ?? j.resumeAtMs,
+    jitterMs: j.jitterMs ?? 0,
+  } as unknown as PendingJob;
+  if (badType) {
+    delete job.rateLimitType;
+  }
+  return { job };
+}
+
+/** Restore a stored job list or bare single-slot job into the jobs worth keeping, logging each one dropped. */
+export function restoreJobs(stored: unknown, log: Logger, what: string): PendingJob[] {
+  // A list since jobs became per-session; a bare object from a version that
+  // kept a single slot, which is carried over rather than lost on upgrade.
+  const list: unknown[] = Array.isArray(stored) ? stored : stored === undefined || stored === null ? [] : [stored];
+  const kept: PendingJob[] = [];
+  for (const entry of list) {
+    const result = restoreJob(entry);
+    if ('job' in result) {
+      kept.push(result.job);
+    } else {
+      log.warn(`Dropped a stored ${what} resume: ${result.dropped}.`);
+    }
+  }
+  return kept;
 }
 
 /**
@@ -116,12 +191,8 @@ export class ResumeScheduler {
     private readonly memento: MementoLike,
     private readonly log: Logger,
   ) {
-    // A list since jobs became per-session; a bare object from a version that
-    // kept a single slot, which is carried over rather than lost on upgrade.
-    const stored = memento.get<StoredJob | StoredJob[]>(STATE_KEY);
-    const list = Array.isArray(stored) ? stored : stored ? [stored] : [];
-    for (const job of list) {
-      this.pending.set(job.sessionId, migrate(job));
+    for (const job of restoreJobs(memento.get<unknown>(STATE_KEY), log, 'pending')) {
+      this.pending.set(job.sessionId, job);
     }
   }
 
@@ -181,8 +252,15 @@ export class ResumeScheduler {
           job.transcriptBytesAtDetection !== undefined &&
           job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
         ) {
+          const before = existing.transcriptBytesAtDetection;
           existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
           this.persist();
+          // Logged like A9's adoption above (wave B, B8, re-review m-new-2): a
+          // later "has continued since it stopped" skip is measured from here.
+          this.log.info(
+            `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
+              `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
+          );
         }
         this.log.info(
           sameReset

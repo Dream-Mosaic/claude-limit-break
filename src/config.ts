@@ -46,8 +46,8 @@ export function readSettings(c: ConfigSource): Settings {
     headlessPermissionMode: oneOf(PERMISSION_MODES, c.get('headlessPermissionMode', ''), ''),
     claudeCommand: str(c.get('claudeCommand', ''), ''),
     resumePrompt: str(
-      c.get('resumePrompt', '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.'),
-      '[Limit Break] I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.',
+      c.get('resumePrompt', '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.'),
+      '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.',
     ),
     maxResumeTokens: atLeast(c.get('maxResumeTokens', 500_000), 0, 500_000),
     maxWaitHours: atLeast(c.get('maxWaitHours', 24), 1, 24),

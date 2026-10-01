@@ -33,14 +33,12 @@ The first release.
 - A reset time given with no explicit time zone is resolved to the later side
   of a daylight-saving change, never an hour early. East of UTC, a
   spring-forward reset can resume up to an hour late.
-- Untrusted transcript text (a `grep` quoting a banner, a subagent checkpoint
-  note, a percentage-usage warning) does not arm a timer by accident. Text
-  in a subagent's transcript, quoted text and tool output are ignored unless
-  Claude Code itself flagged the entry as an API error; a flagged entry is
-  still believed wherever its text appears.
-- An overload retry is armed only by an entry Claude Code marked as an API
-  error. Text the model writes or a tool returns, and errors the user pastes,
-  never arm one, even when they quote an error render word for word.
+- A usage limit or an overload is armed only by a transcript entry that Claude
+  Code itself flagged as an API error (`isApiErrorMessage`). Text the model
+  writes, a tool returns, a subagent quotes or you paste never arms a timer: a
+  `grep` quoting a banner, a checkpoint note, a percentage-usage warning, even a
+  limit notice or an error render quoted word for word. A flagged entry is
+  believed wherever its text appears.
 - Claude Code's own auto-continue covers the five-hour usage limit only, so
   Limit Break stands down for it only there. A weekly, Opus, Sonnet, Fable or
   usage-credit limit in an idle terminal is offered as "Resume in Terminal
@@ -89,8 +87,17 @@ The first release.
   `Resume Now` / `Cancel Pending Resume` / `Show Log` commands. A single click
   on the status bar opens a menu (Resume Now / Cancel Pending Resume / Show
   Log / Dismiss gave-up notices when something has given up).
-- `CLAUDE_CONFIG_DIR` is honoured everywhere `~/.claude` would otherwise be
-  read (trust status and Claude Code's own auto-continue setting).
+- `CLAUDE_CONFIG_DIR`, when set and non-empty in the environment VS Code was
+  started from, replaces `~/.claude` for every file the extension reads: the
+  transcripts it watches, the per-process session records it checks before
+  resuming, and Claude Code's own `settings.json` (the auto-continue setting).
+  The trust record is read from `$CLAUDE_CONFIG_DIR/.claude.json` when the
+  variable is set, where current Claude Code builds keep it (checked against
+  the CLI; Claude Code's documentation does not say). An unset or empty
+  variable falls back to `~/.claude` and `~/.claude.json`. A variable set only
+  in Claude Code's settings `env`, or in a shell profile that VS Code's
+  launcher never loads, is not seen. The extension only ever reads these
+  files.
 - Project paths are case-folded only on filesystems that are actually
   case-insensitive.
 - Checks Claude Code's own session state, and other Claude sessions, before
@@ -101,7 +108,10 @@ The first release.
   idle terminal at a usage limit defers to Claude Code's own "Continue
   automatically at usage limit" setting when it is on, and offers "Resume in
   Terminal Anyway" when it is off. An idle terminal after an overload always
-  gets that offer: Claude Code's setting covers usage limits only. A different
+  gets that offer: Claude Code's setting covers usage limits only. The offer
+  ends "Resuming here opens a second terminal on the same conversation.", and
+  the button looks at the session again when you click it: if it has become
+  busy or waiting, you are told so and no second writer is started. A different
   session busy or waiting in the *same folder* is resumed anyway, with a
   sentence added to its opening prompt asking it to message the busy session
   via SendMessage before editing anything, rather than being blocked. The busy
@@ -109,9 +119,35 @@ The first release.
   that sentence, since it is text Limit Break does not control.
 - Checks that Claude Code's own auto-continue really did continue a session
   it stood down for. The setting reads as on when it is absent, but it is not
-  offered to every account; if the transcript has not grown a minute after
-  the resume time, Limit Break says "Claude Code did not continue ... on its
-  own" and offers Resume Now instead of dropping the session silently.
+  offered to every account. The check runs a minute after this window's own
+  resume time, which is the reset plus this window's random delay (not a minute
+  after the reset), and looks for a new message in the transcript since the
+  stop was detected. If there is none, Limit Break says "Claude Code did not continue ... on its own" and
+  offers Resume Now instead of dropping the session silently.
+- Never resumes a session that has moved on since its stop was detected. If a
+  turn (yours, Claude Code's own auto-continue, another window's resume) has
+  been written since, a resume that fires on its own is dropped with a log line
+  rather than forking the conversation. The manual paths (the Resume Now
+  command and notification, the "Claude Code did not continue" offer, and
+  "Resume in Terminal Anyway") ask first, in a modal: "Limit Break: session
+  <id8> has continued since it stopped. Resuming now will fork the
+  conversation." with a "Resume Anyway" button (`<id8>` is the first eight
+  characters of the session id). The check judges the session's final state: a
+  retry that ran into the same limit again leaves it stopped, so it is still
+  resumed. Local slash commands (`/usage`, `/status`) do not count as
+  continuing. A successful `/compact` writes a summary entry and does count; a
+  failed one writes none. When the transcript cannot be read, or its size at
+  detection was not recorded, the check cannot tell and the resume goes ahead.
+  The exception is a transcript that has grown by more than 2 MB since the stop
+  and ends in a line too big to read: that is a real prompt (pasted images,
+  say), so the session counts as continued.
+- Bounds server-error retries: a session's consecutive overload resumes are
+  backed off and then given up. The first retry uses the usual random delay; the
+  second to fifth add 15, 30, 60 and 120 minutes; the sixth is not retried,
+  with the warning "Limit Break: session <id8> kept stopping on server errors
+  (5 resumes in a row); giving up until it finishes a turn." and a gave-up entry
+  in the status bar. A finished turn starts the count over; a usage limit
+  neither counts nor resets it.
 - A machine-wide, filesystem-based claim so that two VS Code windows watching
   the same account do not both launch a resume for the same reset. Without it,
   two windows can detect an identical limit within milliseconds of each other
@@ -120,9 +156,15 @@ The first release.
   offers "Resume in Terminal Anyway", so other windows do not each repeat the
   offer. An overload is claimed per failure (the transcript entry that
   reported it), so a second overload soon after a resumed one is not mistaken
-  for the first. "Cancel Pending Resume" claims every job it cancels, so the
-  other windows drop their copies instead of firing them. Resuming by hand
-  always goes ahead regardless of claims.
+  for the first. The claim is held for the whole random-delay window (the reset
+  plus the longest delay you have set, plus ten minutes), so a window with a
+  longer delay does not find it expired and resume the same reset again.
+  "Cancel Pending Resume" claims every job it cancels, so the other windows
+  drop their copies instead of firing them; if the same reset is detected
+  again in the window that cancelled, it is planned afresh and that window
+  releases its own claim so the new plan can fire. Resuming by hand is not
+  blocked by claims. If the claims directory cannot be created, the resume goes
+  ahead without a claim, as it does for every other filesystem failure here.
 - A distinct "gave up" status for a resume this window has stopped retrying on
   its own: a launch that stalled (its transcript never grew), no `claude`
   executable found, the session's folder no longer exists, or a token-budget
@@ -133,7 +175,13 @@ The first release.
   a turn or is resumed, and with "Cancel Pending Resume"; the tooltip lists
   all of these.
 - Settings under `claudeLimitBreak.*`. Everything that influences what gets
-  executed is machine-scoped, so a workspace cannot set it.
+  executed is machine-scoped, so a workspace cannot set it. Turning `enabled`
+  off also stops a resume that is already counting down: when its time comes it
+  is kept for Resume Now instead of firing.
+- The default `resumePrompt` is "[Limit Break] Your session was interrupted and
+  has been resumed automatically. Please continue from where you left off." It
+  is the same for a usage limit and for a server error, and there is no second
+  setting.
 - `claudeLimitBreak.watchScope`: watch every Claude session on the machine
   (the default) or only sessions inside this window's workspace.
 - `claudeLimitBreak.checkForUpdates`, off by default: checks GitHub once a day
@@ -166,7 +214,11 @@ The first release.
   holds the session, or a launch failed in a way that keeps it retryable)
   survives a window reload: it persists alongside the scheduler's state and is
   restored at activation, unless another window on the same VS Code profile has
-  overwritten the stored list (see Known limitations).
+  overwritten the stored list (see Known limitations). A stored pending or
+  ready job that fails validation (a session id that is not a UUID, a missing
+  or non-numeric resume time, an unknown reason) is dropped with a log line rather than restored, and the
+  session id is checked once more immediately before `claude --resume` is
+  launched.
 - Extension icon, logo and README banner.
 - Requires VS Code 1.138 or newer; CI and development target Node 24.
 - Repository hardening: SHA-pinned GitHub Actions, branch and tag protection
@@ -183,3 +235,9 @@ The first release.
   another's, and a reload restores whatever the last writer left. The claim
   above stops two windows from both acting on a reset, not from sharing
   that list. See `docs/NEXT.md` in the repository.
+- The count of consecutive overload resumes, which drives the backoff and the
+  give-up after five, lives in memory, per window. A window reload, or a window
+  opened partway through a streak, starts its count again at zero: its next
+  retry gets no backoff, and the streak can run up to five more automatic
+  resumes before that window gives up. An older window may already show the
+  give-up warning while the fresh one is still retrying.

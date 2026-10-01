@@ -1,5 +1,6 @@
-import * as os from 'node:os';
 import * as path from 'node:path';
+
+import { claudeHome } from './claudeHome';
 
 /**
  * Whether Claude Code's own terminal UI will pick a session back up by
@@ -67,7 +68,7 @@ export function autoContinueEnabled(
   // for ~/.claude.json in trust.ts's defaultClaudeConfigPath - checked against
   // the CLI's own bundle there, and the same relocation rule applies to every
   // file normally found under ~/.claude.
-  layers.push(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json'));
+  layers.push(path.join(claudeHome(), 'settings.json'));
   for (const layer of layers) {
     const value = readLayer(layer, readFile);
     if (value !== undefined) {
