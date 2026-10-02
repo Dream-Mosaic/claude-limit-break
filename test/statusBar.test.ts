@@ -547,11 +547,12 @@ test('an offer-only job is listed as waiting for a manual Resume Now, not as res
 test('the pill marks an offer-only soonest job as manual rather than counting down to a resume', () => {
   resetVscodeFake();
   const bar = new CountdownStatusBar();
-  const at = Date.now() + 3 * 86_400_000;
+  // A weekly reset, half an hour short of seven days: counted in days (Minor 4).
+  const at = Date.now() + 7 * 86_400_000 - 30 * 60_000;
   bar.update([job({ resumeAtMs: at, baseResumeAtMs: at, offerOnly: true })]);
   const text = vscodeFake.statusBarItems[0]?.text ?? '';
   assert.doesNotMatch(text, /resumes in/);
-  assert.match(text, /\(manual\)/);
+  assert.equal(text, '$(clock) Claude limit resets in 6d 23h (manual)');
   assert.match(tooltipText(), /manual/);
   bar.dispose();
 });

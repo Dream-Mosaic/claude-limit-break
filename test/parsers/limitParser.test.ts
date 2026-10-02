@@ -116,6 +116,10 @@ test('formatDuration renders compact countdowns', () => {
   assert.equal(formatDuration(0), '0s');
   assert.equal(formatDuration(42_000), '42s');
   assert.equal(formatDuration(3_600_000 * 4 + 60_000 * 32), '4h 32m');
+  // Wave D fix round 1, Minor 4: a day unit, so a weekly reset is not "167h 0m".
+  assert.equal(formatDuration(3_600_000 * 23 + 60_000 * 59), '23h 59m');
+  assert.equal(formatDuration(86_400_000), '1d 0h');
+  assert.equal(formatDuration(86_400_000 * 6 + 3_600_000 * 23 + 60_000 * 59), '6d 23h');
 });
 
 test('detects the bare "your limit" format from the docs', () => {

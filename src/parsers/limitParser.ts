@@ -897,13 +897,21 @@ export function looksLikeQuotedNotice(rawText: string): boolean {
         return /`/.test(t) || /^>/.test(t) || /^(?:[A-Za-z]:)?[^\s:]+:\d+[:-]/.test(t);
     });
 }
-/** "4h 32m", "59m 12s", "42s" - compact countdown rendering. */
+/**
+ * "6d 23h", "4h 32m", "59m 12s", "42s" - compact countdown rendering. Days
+ * from 24 hours up (wave D fix round 1): an offer-only weekly reset counts
+ * down from days away.
+ */
 export function formatDuration(ms: number): string {
     if (ms <= 0) {
         return '0s';
     }
     const totalSeconds = Math.round(ms / 1000);
+    const days = Math.floor(totalSeconds / 86_400);
     const hours = Math.floor(totalSeconds / 3600);
+    if (days > 0) {
+        return `${days}d ${hours % 24}h`;
+    }
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     if (hours > 0) {
