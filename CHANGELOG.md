@@ -83,15 +83,22 @@ The first release.
   automatically; Resume Now will be offered when it resets." - the status bar
   marks it `(manual)`, and at the reset Resume Now is offered, exactly as with
   `autoResume` off. Raising `maxWaitHours` makes a longer reset automatic.
+  The latest detection decides: each new limit hit is judged again, so hitting
+  the same limit again once its reset is within `maxWaitHours` makes the job
+  automatic (keeping its resume time), with a one-time notice saying so. The
+  `maxWaitHours` description says so: "Each new limit hit is judged again, so
+  a hit within this window resumes automatically even if an earlier one was
+  only offered."
   A reset more than 8 days out (longer than any Claude limit, so a misread),
   one that already passed (a fork's copy, say) and one with no readable time
   are not picked up, and every one of them is logged with the session and the
   reason - a passed one once per transcript.
 - Reads the dated reset text Claude Code writes for a reset more than a day
   out when the entry has no `quotaLimits`: `resets Aug 4, 1am
-  (America/Chicago)`, `resets Jun 3 at 4pm (Europe/Berlin)` and the weekday
-  form `resets Mon 12:00am (...)`, in the zone the notice names, through
-  daylight-saving changes and across the new year. A dated reset with no zone
+  (America/Chicago)` and `resets Jun 3 at 4pm (Europe/Berlin)`, in the zone
+  the notice names, through daylight-saving changes and across the new year.
+  A weekday form (`resets Mon 12:00am`) is read only if it names a zone; as
+  Claude Code's docs quote it, with none, it is logged, not read. A dated reset with no zone
   is not guessed at. A usage limit hit during `/compact` is read the same way.
 - Claude Code's own auto-continue covers the five-hour usage limit only, so
   Limit Break stands down for it only there. A weekly, Opus, Sonnet, Fable or

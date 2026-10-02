@@ -60,7 +60,8 @@ when the reset is within `maxWaitHours` (24 hours by default), the same line
 Claude Code draws for its own auto-continue. A later reset is never resumed
 automatically:
 
-- When it is detected, you are told once (not once per window): "Limit Break:
+- When it is detected, you are told once (not once per window) when `notify`
+  is on; the output channel always logs it: "Limit Break:
   session `<id8>` hit a weekly limit that resets `<date and time>`. That is
   more than 24 hours away, so it won't resume automatically; Resume Now will
   be offered when it resets." The job is kept like any other - across a
@@ -70,6 +71,11 @@ automatically:
   Nothing is launched on its own. A session that has moved on since it
   stopped is skipped silently, as always.
 - Raising `maxWaitHours` turns a longer reset into an automatic one.
+- The latest detection decides. Each new limit hit is judged again, so if you
+  hit the same limit again once its reset is within `maxWaitHours`, the job
+  becomes automatic, and you are told once: "Limit Break: session `<id8>` hit
+  its weekly limit again. It resets within 24 hours, so it will now resume
+  automatically at `<time>`." It keeps the resume time it already had.
 - A reset more than 8 days out is longer than any Claude usage limit, so it
   is taken as a misread and not picked up. Neither is one that has already
   passed (a fork's copy of an old limit, say) or one with no readable time.
@@ -79,9 +85,10 @@ automatically:
 The reset time comes from the transcript's `quotaLimits.resetsAt` when the
 entry carries one, and otherwise from the notice text - including the dated
 form Claude Code writes for a reset more than a day out, `resets Aug 4, 1am
-(America/Chicago)` or `resets Jun 3 at 4pm (Europe/Berlin)`, and the weekday
-form `resets Mon 12:00am (...)`. The date is read in the zone the notice
-names, through daylight-saving changes and across the new year. A dated reset
+(America/Chicago)` or `resets Jun 3 at 4pm (Europe/Berlin)`. A weekday form
+(`resets Mon 12:00am`) is read only if it names a zone; as Claude Code's docs
+quote it, with none, it is logged, not read. The date is read in the zone the
+notice names, through daylight-saving changes and across the new year. A dated reset
 that names no zone is not guessed at; it is logged instead.
 
 ## Works with Claude Code's own auto-continue
@@ -284,7 +291,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
 | `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | Passed as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
 | `maxResumeTokens` | `500000` | Refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. `0` never refuses. |
-| `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
+| `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
 | `transcriptPollSeconds` | `5` | Polling backstop, for when file watching is unreliable. |
 | `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |
 | `notify` | `true` | Notify on detection and on resume. |
