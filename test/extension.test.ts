@@ -5661,3 +5661,90 @@ test('D3: an offer-only job on a session that continued since is skipped silentl
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Wave D fix round 1: the latest detection decides (Important 1), and the
+// label and article in the notices (Minor 1).
+// ---------------------------------------------------------------------------
+
+const upgradeNotice = (label: string, resumeAtMs: number, hours = 24) =>
+  `Limit Break: session ${SESSION.slice(0, 8)} hit its ${label} limit again. It resets within ${hours} hours, ` +
+  `so it will now resume automatically at ${new Date(resumeAtMs).toLocaleTimeString()}.`;
+const upgradeNotices = () => vscodeFake.info.map((m) => m.message).filter((m) => m.includes('limit again.'));
+
+test('F1: an automatic re-detection upgrades an offer-only job, announced once across two windows', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-f1-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+  const storeA = new Map<string, unknown>();
+  const ctxA = contextOver(storeA);
+  start(ctxA);
+  const watcherA = FakeWatcher.latest!;
+  const ctxB = contextOver(new Map());
+  start(ctxB);
+  const watcherB = FakeWatcher.latest!;
+  try {
+    for (const w of [watcherA, watcherB]) {
+      w.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    }
+    for (const w of [watcherA, watcherB]) {
+      w.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    }
+    assert.deepEqual(upgradeNotices(), [upgradeNotice('weekly', resetsAt.getTime())]);
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('resuming at')).length,
+      0,
+      'an upgrade is announced as one, not as a fresh schedule',
+    );
+    const pending = storeA.get('claudeLimitBreak.pending') as { offerOnly?: boolean }[];
+    assert.equal(pending[0]?.offerOnly, undefined, 'automatic now, and persisted that way');
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(upgradeNotice('weekly', resetsAt.getTime()))), 'logged too');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctxA);
+    teardown(ctxB);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('F1: with notify off the upgrade is logged, not shown', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, notify: false };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    assert.deepEqual(upgradeNotices(), []);
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(upgradeNotice('weekly', resetsAt.getTime()))));
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('F1 (Minor 1): "an Opus limit", and an inherited property name is no label at all', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day_opus', true);
+    FakeWatcher.latest!.limitFor(SESSION_B, resetsAt, REAL_CWD, undefined, 'constructor', true);
+    const notices = limitNotices();
+    assert.equal(notices.length, 2, JSON.stringify(notices));
+    assert.match(notices[0]!, /hit an Opus limit that resets/);
+    assert.match(notices[1]!, /hit a usage limit that resets/);
+    assert.doesNotMatch(notices[1]!, /function|native code/);
+  } finally {
+    teardown(ctx);
+  }
+});

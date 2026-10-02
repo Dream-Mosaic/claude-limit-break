@@ -107,6 +107,23 @@ export function isInsideWorkspace(cwd: string | undefined, folders: readonly str
   });
 }
 
+/**
+ * The label a notice names a limit by: Claude Code's own ("weekly", "Opus",
+ * ...), or "usage" when the type is unknown. An own property only, so a
+ * stored type of `constructor` or `toString` is no label (wave D fix round
+ * 1, Minor 1; holderPolicy guards the same lookup).
+ */
+function limitLabel(job: { rateLimitType?: string }): string {
+  return job.rateLimitType !== undefined && Object.hasOwn(RATE_LIMIT_LABELS, job.rateLimitType)
+    ? RATE_LIMIT_LABELS[job.rateLimitType]!
+    : 'usage';
+}
+
+/** "an Opus limit", "a weekly limit" - and "a usage limit", hence no "u". */
+function article(label: string): string {
+  return /^[aeio]/i.test(label) ? 'an' : 'a';
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel('Limit Break');
   const log = createLogger('limit-break', (line) => channel.appendLine(line));
@@ -338,26 +355,50 @@ export function activate(context: vscode.ExtensionContext): void {
    * window watching the machine detects and schedules the same reset, so the
    * notice takes its own claim (the fire's key plus a suffix, so it never
    * collides with the fire's claim), held to the same deadline the fire's
-   * claim is, and a window that finds it taken stays quiet. A re-detection in
-   * this window never gets here: the scheduler drops the same reset first.
+   * claim is, and a window that finds it taken stays quiet. A same-reset
+   * re-detection in this window never gets here: the scheduler either keeps
+   * the offer-only job as it is (an offer-only re-detection) or makes it
+   * automatic in place (an automatic one, announced by announceUpgrade
+   * below), and returns false either way (wave D fix round 1).
    * Honours `notify` like the "resuming at" notice it stands in for.
    */
   const announceOfferOnly = (job: PendingJob, s: Settings): void => {
-    const label = (job.rateLimitType !== undefined ? RATE_LIMIT_LABELS[job.rateLimitType] : undefined) ?? 'usage';
+    const label = limitLabel(job);
     const message =
-      `Limit Break: session ${job.sessionId.slice(0, 8)} hit a ${label} limit that resets ` +
+      `Limit Break: session ${job.sessionId.slice(0, 8)} hit ${article(label)} ${label} limit that resets ` +
       `${new Date(job.baseResumeAtMs).toLocaleString()}. That is more than ${s.maxWaitHours} hours away, ` +
       `so it won't resume automatically; Resume Now will be offered when it resets.`;
+    announceOnce(job, s, 'offer-notice', message, 'offer-only');
+  };
+
+  /**
+   * Wave D fix round 1 (Important 1; the user's decision: the latest
+   * detection decides): an offer-only job that a same-reset re-detection
+   * made automatic (scheduler.onUpgrade). Told once across windows, like
+   * the offer-only notice, on a claim of its own.
+   */
+  const announceUpgrade = (job: PendingJob, s: Settings): void => {
+    const message =
+      `Limit Break: session ${job.sessionId.slice(0, 8)} hit its ${limitLabel(job)} limit again. ` +
+      `It resets within ${s.maxWaitHours} hours, so it will now resume automatically at ` +
+      `${new Date(job.resumeAtMs).toLocaleTimeString()}.`;
+    announceOnce(job, s, 'upgrade-notice', message, 'upgrade');
+  };
+
+  /**
+   * Log `message`, then - with `notify` on - show it unless another window
+   * already has: the claim on the job's fire key plus `-<suffix>` (never the
+   * fire's own claim), held to the fire claim's own deadline.
+   */
+  const announceOnce = (job: PendingJob, s: Settings, suffix: string, message: string, what: string): void => {
     log.info(message);
     if (!s.notify) {
       return;
     }
-    const noticeKey = `${claimKeyFor(job)}-offer-notice`;
+    const noticeKey = `${claimKeyFor(job)}-${suffix}`;
     const until = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
     if (holdClaim(claimsDir(), noticeKey, Date.now(), until, fs, log, vscode.env.sessionId) === 'taken') {
-      log.info(
-        `The offer-only notice for ${job.sessionId.slice(0, 8)} was already shown by another window; not repeating it.`,
-      );
+      log.info(`The ${what} notice for ${job.sessionId.slice(0, 8)} was already shown by another window; not repeating it.`);
       return;
     }
     void vscode.window.showInformationMessage(message);
@@ -1264,6 +1305,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
+    scheduler.onUpgrade((job) => announceUpgrade(job, settings())),
     scheduler.onChange(() => {
       // Every listed job/ready session, not just the soonest (review 1,
       // Important 2) - this fires every countdown tick too, which is fine:
