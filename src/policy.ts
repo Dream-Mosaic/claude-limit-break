@@ -11,7 +11,12 @@ export type Plan =
   | { kind: 'ignore'; reason: string };
 
 export function planResume(
-  hit: { detection: { resumeAt?: Date; text: string; rateLimitType?: string }; cwd?: string; file: string; entryTimestampMs?: number },
+  hit: {
+    detection: { resumeAt?: Date; text: string; rateLimitType?: string; offerOnly?: true };
+    cwd?: string;
+    file: string;
+    entryTimestampMs?: number;
+  },
   reason: 'limit' | 'overload',
   settings: Settings,
   statBytes: (p: string) => number,
@@ -83,6 +88,9 @@ export function planResume(
       // 6). resolveSession reports 0 for a size it could not read; that is
       // "unknown", not a baseline every transcript has grown past.
       ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
+      // Wave D, D3 (policy B): a reset beyond maxWaitHours is scheduled like
+      // any other but only ever offered at fire. Absent, not false, otherwise.
+      ...(hit.detection.offerOnly === true ? { offerOnly: true as const } : {}),
     },
   };
 }

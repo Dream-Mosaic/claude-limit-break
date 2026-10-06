@@ -412,3 +412,154 @@ test('a refreshed detection baseline is logged, once, with the old and new size;
   s.schedule(jobWithBase(SESSION_A, base, base + 20 * 60_000));
   assert.equal(refreshLines().length, 1, 'the same size, or no size, changes nothing and logs nothing');
 });
+
+// ---------------------------------------------------------------------------
+// Wave D fix round 1, Important 1 (the user's decision, 2026-10-02): the
+// latest detection decides. A same-reset re-detection (bases within
+// RESET_GRACE_MS) that is automatic makes an offer-only job automatic,
+// whatever the jitter rolled; an offer-only re-detection changes nothing; an
+// automatic job never becomes offer-only for the same reset.
+// ---------------------------------------------------------------------------
+
+const offerJob = (base: number, resumeAt: number): PendingJob => ({ ...jobWithBase(SESSION_A, base, resumeAt), offerOnly: true });
+
+/** A scheduler with its upgrade events recorded. */
+const upgrading = (t: { after(fn: () => void): void }) => {
+  const s = new ResumeScheduler(memento(), silent);
+  t.after(() => s.dispose());
+  const upgraded: PendingJob[] = [];
+  s.onUpgrade((j) => upgraded.push(j));
+  return { s, upgraded };
+};
+
+test('F1: zero jitter, same reset: an automatic re-detection upgrades the offer-only job in place', (t) => {
+  const { s, upgraded } = upgrading(t);
+  const base = Date.now() + 20 * 3_600_000;
+  assert.equal(s.schedule(offerJob(base, base)), true);
+  assert.equal(s.schedule(jobWithBase(SESSION_A, base, base)), false, 'not a new schedule: the job already there is upgraded');
+  assert.equal(s.jobs.length, 1);
+  assert.equal(Object.hasOwn(s.current!, 'offerOnly'), false, 'automatic now, the key gone rather than false');
+  assert.equal(s.current!.resumeAtMs, base, 'its fire time is kept');
+  assert.equal(upgraded.length, 1);
+  assert.equal(upgraded[0]!.sessionId, SESSION_A);
+});
+
+test('F1: a base 1s earlier with an earlier jitter roll still upgrades, and keeps the first fire time', (t) => {
+  const { s, upgraded } = upgrading(t);
+  const base = Date.now() + 20 * 3_600_000;
+  s.schedule(offerJob(base, base + 20 * 60_000));
+  assert.equal(s.schedule(jobWithBase(SESSION_A, base - 1000, base - 1000 + 5 * 60_000)), false);
+  assert.equal(s.current!.offerOnly, undefined);
+  assert.equal(s.current!.resumeAtMs, base + 20 * 60_000);
+  assert.equal(s.current!.baseResumeAtMs, base, 'the claim key (from the base) stays put');
+  assert.equal(upgraded.length, 1);
+});
+
+test('F1: with default jitter the upgrade is deterministic, whichever way the rolls fall', (t) => {
+  for (let i = 0; i < 20; i++) {
+    const { s, upgraded } = upgrading(t);
+    const base = Date.now() + 20 * 3_600_000;
+    s.schedule(offerJob(base, base + randomJitterMs(5, 30)));
+    s.schedule(jobWithBase(SESSION_A, base, base + randomJitterMs(5, 30)));
+    assert.equal(s.current!.offerOnly, undefined, `roll ${i}`);
+    assert.equal(upgraded.length, 1, `roll ${i}`);
+  }
+});
+
+test('F1: the upgrade is persisted', (t) => {
+  // Serialised on write, as globalState is: a store holding the live job
+  // objects would show the upgrade whether or not it was ever written.
+  const saved = new Map<string, string>();
+  const store: MementoLike = {
+    get: <T>(k: string) => (saved.has(k) ? (JSON.parse(saved.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      saved.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(store, silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 20 * 3_600_000;
+  s.schedule(offerJob(base, base));
+  s.schedule(jobWithBase(SESSION_A, base, base));
+  const stored = store.get<PendingJob[]>('claudeLimitBreak.pending');
+  assert.equal(stored?.[0]?.offerOnly, undefined);
+});
+
+test('F1: an offer-only re-detection of an offer-only job changes nothing, whatever the jitter', (t) => {
+  const { s, upgraded } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  const first = offerJob(base, base + 10 * 60_000);
+  s.schedule(first);
+  for (const again of [offerJob(base, base + 10 * 60_000), offerJob(base - 1000, base - 1000), offerJob(base, base + 25 * 60_000)]) {
+    assert.equal(s.schedule(again), false);
+  }
+  assert.equal(s.current, first, 'the very same job object is kept');
+  assert.equal(upgraded.length, 0);
+});
+
+test('F1: an automatic job never becomes offer-only for the same reset', (t) => {
+  const { s, upgraded } = upgrading(t);
+  const base = Date.now() + 20 * 3_600_000;
+  s.schedule(jobWithBase(SESSION_A, base, base));
+  assert.equal(s.schedule(offerJob(base, base)), false);
+  assert.equal(s.schedule(offerJob(base - 1000, base - 1000)), false);
+  assert.equal(s.current!.offerOnly, undefined);
+  assert.equal(upgraded.length, 0);
+});
+
+test('F1: a different reset (bases further apart than the grace) is not an upgrade', (t) => {
+  const { s, upgraded } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  s.schedule(offerJob(base, base));
+  // A five-hour limit hit meanwhile resets sooner: it replaces the weekly job as before.
+  const sooner = Date.now() + 2 * 3_600_000;
+  assert.equal(s.schedule(jobWithBase(SESSION_A, sooner, sooner)), true);
+  assert.equal(s.current!.baseResumeAtMs, sooner);
+  assert.equal(upgraded.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Wave D fix round 2, N1: every same-reset re-detection - the upgrade and the
+// offer-only no-op included - adopts the limit type onto an untyped job (A9)
+// and moves the stop baseline to the newest detection (wave A, C1).
+// ---------------------------------------------------------------------------
+
+test('F2: an upgrade adopts the type and the newer baseline, and persists both', (t) => {
+  const saved = new Map<string, string>();
+  const store: MementoLike = {
+    get: <T>(k: string) => (saved.has(k) ? (JSON.parse(saved.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      saved.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(store, silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 20 * 3_600_000;
+  s.schedule({ ...offerJob(base, base + 10 * 60_000), transcriptBytesAtDetection: 500 });
+  s.schedule({ ...jobWithBase(SESSION_A, base - 1000, base + 2 * 60_000), rateLimitType: 'seven_day', transcriptBytesAtDetection: 900 });
+  const stored = store.get<PendingJob[]>('claudeLimitBreak.pending')![0]!;
+  assert.equal(stored.offerOnly, undefined, 'upgraded');
+  assert.equal(stored.rateLimitType, 'seven_day');
+  assert.equal(stored.transcriptBytesAtDetection, 900);
+  assert.equal(stored.resumeAtMs, base + 10 * 60_000, 'the fire time is still the first one');
+});
+
+test('F2: an offer-only no-op still adopts the type and the newer baseline', (t) => {
+  const { s } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  s.schedule({ ...offerJob(base, base), transcriptBytesAtDetection: 500 });
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day', transcriptBytesAtDetection: 900 });
+  assert.equal(s.current!.offerOnly, true);
+  assert.equal(s.current!.rateLimitType, 'seven_day');
+  assert.equal(s.current!.transcriptBytesAtDetection, 900);
+});
+
+test('F2: a type already known is never overwritten by a re-detection', (t) => {
+  const { s } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day_opus' });
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day' });
+  assert.equal(s.current!.rateLimitType, 'seven_day_opus');
+});

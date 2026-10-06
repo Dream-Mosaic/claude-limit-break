@@ -11,6 +11,8 @@ import {
   MAX_NOTICE_LENGTH,
   RESET_GRACE_MS,
   resolveStructuredReset,
+  classifyLimit,
+  MAX_RESET_DAYS,
 } from '../../src/parsers/limitParser';
 
 const NOW = new Date('2026-08-03T12:00:00Z');
@@ -83,8 +85,10 @@ test('ignores prose and source code that merely discuss limits', () => {
   }
 });
 
-test('rejects a reset time beyond the wait horizon', () => {
-  assert.equal(detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW), undefined);
+// Wave D (policy B): beyond the wait horizon is no longer dropped - it is
+// offer-only (see the D1 tests below). Only past MAX_RESET_DAYS is rejected.
+test('a reset time beyond the wait horizon is offer-only, not automatic', () => {
+  assert.equal(detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW)?.offerOnly, true);
 });
 
 test('rejects a reset time already in the past', () => {
@@ -112,6 +116,10 @@ test('formatDuration renders compact countdowns', () => {
   assert.equal(formatDuration(0), '0s');
   assert.equal(formatDuration(42_000), '42s');
   assert.equal(formatDuration(3_600_000 * 4 + 60_000 * 32), '4h 32m');
+  // Wave D fix round 1, Minor 4: a day unit, so a weekly reset is not "167h 0m".
+  assert.equal(formatDuration(3_600_000 * 23 + 60_000 * 59), '23h 59m');
+  assert.equal(formatDuration(86_400_000), '1d 0h');
+  assert.equal(formatDuration(86_400_000 * 6 + 3_600_000 * 23 + 60_000 * 59), '6d 23h');
 });
 
 test('detects the bare "your limit" format from the docs', () => {
@@ -390,23 +398,19 @@ test('detectLimit: omitting readAt keeps every existing caller unaffected (readA
 test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
   const now = new Date('2026-08-03T12:00:00Z');
   const atEdge = Math.floor((now.getTime() - RESET_GRACE_MS) / 1000);
-  assert.ok(resolveStructuredReset(atEdge, now, MAXW), 'exactly RESET_GRACE_MS old is still due now');
-  assert.equal(
-    resolveStructuredReset(atEdge - 1, now, MAXW),
-    undefined,
-    'a further second back is history',
-  );
+  assert.equal(resolveStructuredReset(atEdge, now, MAXW).kind, 'auto', 'exactly RESET_GRACE_MS old is still due now');
+  assert.equal(resolveStructuredReset(atEdge - 1, now, MAXW).kind, 'rejected', 'a further second back is history');
 });
 
-test('resolveStructuredReset: wait-horizon boundary accepts an exact tie, rejects beyond it', () => {
+test('resolveStructuredReset: wait-horizon boundary is automatic on an exact tie, offer-only beyond it', () => {
   const now = new Date('2026-08-03T12:00:00Z');
   const atHorizon = Math.floor((now.getTime() + MAXW * 3_600_000) / 1000);
-  assert.ok(resolveStructuredReset(atHorizon, now, MAXW), 'exactly at the horizon must still be accepted');
-  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW), undefined, 'an hour beyond the horizon is rejected');
+  assert.equal(resolveStructuredReset(atHorizon, now, MAXW).kind, 'auto', 'exactly at the horizon is still automatic');
+  assert.equal(resolveStructuredReset(atHorizon + 3600, now, MAXW).kind, 'offerOnly', 'an hour beyond the horizon is offered');
 });
 
 test('resolveStructuredReset: a non-finite value is rejected outright', () => {
-  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW), undefined);
+  assert.equal(resolveStructuredReset(NaN, new Date(), MAXW).kind, 'rejected');
 });
 
 // ---------------------------------------------------------------------------
@@ -554,3 +558,241 @@ for (const [text, type] of LIMIT_TYPE_CASES) {
     assert.equal(Object.hasOwn(hit, 'rateLimitType'), type !== undefined);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Wave D, D1 (policy B, the user's decision): resolveStructuredReset tells its
+// three outcomes apart. Within maxWaitHours: automatic, as before. Beyond it
+// but no more than MAX_RESET_DAYS (8) out - a weekly limit, which is at most
+// 7 days - offer-only. Further out, or further in the past than the grace,
+// rejected with a reason the caller logs.
+// ---------------------------------------------------------------------------
+
+const D1_NOW = new Date('2026-08-03T12:00:00Z');
+const secs = (ms: number) => ms / 1000;
+
+test('D1: a structured reset within maxWaitHours is automatic, a tie at the horizon included', () => {
+  const inTwo = resolveStructuredReset(secs(D1_NOW.getTime() + 2 * 3_600_000), D1_NOW, MAXW);
+  assert.deepEqual(inTwo, { kind: 'auto', at: new Date(D1_NOW.getTime() + 2 * 3_600_000) });
+  const atHorizon = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000), D1_NOW, MAXW);
+  assert.equal(atHorizon.kind, 'auto', 'exactly at the horizon is still automatic');
+});
+
+test('D1: a structured reset one second past maxWaitHours is offer-only', () => {
+  const v = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000) + 1, D1_NOW, MAXW);
+  assert.equal(v.kind, 'offerOnly');
+});
+
+test('D1: a weekly reset (7 days out) is offer-only, and the 8-day bound is inclusive', () => {
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, MAXW).kind, 'offerOnly');
+  const atBound = resolveStructuredReset(secs(D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000), D1_NOW, MAXW);
+  assert.equal(atBound.kind, 'offerOnly', 'exactly 8 days out is still believed');
+  assert.equal(MAX_RESET_DAYS, 8);
+});
+
+test('D1: a structured reset more than 8 days out is rejected as absurd, with its instant', () => {
+  const at = D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000 + 1000;
+  assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'absurd', at: new Date(at) });
+});
+
+test('D1: raising maxWaitHours turns a weekly reset automatic, but never past the 8-day bound', () => {
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, 7 * 24).kind, 'auto');
+  const nineDays = resolveStructuredReset(secs(D1_NOW.getTime() + 9 * 86_400_000), D1_NOW, 10 * 24);
+  assert.equal(nineDays.kind, 'rejected', 'a huge maxWaitHours does not lift the misread bound');
+});
+
+test('D1: a structured reset further back than the grace is rejected as past, with its instant', () => {
+  const at = D1_NOW.getTime() - RESET_GRACE_MS - 1000;
+  assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'past', at: new Date(at) });
+});
+
+test('D1: a non-finite structured reset is rejected as unparseable', () => {
+  assert.deepEqual(resolveStructuredReset(Number.NaN, D1_NOW, MAXW), { kind: 'rejected', reason: 'unparseable' });
+});
+
+test('D1: detectLimit applies the same three outcomes to text', () => {
+  const offer = detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW);
+  assert.equal(offer?.offerOnly, true, '40 hours out is offer-only at maxWaitHours 24');
+  assert.equal(offer?.resumeAt.getTime(), NOW.getTime() + 40 * 3_600_000);
+  const auto = detectLimit('Usage limit reached. Try again in 5 hours', NOW, MAXW);
+  assert.ok(auto);
+  assert.equal(Object.hasOwn(auto, 'offerOnly'), false, 'an automatic detection carries no offerOnly key');
+  const absurd = classifyLimit('You have hit your session limit, resets at 2026-08-20T00:00:00Z', NOW, MAXW);
+  assert.equal(absurd?.kind, 'rejected');
+  assert.equal(absurd?.kind === 'rejected' ? absurd.reason : '', 'absurd');
+  assert.equal(detectLimit('You have hit your session limit, resets at 2026-08-20T00:00:00Z', NOW, MAXW), undefined);
+  // Nor may a clock rule then read the year's "20" as 8pm tonight.
+  const retry = classifyLimit('Usage limit reached. Try again at 2026-08-20T00:00:00Z', NOW, MAXW);
+  assert.equal(retry?.kind === 'rejected' ? retry.reason : JSON.stringify(retry), 'absurd');
+});
+
+test('D1: classifyLimit tells "not a notice at all" (undefined) from a notice it could not use', () => {
+  assert.equal(classifyLimit('Claude finished the task successfully.', NOW, MAXW), undefined);
+  const v = classifyLimit("You've hit your monthly spend limit · raise it at claude.ai/settings/usage", NOW, MAXW);
+  assert.deepEqual(v, { kind: 'rejected', reason: 'unparseable' });
+  const past = classifyLimit(`Claude AI usage limit reached|${epochAt('2026-08-03T09:00:00Z')}`, NOW, MAXW);
+  assert.equal(past?.kind === 'rejected' ? past.reason : '', 'past');
+});
+
+test('D1: an automatic reading from a later rule still beats an offer-only one from an earlier rule', () => {
+  // The iso rule (earlier) reads 3 days out; the duration rule (later) reads
+  // 2 hours. "The first rule that yields a usable instant wins" was always
+  // about the automatic horizon; an offer is only taken when nothing is.
+  const v = detectLimit('Usage limit reached, resets at 2026-08-06T12:00:00Z. Try again in 2 hours', NOW, MAXW);
+  assert.equal(v?.resumeAt.getTime(), NOW.getTime() + 2 * 3_600_000);
+  assert.equal(v?.offerOnly, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Wave D, D2: the dated reset text Claude Code writes for a reset more than
+// 24h out (its `Zd` formatter: `toLocaleString("en-US", {month: "short", day:
+// "numeric", hour: "numeric", ...})`), in the two shapes the sources show -
+// "Aug 4, 1am" (real transcripts) and "Jun 3 at 4pm" (GitHub #68816) - plus
+// the docs' weekday form "Mon 12:00am". A zone in parentheses is required:
+// resolved with the same zone and DST machinery as the clock rule, the year
+// being the next occurrence on or after the entry's own timestamp.
+// ---------------------------------------------------------------------------
+
+/** Resolve one notice the way the watcher does: trusted, against `basis`, read now at `readAt`. */
+const dated = (text: string, basis: string, maxWait = MAXW, readAt = basis) =>
+  classifyLimit(text, new Date(basis), maxWait, { trusted: true, readAt: new Date(readAt) });
+const atOf = (v: ReturnType<typeof dated>) => (v?.kind === 'detected' ? v.detection.resumeAt.toISOString() : JSON.stringify(v));
+
+test('D2: the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offer-only weekly limit at 1am CDT', () => {
+  const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10.016Z');
+  assert.equal(v?.kind, 'detected');
+  if (v?.kind !== 'detected') return;
+  assert.equal(v.detection.resumeAt.toISOString(), '2026-08-04T06:00:00.000Z');
+  assert.equal(v.detection.offerOnly, true, '97 hours out is beyond maxWaitHours 24');
+  assert.equal(v.detection.rateLimitType, 'seven_day');
+  assert.equal(v.detection.rule, 'dated-reset');
+});
+
+test('D2: the real v2.1.270 sample agrees with its own quotaLimits.resetsAt to the second', () => {
+  // Session 1e8a6fb6, 2026-09-25T01:33:11.483Z: the same entry carries
+  // quotaLimits.resetsAt 1790661600 - an independent oracle for the parse.
+  const v = dated("You've hit your weekly limit · resets Sep 29, 1am (America/Chicago)", '2026-09-25T01:33:11.483Z');
+  assert.equal(atOf(v), new Date(1790661600 * 1000).toISOString());
+});
+
+test('D2: raising maxWaitHours makes the same dated reset automatic', () => {
+  const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10.016Z', 7 * 24);
+  assert.equal(v?.kind === 'detected' ? Object.hasOwn(v.detection, 'offerOnly') : 'not detected', false);
+});
+
+test('D2: the "Jun 3 at 4pm (Europe/Berlin)" form from GitHub #68816 resolves in CEST', () => {
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Jun 3 at 4pm (Europe/Berlin)", '2026-06-01T10:00:00Z')), '2026-06-03T14:00:00.000Z');
+});
+
+test('D2: minutes are read when present', () => {
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 1:30am (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T06:30:00.000Z');
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 12pm (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T17:00:00.000Z');
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 12am (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T05:00:00.000Z');
+});
+
+test('D2: across New Year, a December entry saying "resets Jan 2" lands in the next year', () => {
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Jan 2, 1am (America/Chicago)", '2026-12-29T15:00:00Z')), '2027-01-02T07:00:00.000Z');
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Jan 2 at 9am (Europe/Berlin)", '2026-12-29T15:00:00Z')), '2027-01-02T08:00:00.000Z');
+  // The zone's own calendar decides the year: 03:00Z on Jan 1 is still Dec 31 in Chicago.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Jan 3, 1am (America/Chicago)", '2027-01-01T03:00:00Z')), '2027-01-03T07:00:00.000Z');
+  // ...and the other way: at that same instant "Dec 31, 11pm" is two hours away, not next December.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Dec 31, 11pm (America/Chicago)", '2027-01-01T03:00:00Z')), '2027-01-01T05:00:00.000Z');
+  // And a date still ahead this year stays in this year.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Dec 31, 11pm (America/Chicago)", '2026-12-29T15:00:00Z')), '2027-01-01T05:00:00.000Z');
+});
+
+test('D2: a DST week in America/Chicago: the offset in force AT THE RESET is used, not the one at the entry', () => {
+  // Spring forward 2026-03-08 02:00 CST -> 03:00 CDT.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 9, 1am (America/Chicago)", '2026-03-05T12:00:00Z')), '2026-03-09T06:00:00.000Z');
+  // A reading inside the skipped hour lands on the safe, later side of the gap.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 8, 2:30am (America/Chicago)", '2026-03-05T12:00:00Z')), '2026-03-08T08:30:00.000Z');
+  // Fall back 2026-11-01 02:00 CDT -> 01:00 CST.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Nov 2, 9am (America/Chicago)", '2026-10-28T12:00:00Z')), '2026-11-02T15:00:00.000Z');
+  // The repeated hour resolves to its later pass.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Nov 1, 1:30am (America/Chicago)", '2026-10-28T12:00:00Z')), '2026-11-01T07:30:00.000Z');
+});
+
+test('D2: a DST week in Europe/Berlin, both directions', () => {
+  // Spring forward 2026-03-29 02:00 CET -> 03:00 CEST.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 30 at 4pm (Europe/Berlin)", '2026-03-25T12:00:00Z')), '2026-03-30T14:00:00.000Z');
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 29 at 2:30am (Europe/Berlin)", '2026-03-25T12:00:00Z')), '2026-03-29T01:30:00.000Z');
+  // Fall back 2026-10-25 03:00 CEST -> 02:00 CET.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Oct 26, 1am (Europe/Berlin)", '2026-10-21T12:00:00Z')), '2026-10-26T00:00:00.000Z');
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Oct 25, 2:30am (Europe/Berlin)", '2026-10-21T12:00:00Z')), '2026-10-25T01:30:00.000Z');
+});
+
+test('D2: a dated reset with no zone is not parsed: rejected as unparseable, saying the zone is missing', () => {
+  const v = dated("You've hit your weekly limit · resets Aug 4, 1am", '2026-07-31T04:55:10Z');
+  assert.equal(v?.kind, 'rejected');
+  if (v?.kind !== 'rejected') return;
+  assert.equal(v.reason, 'unparseable');
+  assert.match(v.detail ?? '', /no time zone/);
+  assert.equal(detectLimit("You've hit your weekly limit · resets Jun 3 at 4pm", new Date('2026-06-01T10:00:00Z'), MAXW), undefined);
+});
+
+test('D2: a garbage date, time or zone is rejected as unparseable with a reason, never guessed at', () => {
+  const cases: [string, RegExp][] = [
+    ["You've hit your weekly limit · resets Feb 30, 1am (America/Chicago)", /not a real date/],
+    ["You've hit your weekly limit · resets Aug 44, 1am (America/Chicago)", /not a real date/],
+    ["You've hit your weekly limit · resets Aug 0, 1am (America/Chicago)", /not a real date/],
+    ["You've hit your weekly limit · resets Aug 4, 13pm (America/Chicago)", /not a real time/],
+    ["You've hit your weekly limit · resets Aug 4, 0am (America/Chicago)", /not a real time/],
+    ["You've hit your weekly limit · resets Aug 4, 1:75am (America/Chicago)", /not a real time/],
+    ["You've hit your weekly limit · resets Aug 4, 1am (Mars/Olympus_Mons)", /unknown time zone/],
+  ];
+  for (const [text, why] of cases) {
+    const v = dated(text, '2026-07-31T04:55:10Z');
+    assert.equal(v?.kind, 'rejected', text);
+    if (v?.kind !== 'rejected') continue;
+    assert.equal(v.reason, 'unparseable', text);
+    assert.match(v.detail ?? '', why, text);
+  }
+});
+
+test('D2: a dated reset more than 8 days out is absurd; one already in the past (a fork read later) is history', () => {
+  const far = dated("You've hit your weekly limit · resets Aug 9, 1am (America/Chicago)", '2026-07-31T04:55:10Z');
+  assert.equal(far?.kind === 'rejected' ? far.reason : atOf(far), 'absurd');
+  // A date before the entry itself rolls to next year, which is absurd too.
+  const before = dated("You've hit your weekly limit · resets Jul 30, 1am (America/Chicago)", '2026-07-31T04:55:10Z');
+  assert.equal(before?.kind === 'rejected' ? before.reason : atOf(before), 'absurd');
+  const stale = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10Z', MAXW, '2026-09-01T00:00:00Z');
+  assert.equal(stale?.kind === 'rejected' ? stale.reason : atOf(stale), 'past');
+});
+
+test('D2: a dated reset that struck minutes before the entry stays this year and is due now (grace)', () => {
+  const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-08-04T06:05:00Z');
+  assert.equal(atOf(v), '2026-08-04T06:00:00.000Z');
+  assert.equal(v?.kind === 'detected' ? v.detection.offerOnly : 'x', undefined, 'due now is automatic');
+});
+
+test('D2: the weekday form "Mon 12:00am", with a zone, is the next such weekday on or after the entry', () => {
+  // Wednesday 2026-09-30 10:00 CDT -> Monday 2026-10-05 00:00 CDT.
+  const v = dated("You've hit your weekly limit · resets Mon 12:00am (America/Chicago)", '2026-09-30T15:00:00Z');
+  assert.equal(atOf(v), '2026-10-05T05:00:00.000Z');
+  assert.equal(v?.kind === 'detected' ? v.detection.rule : '', 'weekday-reset');
+  assert.equal(v?.kind === 'detected' ? v.detection.offerOnly : undefined, true);
+  // Sunday 22:00 CDT: Monday midnight is two hours away, so automatic.
+  const soon = dated("You've hit your weekly limit · resets Mon 12:00am (America/Chicago)", '2026-10-05T03:00:00Z');
+  assert.equal(atOf(soon), '2026-10-05T05:00:00.000Z');
+  assert.equal(soon?.kind === 'detected' ? soon.detection.offerOnly : 'x', undefined);
+  // Monday noon: this Monday's 9am has passed, so it is next Monday's.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mon 9am (Europe/Berlin)", '2026-10-05T10:00:00Z')), '2026-10-12T07:00:00.000Z');
+});
+
+test('D2: the docs\' weekday form exactly as quoted, with no zone, is not parsed and says why', () => {
+  const v = dated("You've hit your weekly limit · resets Mon 12:00am", '2026-09-30T15:00:00Z');
+  assert.equal(v?.kind === 'rejected' ? v.reason : atOf(v), 'unparseable');
+  assert.match(v?.kind === 'rejected' ? v.detail ?? '' : '', /no time zone/);
+});
+
+test('D2: the dated forms do not disturb the within-24h clock form', () => {
+  assert.equal(atOf(dated("You've hit your session limit · resets 2am (America/Chicago)", '2026-08-03T12:00:00Z')), '2026-08-04T07:00:00.000Z');
+});
+
+test('D2: a skipped hour EAST of UTC lands one gap later, not two (London and Berlin, the clock rule too)', () => {
+  // NEXT.md's deferred finding: east of UTC the two-pass resolve already
+  // lands past the gap, and the flat one-hour step then overshot by another
+  // hour. London 2026-03-29: 01:00 GMT -> 02:00 BST, so "1:30am" reads 02:30 BST.
+  assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 29, 1:30am (Europe/London)", '2026-03-25T12:00:00Z')), '2026-03-29T01:30:00.000Z');
+  const clock = detectLimit("You've hit your session limit · resets 1:30am (Europe/London)", new Date('2026-03-28T22:00:00Z'), MAXW);
+  assert.equal(clock?.resumeAt.toISOString(), '2026-03-29T01:30:00.000Z');
+});

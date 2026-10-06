@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { Logger } from './log';
 import { isSessionId } from './sessionResolver';
+import { RESET_GRACE_MS } from './parsers/limitParser';
 
 const STATE_KEY = 'claudeLimitBreak.pending';
 const TICK_MS = 1000;
@@ -61,6 +62,16 @@ export interface PendingJob {
    * kept for the log. Absent for a limit and for a first overload retry.
    */
   backoffMs?: number;
+  /**
+   * Wave D, D3 (policy B, the user's decision): the limit resets beyond
+   * maxWaitHours, so this job is never resumed automatically. It is scheduled
+   * like any other - the claim, the status bar and persistence all come with
+   * that - but its fire offers Resume Now (the autoResume-off path) instead
+   * of launching. Absent, never false, on every other job; restoreJob drops a
+   * stored job whose value is anything but `true`, since losing the flag
+   * would turn an offer into an automatic resume.
+   */
+  offerOnly?: true;
 }
 
 export interface MementoLike {
@@ -128,6 +139,12 @@ export function restoreJob(raw: unknown): RestoreResult {
   if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
     return { dropped: 'its folderTrusted is not a boolean' };
   }
+  // Wave D, D3: dropped, never repaired. Deleting a bad offerOnly (the way a
+  // bad rateLimitType is repaired below) would turn a resume the user was
+  // told would only be offered into an automatic one.
+  if (j.offerOnly !== undefined && j.offerOnly !== true) {
+    return { dropped: 'its offerOnly is not true' };
+  }
   const badType = j.rateLimitType !== undefined && (typeof j.rateLimitType !== 'string' || j.rateLimitType === '');
   if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType) {
     return { job: j as unknown as PendingJob };
@@ -181,11 +198,17 @@ export class ResumeScheduler {
 
   private readonly onFireEmitter = new vscode.EventEmitter<PendingJob>();
   private readonly onChangeEmitter = new vscode.EventEmitter<PendingJob | undefined>();
+  private readonly onUpgradeEmitter = new vscode.EventEmitter<PendingJob>();
 
   /** Fires once for each job whose cooldown elapses. */
   readonly onFire = this.onFireEmitter.event;
   /** Fires with the soonest pending job whenever any job is set, cleared or ticks down. */
   readonly onChange = this.onChangeEmitter.event;
+  /**
+   * Fires with an offer-only job that a same-reset automatic re-detection
+   * has just made automatic (wave D fix round 1), so the user can be told.
+   */
+  readonly onUpgrade = this.onUpgradeEmitter.event;
 
   constructor(
     private readonly memento: MementoLike,
@@ -227,40 +250,65 @@ export class ResumeScheduler {
    * moved a window's resume from 2:27:19 to 2:20:11 on a re-detection. Same
    * `baseResumeAtMs` means the same reset no matter which way the new jitter
    * roll moved it, so it is dropped either way, keeping the first schedule.
+   *
+   * Wave D fix round 1 (Important 1; the user's decision, 2026-10-02): for
+   * an offer-only job, the latest detection decides, deterministically. A
+   * re-detection of the same reset - bases within RESET_GRACE_MS, since a
+   * second read of the same reset can differ by a second - is handled here,
+   * before any jitter comparison, which used to let a zero or earlier
+   * jitter roll replace the job and silently drop the flag:
+   * - automatic (the session hit the limit again within maxWaitHours of the
+   *   reset): the job already scheduled is made automatic in place. Its fire
+   *   time and base are kept, so its claim key and hold deadline do not move.
+   *   `onUpgrade` fires so the user is told; the return is false, as for any
+   *   re-detection that did not schedule anew.
+   * - offer-only again: nothing changes.
+   * And an automatic job is never made offer-only for the same reset. That
+   * cannot happen from a real detection (the time left to a reset only
+   * shrinks), so it is refused and logged as unexpected.
    */
   schedule(job: PendingJob): boolean {
     const existing = this.pending.get(job.sessionId);
     if (existing && existing.resumeAtMs >= Date.now()) {
+      const sameLimitReset =
+        existing.reason === 'limit' &&
+        job.reason === 'limit' &&
+        Math.abs(existing.baseResumeAtMs - job.baseResumeAtMs) <= RESET_GRACE_MS;
+      // Wave D fix round 2 (N1): each of the three offer-only branches below
+      // returns, so each first takes the newer evidence the re-detection
+      // carries, as the plain same-reset drop further down always has. Only
+      // there: two automatic jobs keep that drop's own exact-base rule, which
+      // is what tells a different reset minutes apart from a re-read.
+      const touchesOffer = sameLimitReset && (existing.offerOnly === true || job.offerOnly === true);
+      if (touchesOffer) {
+        this.adoptReDetection(existing, job);
+      }
+      if (sameLimitReset && existing.offerOnly && !job.offerOnly) {
+        delete existing.offerOnly;
+        this.persist();
+        this.log.info(
+          `Re-detection of the same reset for ${job.sessionId} falls within maxWaitHours; ` +
+            `its offer-only resume is now automatic, still at ${new Date(existing.resumeAtMs).toISOString()}.`,
+        );
+        this.onChangeEmitter.fire(this.current);
+        this.onUpgradeEmitter.fire(existing);
+        return false;
+      }
+      if (sameLimitReset && existing.offerOnly && job.offerOnly) {
+        this.log.info(`Ignoring an offer-only re-detection of the same reset for ${job.sessionId}; already waiting to offer it.`);
+        return false;
+      }
+      if (sameLimitReset && !existing.offerOnly && job.offerOnly) {
+        this.log.warn(
+          `Unexpected: an offer-only re-detection of a reset ${job.sessionId} already resumes automatically; ` +
+            'keeping the automatic resume.',
+        );
+        return false;
+      }
       const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
       if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
-        // Final fix wave A, A9: the dropped re-detection may know which limit
-        // this is when the first detection did not (a text-only notice, then
-        // the flagged entry's quotaLimits). decideOnFire reads the type, so
-        // the job adopts it - only onto a job with none, only for the same
-        // reset, and never its schedule or deadline.
-        if (sameReset && existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
-          existing.rateLimitType = job.rateLimitType;
-          this.persist();
-          this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
-        }
-        // Wave A fix round 1 (review C1): the same for where the stop is. A
-        // retry that ran into the same reset again is newer evidence of the
-        // live stop, and the continued-since check (continuedSince.ts) must
-        // measure from it, not from the first detection.
-        if (
-          sameReset &&
-          job.transcriptBytesAtDetection !== undefined &&
-          job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
-        ) {
-          const before = existing.transcriptBytesAtDetection;
-          existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
-          this.persist();
-          // Logged like A9's adoption above (wave B, B8, re-review m-new-2): a
-          // later "has continued since it stopped" skip is measured from here.
-          this.log.info(
-            `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
-              `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
-          );
+        if (sameReset) {
+          this.adoptReDetection(existing, job);
         }
         this.log.info(
           sameReset
@@ -285,6 +333,39 @@ export class ResumeScheduler {
     this.startTicking();
     this.onChangeEmitter.fire(this.current);
     return true;
+  }
+
+  /**
+   * What a dropped re-detection of the same reset still contributes to the
+   * job already pending, never its schedule or deadline. Called by every
+   * same-reset branch of schedule() (wave D fix round 2, N1).
+   *
+   * - Final fix wave A, A9: it may know which limit this is when the first
+   *   detection did not (a text-only notice, then the flagged entry's
+   *   quotaLimits). decideOnFire reads the type, so the job adopts it - only
+   *   onto a job with none.
+   * - Wave A fix round 1 (review C1): where the stop is. A retry that ran
+   *   into the same reset again is newer evidence of the live stop, and the
+   *   continued-since check (continuedSince.ts) must measure from it, not
+   *   from the first detection. Logged like A9's adoption (wave B, B8,
+   *   re-review m-new-2): a later "has continued since it stopped" skip is
+   *   measured from here.
+   */
+  private adoptReDetection(existing: PendingJob, job: PendingJob): void {
+    if (existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
+      existing.rateLimitType = job.rateLimitType;
+      this.persist();
+      this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
+    }
+    if (job.transcriptBytesAtDetection !== undefined && job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection) {
+      const before = existing.transcriptBytesAtDetection;
+      existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
+      this.persist();
+      this.log.info(
+        `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
+          `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
+      );
+    }
   }
 
   /** Cancel one session's pending resume, or every one when no session is named. */
@@ -385,5 +466,6 @@ export class ResumeScheduler {
     this.stopTicking();
     this.onFireEmitter.dispose();
     this.onChangeEmitter.dispose();
+    this.onUpgradeEmitter.dispose();
   }
 }

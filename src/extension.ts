@@ -61,6 +61,7 @@ import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 import { continuedSince } from './continuedSince';
 import { lastNativeCancel, standDownReason, STAND_DOWN_LABEL } from './nativeContinue';
 import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
+import { RATE_LIMIT_LABELS } from './parsers/limitParser';
 
 const NS = 'claudeLimitBreak';
 
@@ -104,6 +105,23 @@ export function isInsideWorkspace(cwd: string | undefined, folders: readonly str
     const root = key(folder);
     return target === root || target.startsWith(root + path.sep);
   });
+}
+
+/**
+ * The label a notice names a limit by: Claude Code's own ("weekly", "Opus",
+ * ...), or "usage" when the type is unknown. An own property only, so a
+ * stored type of `constructor` or `toString` is no label (wave D fix round
+ * 1, Minor 1; holderPolicy guards the same lookup).
+ */
+function limitLabel(job: { rateLimitType?: string }): string {
+  return job.rateLimitType !== undefined && Object.hasOwn(RATE_LIMIT_LABELS, job.rateLimitType)
+    ? RATE_LIMIT_LABELS[job.rateLimitType]!
+    : 'usage';
+}
+
+/** "an Opus limit", "a weekly limit" - and "a usage limit", hence no "u". */
+function article(label: string): string {
+  return /^[aeio]/i.test(label) ? 'an' : 'a';
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -296,32 +314,116 @@ export function activate(context: vscode.ExtensionContext): void {
       releaseClaim(claimsDir(), freshKey, fs, log);
       log.info(`Released this window's own claim on ${freshKey} so the fresh plan can fire.`);
     }
-    if (folderTrusted === false) {
+    warnIfUntrusted(job);
+    if (job.offerOnly) {
+      // Wave D, D3: "resuming at" would be a lie for a job that only ever
+      // offers. Its own notice replaces it.
+      announceOfferOnly(job, s);
+      return;
+    }
+    if (s.notify) {
+      const at = new Date(job.resumeAtMs).toLocaleTimeString();
+      showResumeNotice(job, `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).`);
+    }
+  };
+
+  /** The log line for a job whose folder the Claude CLI has not trusted (#5). */
+  const warnIfUntrusted = (job: PendingJob): void => {
+    if (job.folderTrusted === false) {
       log.warn(
         `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
       );
     }
-    if (s.notify) {
-      const at = new Date(job.resumeAtMs).toLocaleTimeString();
-      const trustNote =
-        folderTrusted === false
-          ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
-          : '';
-      const message = `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
-      if (folderTrusted === false) {
-        // A one-click way to answer the trust dialog ahead of the resume,
-        // right when the user is at the keyboard to see this notice (Task
-        // 5a). The button only ever opens a terminal - see
-        // openClaudeToTrust below - never answers the dialog itself (#2).
-        void Promise.resolve(vscode.window.showInformationMessage(message, TRUST_BUTTON)).then((choice) => {
-          if (choice === TRUST_BUTTON) {
-            void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
-          }
-        });
-      } else {
-        void vscode.window.showInformationMessage(message);
-      }
+  };
+
+  /**
+   * Show a notice about a resume that will run unattended - a fresh schedule,
+   * or an offer-only job made automatic (wave D fix round 2, N2). When its
+   * folder is not trusted by the Claude CLI the notice says so and offers
+   * "Open Claude to Trust": a one-click way to answer the trust dialog ahead
+   * of the resume, right when the user is at the keyboard to see this notice
+   * (Task 5a). The button only ever opens a terminal - see openClaudeToTrust
+   * below - never answers the dialog itself (#2).
+   */
+  const showResumeNotice = (job: PendingJob, message: string): void => {
+    if (job.folderTrusted !== false) {
+      void vscode.window.showInformationMessage(message);
+      return;
     }
+    const withNote =
+      `${message} This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt ` +
+      'unless you trust it first.';
+    void Promise.resolve(vscode.window.showInformationMessage(withNote, TRUST_BUTTON)).then((choice) => {
+      if (choice === TRUST_BUTTON) {
+        void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
+      }
+    });
+  };
+
+  /**
+   * Wave D, D3 (policy B, the user's decision): tell the user, at detection,
+   * that a limit resetting beyond maxWaitHours will not resume on its own.
+   * Always logged. Shown once across windows, not once per window: every
+   * window watching the machine detects and schedules the same reset, so the
+   * notice takes its own claim (the fire's key plus a suffix, so it never
+   * collides with the fire's claim), held to the same deadline the fire's
+   * claim is, and a window that finds it taken stays quiet. A same-reset
+   * re-detection in this window never gets here: the scheduler either keeps
+   * the offer-only job as it is (an offer-only re-detection) or makes it
+   * automatic in place (an automatic one, announced by announceUpgrade
+   * below), and returns false either way (wave D fix round 1).
+   * Honours `notify` like the "resuming at" notice it stands in for.
+   */
+  const announceOfferOnly = (job: PendingJob, s: Settings): void => {
+    const label = limitLabel(job);
+    const message =
+      `Limit Break: session ${job.sessionId.slice(0, 8)} hit ${article(label)} ${label} limit that resets ` +
+      `${new Date(job.baseResumeAtMs).toLocaleString()}. That is more than ${s.maxWaitHours} hours away, ` +
+      `so it won't resume automatically; Resume Now will be offered when it resets.`;
+    announceOnce(job, s, 'offer-notice', message, 'offer-only');
+  };
+
+  /**
+   * Wave D fix round 1 (Important 1; the user's decision: the latest
+   * detection decides): an offer-only job that a same-reset re-detection
+   * made automatic (scheduler.onUpgrade). Told once across windows, like
+   * the offer-only notice, on a claim of its own.
+   */
+  const announceUpgrade = (job: PendingJob, s: Settings): void => {
+    const message =
+      `Limit Break: session ${job.sessionId.slice(0, 8)} hit its ${limitLabel(job)} limit again. ` +
+      `It resets within ${s.maxWaitHours} hours, so it will now resume automatically at ` +
+      `${new Date(job.resumeAtMs).toLocaleTimeString()}.`;
+    // N2: it now resumes unattended, so an untrusted folder is called out
+    // exactly as a fresh schedule's notice calls it out.
+    warnIfUntrusted(job);
+    announceOnce(job, s, 'upgrade-notice', message, 'upgrade', () => showResumeNotice(job, message));
+  };
+
+  /**
+   * Log `message`, then - with `notify` on - show it unless another window
+   * already has: the claim on the job's fire key plus `-<suffix>` (never the
+   * fire's own claim), held to the fire claim's own deadline.
+   */
+  const announceOnce = (
+    job: PendingJob,
+    s: Settings,
+    suffix: string,
+    message: string,
+    what: string,
+    show: () => void = () => void vscode.window.showInformationMessage(message),
+  ): void => {
+    log.info(message);
+    if (!s.notify) {
+      return;
+    }
+    const noticeKey = `${claimKeyFor(job)}-${suffix}`;
+    const until = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
+    if (holdClaim(claimsDir(), noticeKey, Date.now(), until, fs, log, vscode.env.sessionId) === 'taken') {
+      log.info(`The ${what} notice for ${job.sessionId.slice(0, 8)} was already shown by another window; not repeating it.`);
+      return;
+    }
+    show();
   };
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
@@ -1225,6 +1327,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
+    scheduler.onUpgrade((job) => announceUpgrade(job, settings())),
     scheduler.onChange(() => {
       // Every listed job/ready session, not just the soonest (review 1,
       // Important 2) - this fires every countdown tick too, which is fine:
@@ -1303,9 +1406,16 @@ export function activate(context: vscode.ExtensionContext): void {
       if (standDownOnNativeCancel(job, claimKey, job.transcriptBytesAtDetection)) {
         return;
       }
-      if (!s.autoResume) {
+      // Wave D, D3: an offer-only job (a reset beyond maxWaitHours) takes
+      // exactly this path whatever autoResume says - after the claim and the
+      // continued-since check above, so a session that moved on stays silent.
+      if (!s.autoResume || job.offerOnly) {
         rememberReady(job);
-        log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
+        log.info(
+          job.offerOnly
+            ? `Cooldown elapsed for ${job.sessionId}; its limit reset beyond maxWaitHours, so it is offered, not resumed.`
+            : `Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`,
+        );
         offerResumeNow(
           job,
           claimKey,

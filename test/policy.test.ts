@@ -201,3 +201,23 @@ test('a first overload retry carries no backoff key (A6)', () => {
   assert.equal(p.job.baseResumeAtMs, NOW.getTime());
   assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
 });
+
+// Wave D, D3 (policy B): a limit that resets beyond maxWaitHours is scheduled
+// as usual - the claim, the status bar and persistence all come with that -
+// but marked offer-only, so the fire offers Resume Now instead of launching.
+test('an offer-only detection puts offerOnly on the job', () => {
+  const at = new Date('2026-08-07T06:00:00Z');
+  const offer = { ...hit(at), detection: { ...hit(at).detection, offerOnly: true as const } };
+  const p = planResume(offer, 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.job.offerOnly, true);
+  assert.equal(p.job.baseResumeAtMs, at.getTime(), 'scheduled for the stated reset, as any other limit');
+});
+
+test('an ordinary detection leaves offerOnly off the job, so a persisted job stays as it was', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(Object.hasOwn(p.job, 'offerOnly'), false);
+});

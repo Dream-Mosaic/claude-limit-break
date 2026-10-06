@@ -175,3 +175,23 @@ test('a stored value that is not a job list at all restores nothing and does not
   t.after(() => s.dispose());
   assert.equal(s.jobs.length, 0);
 });
+
+
+// Wave D, D3: offerOnly is persisted, and it is the one field whose loss would
+// ESCALATE autonomy - a weekly limit the user was told would only be offered
+// would launch on its own instead. So a bad value drops the job (with the
+// usual warn line) rather than deleting the field the way a bad
+// rateLimitType is repaired.
+test('an offer-only job survives restoreJob with the flag intact', () => {
+  const result = restoreJob({ ...full(), offerOnly: true });
+  assert.ok('job' in result);
+  assert.equal(result.job.offerOnly, true);
+});
+
+for (const bad of [false, 'true', 1, null, {}]) {
+  test(`restoreJob drops a job whose offerOnly is ${JSON.stringify(bad)}`, () => {
+    const result = restoreJob({ ...full(), offerOnly: bad });
+    assert.ok('dropped' in result, 'an offerOnly that is not exactly true must not become an automatic resume');
+    assert.match(result.dropped, /offerOnly/);
+  });
+}

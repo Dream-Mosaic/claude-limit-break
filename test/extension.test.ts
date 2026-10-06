@@ -91,13 +91,22 @@ class FakeWatcher {
    * resume() now stats it for real, via node:fs, so a test that expects a
    * resume to actually launch needs a real path, not a placeholder string.
    */
-  limitFor(sessionId: string, resumeAt: Date, cwd: string = REAL_CWD, file?: string, rateLimitType?: string): void {
+  limitFor(
+    sessionId: string,
+    resumeAt: Date,
+    cwd: string = REAL_CWD,
+    file?: string,
+    rateLimitType?: string,
+    offerOnly?: true,
+  ): void {
     this.hitEmitter.fire({
       detection: {
         resumeAt,
         text: 'Claude AI usage limit reached. Try again in 5 hours',
         // Only when the test names one, as the real watcher only sets it when it knows.
         ...(rateLimitType !== undefined ? { rateLimitType } : {}),
+        // Wave D, D3: a reset beyond maxWaitHours, as the real watcher marks it.
+        ...(offerOnly ? { offerOnly } : {}),
       },
       cwd,
       // `file` is overridable so a stall test can point at a real transcript
@@ -5460,5 +5469,330 @@ test('C5: an unlisted cancel during the native-continue grace still offers the p
     clearHolders();
     teardown(ctx);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave D, D3 (policy B, the user's decision): a limit that resets beyond
+// maxWaitHours is never resumed automatically. It is scheduled as usual (the
+// claim, the status bar, persistence), the user is told once at detection,
+// and at the reset Resume Now is offered exactly as the autoResume-off path
+// offers it.
+// ---------------------------------------------------------------------------
+
+const OFFER_NOTICE_SUFFIX = '-offer-notice';
+const offerOnlyNotice = (label: string, resetsAt: Date, hours = 24) =>
+  `Limit Break: session ${SESSION.slice(0, 8)} hit a ${label} limit that resets ${resetsAt.toLocaleString()}. ` +
+  `That is more than ${hours} hours away, so it won't resume automatically; Resume Now will be offered when it resets.`;
+/** Every notice about a limit - leaving out the first-run update-check offer, which is not one. */
+const limitNotices = () =>
+  vscodeFake.info.map((m) => m.message).filter((m) => m.startsWith('Limit Break: session') || m.includes('resuming at'));
+
+test('D3: an offer-only limit is announced once at detection, in the exact words, and never as "resuming at"', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  heldClaims.length = 0;
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    assert.deepEqual(limitNotices(), [offerOnlyNotice('weekly', resetsAt)]);
+    const pending = store.get('claudeLimitBreak.pending') as { offerOnly?: boolean }[] | undefined;
+    assert.equal(pending?.[0]?.offerOnly, true, 'scheduled and persisted, marked offer-only');
+    assert.ok(
+      heldClaims.some((c) => c.key.endsWith(OFFER_NOTICE_SUFFIX)),
+      `the notice is claimed across windows; held ${JSON.stringify(heldClaims)}`,
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D3: with real claims, two windows and a re-detection still show the offer-only notice exactly once', () => {
+  resetVscodeFake();
+  // Zero jitter on purpose: an identical re-detection then re-schedules
+  // (scheduler.schedule only drops a DIFFERENT jitter roll of the same
+  // reset), so only the notice's own claim stands between it and a repeat.
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-d3-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+  vscodeFake.envSessionId = 'window-A';
+  const ctxA = contextOver(new Map());
+  start(ctxA);
+  const watcherA = FakeWatcher.latest!;
+  vscodeFake.envSessionId = 'window-B';
+  const ctxB = contextOver(new Map());
+  start(ctxB);
+  const watcherB = FakeWatcher.latest!;
+  try {
+    watcherA.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    watcherA.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    watcherB.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    assert.deepEqual(limitNotices(), [offerOnlyNotice('weekly', resetsAt)]);
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctxA);
+    teardown(ctxB);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('D3: another window already announced it: no second notice, but the job is still scheduled', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  claimResultQueue.push('taken');
+  heldClaims.length = 0;
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3 * 86_400_000), REAL_CWD, undefined, 'seven_day', true);
+    assert.deepEqual(limitNotices(), []);
+    assert.ok(store.get('claudeLimitBreak.pending'), 'still scheduled in this window');
+    assert.ok(vscodeFake.outputLines.some((l) => /another window/.test(l) && l.includes(SESSION.slice(0, 8))));
+  } finally {
+    claimResultQueue.length = 0;
+    teardown(ctx);
+  }
+});
+
+test('D3: an offer-only limit of unknown type is called a "usage" limit, and names the configured horizon', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, maxWaitHours: 30 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, undefined, true);
+    assert.deepEqual(limitNotices(), [offerOnlyNotice('usage', resetsAt, 30)]);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D3: with notify off, the offer-only notice is not shown but is logged', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, notify: false };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    assert.deepEqual(limitNotices(), []);
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(offerOnlyNotice('weekly', resetsAt))));
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D3: an offer-only job firing with autoResume ON launches nothing: it is remembered and Resume Now is offered', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  claimCalls.length = 0;
+  const job = { ...pastJob(), offerOnly: true as const, rateLimitType: 'seven_day' };
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', job]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'an offer-only job never launches on its own');
+    assert.equal((store.get(READY_KEY) as { sessionId: string }[] | undefined)?.[0]?.sessionId, SESSION);
+    assert.equal(offers().length, 1, `expected one Resume Now offer; saw ${JSON.stringify(vscodeFake.info)}`);
+    assert.ok(claimCalls.some((c) => c.key === realClaims.claimKeyFor(job)), 'the fire claim was taken first');
+    // The offer is the ordinary one: accepting it resumes the session.
+    offers()[0]!.answer('Resume Now');
+    await flush();
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'Resume Now resumes it');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D3: an offer-only fire that lost the claim to another window offers nothing', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'taken';
+  claimResultQueue.length = 0;
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', { ...pastJob(), offerOnly: true }]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(offers().length, 0);
+    assert.equal(store.get(READY_KEY), undefined);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctx);
+  }
+});
+
+test('D3: an offer-only job on a session that continued since is skipped silently, like any other fire', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', { ...nativeContinueJob(file, 500), offerOnly: true }]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(offers().length, 0);
+    assert.equal(store.get(READY_KEY), undefined);
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(CONTINUED_LOG)));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave D fix round 1: the latest detection decides (Important 1), and the
+// label and article in the notices (Minor 1).
+// ---------------------------------------------------------------------------
+
+const upgradeNotice = (label: string, resumeAtMs: number, hours = 24) =>
+  `Limit Break: session ${SESSION.slice(0, 8)} hit its ${label} limit again. It resets within ${hours} hours, ` +
+  `so it will now resume automatically at ${new Date(resumeAtMs).toLocaleTimeString()}.`;
+const upgradeNotices = () => vscodeFake.info.map((m) => m.message).filter((m) => m.includes('limit again.'));
+
+test('F1: an automatic re-detection upgrades an offer-only job, announced once across two windows', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-f1-'));
+  fakeClaimResult = 'real';
+  realClaimsDir = dir;
+  const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+  const storeA = new Map<string, unknown>();
+  const ctxA = contextOver(storeA);
+  start(ctxA);
+  const watcherA = FakeWatcher.latest!;
+  const ctxB = contextOver(new Map());
+  start(ctxB);
+  const watcherB = FakeWatcher.latest!;
+  try {
+    for (const w of [watcherA, watcherB]) {
+      w.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    }
+    for (const w of [watcherA, watcherB]) {
+      w.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    }
+    assert.deepEqual(upgradeNotices(), [upgradeNotice('weekly', resetsAt.getTime())]);
+    assert.equal(
+      vscodeFake.info.filter((m) => m.message.includes('resuming at')).length,
+      0,
+      'an upgrade is announced as one, not as a fresh schedule',
+    );
+    const pending = storeA.get('claudeLimitBreak.pending') as { offerOnly?: boolean }[];
+    assert.equal(pending[0]?.offerOnly, undefined, 'automatic now, and persisted that way');
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(upgradeNotice('weekly', resetsAt.getTime()))), 'logged too');
+  } finally {
+    fakeClaimResult = 'claimed';
+    teardown(ctxA);
+    teardown(ctxB);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('F1: with notify off the upgrade is logged, not shown', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, notify: false };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    assert.deepEqual(upgradeNotices(), []);
+    assert.ok(vscodeFake.outputLines.some((l) => l.endsWith(upgradeNotice('weekly', resetsAt.getTime()))));
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('F1 (Minor 1): "an Opus limit", and an inherited property name is no label at all', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 3 * 86_400_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day_opus', true);
+    FakeWatcher.latest!.limitFor(SESSION_B, resetsAt, REAL_CWD, undefined, 'constructor', true);
+    const notices = limitNotices();
+    assert.equal(notices.length, 2, JSON.stringify(notices));
+    assert.match(notices[0]!, /hit an Opus limit that resets/);
+    assert.match(notices[1]!, /hit a usage limit that resets/);
+    assert.doesNotMatch(notices[1]!, /function|native code/);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// Wave D fix round 2, N2: an upgraded job now resumes unattended, so an
+// untrusted folder gets the same trust note and button a fresh schedule does.
+test('F2: an upgrade in an untrusted folder carries the trust note and the "Open Claude to Trust" button', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  trustedCwds = new Set();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    const notice = vscodeFake.info.find((m) => m.message.includes('limit again.'));
+    assert.ok(notice, `no upgrade notice; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
+    assert.ok(notice.message.startsWith(upgradeNotice('weekly', resetsAt.getTime())));
+    assert.match(notice.message, /not trusted by the Claude CLI yet/);
+    assert.deepEqual(notice.items, [TRUST_BUTTON]);
+    notice.answer(TRUST_BUTTON);
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'the button opens the trust terminal');
+    assert.equal(trustTerminalOptions()?.cwd, REAL_CWD);
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('F2: an upgrade in a trusted folder has no trust note and no button', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    const notice = vscodeFake.info.find((m) => m.message.includes('limit again.'));
+    assert.equal(notice?.message, upgradeNotice('weekly', resetsAt.getTime()));
+    assert.deepEqual(notice?.items, []);
+  } finally {
+    teardown(ctx);
   }
 });
