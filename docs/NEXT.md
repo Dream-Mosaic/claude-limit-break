@@ -305,6 +305,29 @@ Planned for the release after 1.0.
   crop if the full mark reads too busy that small; a redraw is a one-file
   cost either way.
 
+### Unit-test refactor
+
+The unit tests are parked for a refactor (the user's call, 2026-10-06).
+
+- **Test the behaviour, not the wording.** Notice and log strings are
+  asserted verbatim across many tests, so a wording change touches dozens of
+  them. Keep each string in one place (a constant or a builder) with one test
+  for its wording, and have the behaviour tests assert which notice was
+  shown, not its text.
+- **Split or speed up `test/extension.test.ts`.** It takes about 200 s on its
+  own, mostly real one-second scheduler ticks, which makes every full run and
+  every mutation check slow. Split it by area, and inject a clock or a tick
+  so a fire does not wait on wall time.
+- **Mutation checks only on decision guards, always in a scratch copy.** Run
+  them on arm, fire and fork logic, not on wording, and never in the working
+  tree: two in-place runs that were stopped left a mutant behind. Copy the
+  tree (with `node_modules` linked), run there, and filter to the relevant
+  test files or names (`--test-name-pattern`) so each run stays short.
+- **A Testing-view integration for the unit tests.** Evaluate a node:test
+  integration for VS Code's Testing view (for example the Node.js Testing
+  extension), since ms-vscode.extension-test-runner covers only the mocha
+  integration suites.
+
 ## Further ideas
 
 From the 2026-09-23 prior-art synthesis
