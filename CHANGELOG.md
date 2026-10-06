@@ -85,7 +85,8 @@ The first release.
   `autoResume` off. Raising `maxWaitHours` makes a longer reset automatic.
   The latest detection decides: each new limit hit is judged again, so hitting
   the same limit again once its reset is within `maxWaitHours` makes the job
-  automatic (keeping its resume time), with a one-time notice saying so. The
+  automatic (keeping its resume time), with a one-time notice saying so when
+  `notify` is on (and the trust button for an untrusted folder). The
   `maxWaitHours` description says so: "Each new limit hit is judged again, so
   a hit within this window resumes automatically even if an earlier one was
   only offered."
@@ -291,7 +292,8 @@ The first release.
   output channel logs it. That includes a dated reset that names no time zone
   (`resets Mon 12:00am`), which is never read in this machine's zone.
 - A limit that resets more than `maxWaitHours` out is offered at the reset,
-  never resumed automatically, and one more than 8 days out is not picked up
+  never resumed automatically unless a later hit of the same limit falls
+  within `maxWaitHours`, and one more than 8 days out is not picked up
   at all (see Added).
 - The cancel lines that stand the resume down are matched by wording that was
   read from the Claude Code 2.1.285 binary. A release that rewords them falls

@@ -73,9 +73,12 @@ automatically:
 - Raising `maxWaitHours` turns a longer reset into an automatic one.
 - The latest detection decides. Each new limit hit is judged again, so if you
   hit the same limit again once its reset is within `maxWaitHours`, the job
-  becomes automatic, and you are told once: "Limit Break: session `<id8>` hit
-  its weekly limit again. It resets within 24 hours, so it will now resume
-  automatically at `<time>`." It keeps the resume time it already had.
+  becomes automatic, and you are told once, when `notify` is on (the output
+  channel always logs it): "Limit Break: session `<id8>` hit its weekly limit
+  again. It resets within 24 hours, so it will now resume automatically at
+  `<time>`." An untrusted folder is called out in that notice, with the
+  "Open Claude to Trust" button, as for any automatic resume. It keeps the
+  resume time it already had.
 - A reset more than 8 days out is longer than any Claude usage limit, so it
   is taken as a misread and not picked up. Neither is one that has already
   passed (a fork's copy of an old limit, say) or one with no readable time.
