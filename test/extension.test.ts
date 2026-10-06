@@ -2178,6 +2178,26 @@ test('a limit entry with zero usage does not hide the last real turn: the budget
   }
 });
 
+test('the budget finds the last real turn behind a ~3 MB image entry and the limit entry', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  const [real, limit] = OVER_BUDGET_CONTENT.trimEnd().split('\n');
+  const image = JSON.stringify({ type: 'user', message: { content: [{ type: 'image', source: { data: 'A'.repeat(3_000_000) } }] } });
+  fs.writeFileSync(transcript, [real, image, limit].join('\n') + '\n');
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 100_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    assert.ok(vscodeFake.warningOffers.find((w) => w.message.includes('estimated')), 'the real turn behind the image is measured');
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
 test('a session under the cap still resumes when the last line is a zero-usage limit entry', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
