@@ -114,9 +114,9 @@ The first release.
   resume can never pair one project's session with another project's prompt.
 - Estimates the token cost of a resume before scheduling it and refuses when it
   exceeds `claudeLimitBreak.maxResumeTokens`, which defaults to 500,000. The
-  estimate reads the transcript's newest `usage` record - the live context a
-  cold resume actually has to rebuild - falling back to a byte count only when
-  there is none. A limit wait guarantees a cold cache, so a resume reprocesses
+  estimate reads the transcript's newest real `usage` record - the live context
+  a cold resume actually has to rebuild. A session with no real usage record is
+  unmeasured and is not refused (the output channel logs it). A limit wait guarantees a cold cache, so a resume reprocesses
   the whole session.
 - Keeps a separate countdown for every session that hits a limit. The limit
   belongs to the account, so the sessions working when it lands hit it
@@ -285,6 +285,14 @@ The first release.
 - Requires VS Code 1.138 or newer; CI and development target Node 24.
 - Repository hardening: SHA-pinned GitHub Actions, branch and tag protection
   rulesets, a SECURITY.md, Dependabot.
+
+### Fixed
+
+- The resume budget measured a limit's own zero-usage error entry, so it
+  estimated 0 tokens and never refused. It now reads the last real turn,
+  skipping Claude Code's synthetic error entries, and the byte-count estimate
+  is gone: a session with no real usage record is unmeasured and is not
+  refused.
 
 ### Known limitations
 

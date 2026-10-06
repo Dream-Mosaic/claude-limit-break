@@ -1982,6 +1982,24 @@ test('the default resume stays interactive', async () => {
   }
 });
 
+/**
+ * A transcript the way a limit leaves it: a real turn whose live context is
+ * 432,163 tokens, then Claude Code's flagged synthetic error entry with its
+ * all-zero usage. The budget must measure the first, not the second.
+ */
+const OVER_BUDGET_CONTENT =
+  [
+    JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-opus-4', usage: { input_tokens: 2, cache_read_input_tokens: 24_591, cache_creation_input_tokens: 407_570 } },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      message: { model: '<synthetic>', usage: { input_tokens: 0, output_tokens: 0 }, content: [{ type: 'text', text: 'API Error: 529 Overloaded' }] },
+    }),
+  ].join('\n') + '\n';
+
 test('a refused resume offers to go ahead anyway, and honours the answer', async () => {
   // The budget guard refused a real 11.2 MB session at ~2,007,179 estimated
   // tokens - a number the session's own usage records put nearer 432,163. A
@@ -1989,7 +2007,7 @@ test('a refused resume offers to go ahead anyway, and honours the answer', async
   // the decision away from the person whose session it is.
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
     maxResumeTokens: 1,
@@ -2018,7 +2036,7 @@ test('a refused resume offers to go ahead anyway, and honours the answer', async
 test('a refusal that is dismissed resumes nothing', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = { claudeCommand: LAUNCHER, maxResumeTokens: 1, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const ctx = contextOver(new Map());
   start(ctx);
@@ -2133,6 +2151,65 @@ test('a small live context beats a huge byte count', async () => {
       'the byte count would have refused this',
     );
     assert.equal(vscodeFake.terminals.length, 1, 'the usage record says it fits, so it resumes');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('a limit entry with zero usage does not hide the last real turn: the budget refuses and nothing resumes', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 100_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
+    assert.ok(offer, `expected the budget refusal; saw ${JSON.stringify(vscodeFake.warnings)}`);
+    assert.match(offer.message, /432,163/, 'it is the real turn that was measured');
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a refused resume launches nothing');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('a session under the cap still resumes when the last line is a zero-usage limit entry', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 500_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await oneTick();
+    assert.deepEqual(vscodeFake.warningOffers.filter((w) => w.message.includes('estimated')), []);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('a transcript with no real usage record is unmeasured: no refusal, one log line, it resumes', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT.split('\n').slice(1).join('\n'));
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await oneTick();
+    assert.deepEqual(vscodeFake.warningOffers.filter((w) => w.message.includes('estimated')), []);
+    assert.equal(vscodeFake.terminals.length, 1);
+    const expected = `Resume budget: no usage record for session ${SESSION.slice(0, 8)}; not checked.`;
+    assert.equal(vscodeFake.outputLines.filter((l) => l.includes(expected)).length, 1, JSON.stringify(vscodeFake.outputLines));
   } finally {
     teardown(ctx);
     fs.rmSync(transcript, { force: true });
@@ -3894,7 +3971,7 @@ const autoConfig = () => ({
 /** Budget-refusal fixture: a real transcript over a 1-token cap. */
 const overBudgetTranscript = (sessionId: string = SESSION) => {
   const transcript = path.join(os.tmpdir(), `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   return transcript;
 };
 
@@ -4855,7 +4932,7 @@ test('a limit job in between neither resets the overload count nor is delayed by
 test('the budget "Resume anyway" override keeps the overload backoff (A6)', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = { claudeCommand: LAUNCHER };
   const store = new Map<string, unknown>();
   const ctx = contextOver(store);

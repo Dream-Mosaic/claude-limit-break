@@ -123,7 +123,7 @@
           "type": "number",
           "default": 500000,
           "scope": "window",
-          "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - and falls back to a byte count only when there is none. Set to `0` to never refuse."
+          "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - skipping the zero-usage error entry a limit leaves behind. A session with no such record is not checked. Set to `0` to never refuse."
         },
         "claudeLimitBreak.maxWaitHours": {
           "type": "number",

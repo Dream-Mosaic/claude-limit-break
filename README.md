@@ -244,7 +244,9 @@ a measured resume of a 1.6 MB session cost 288,574 cache-creation tokens.
 Spend is estimated before resuming and capped, rather than retrying a fixed
 number of times with no idea what each attempt costs. The estimate reads the
 transcript's newest `usage` record — the live context a cold resume has to
-rebuild — and falls back to a byte count only when there is none. A refusal
+rebuild. A limit's own error entry carries no usage and is skipped, so it
+is the last real turn that counts. A session with no real turn at all is
+unmeasured and is not refused (the output channel says so). A refusal
 offers a "Resume anyway" button; dismissing it instead of overriding it is
 recorded as a gave-up session (above), not retried again on its own.
 

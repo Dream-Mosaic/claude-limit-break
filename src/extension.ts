@@ -78,10 +78,10 @@ const READY_KEY = 'claudeLimitBreak.ready';
 
 /**
  * How much of a transcript's end to read when looking for its newest usage
- * record. Generous next to one entry, trivial next to a file that reached
- * 11.2 MB in a single session.
+ * record. Sized to reach past one oversized entry (a base64 image can be
+ * 2 MB+) to the last real turn, and still read once, not the whole file.
  */
-const USAGE_TAIL_BYTES = 256 * 1024;
+const USAGE_TAIL_BYTES = 8 * 1024 * 1024;
 
 /**
  * Whether a transcript entry's working directory belongs to this window.
@@ -249,12 +249,15 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   /**
-   * The newest usage record in a transcript, read from the end of the file.
+   * The newest real usage record in a transcript, read from the end of the file.
    *
-   * A window off the end rather than the whole file: transcripts reach tens of
-   * megabytes, this runs on a detection, and only the last record matters.
-   * Any failure - missing file, unreadable, no record in the window - is
-   * undefined, which puts the estimate back on the byte count.
+   * One window off the end rather than the whole file: transcripts reach tens
+   * of megabytes, and this runs on a detection. A limit's own synthetic error
+   * entry has zero usage and is skipped (parseLastUsage), so the window must
+   * reach the last real turn behind it. The one realistic thing in between is a
+   * single oversized entry - a base64 image from a screenshot, an image Read or
+   * a paste (2 MB+ seen locally) - hence USAGE_TAIL_BYTES. Any failure, or no
+   * real turn in the window, is undefined, which the budget treats as unmeasured.
    */
   const readUsage = (transcript: string): UsageRecord | undefined => {
     try {
@@ -278,7 +281,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /** Arm a planned resume: trust check, scheduler, and the notice that names both. */
-  const schedule = (planned: PendingJob, s: Settings, estimate: number): void => {
+  const schedule = (planned: PendingJob, s: Settings, estimate: number | undefined): void => {
     // Checked here, at schedule time, rather than when the cooldown fires:
     // the user is still at the keyboard for this notice, and can trust the
     // folder before walking away. By fire time they are already gone, which
@@ -323,7 +326,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
-      showResumeNotice(job, `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).`);
+      showResumeNotice(
+        job,
+        `Limit Break: resuming at ${at}${estimate === undefined ? '' : ` (~${estimate.toLocaleString()} tokens)`}.`,
+      );
     }
   };
 
@@ -470,8 +476,8 @@ export function activate(context: vscode.ExtensionContext): void {
     if (plan.kind === 'refuse') {
       log.warn(plan.reason);
       // Offered, not just announced. The estimate can be several times too
-      // high on a long session - the byte count counts history that
-      // compaction already summarised away - and refusing outright takes the
+      // high on a long session - the live context can include history
+      // that is cheap to re-read - and refusing outright takes the
       // decision away from the person whose session it is. Saying yes plans
       // the same resume with the cap lifted for this one incident.
       void Promise.resolve(
@@ -506,6 +512,9 @@ export function activate(context: vscode.ExtensionContext): void {
         schedule(forced.job, s, forced.estimate);
       });
       return;
+    }
+    if (plan.budgetUnmeasured) {
+      log.info(`Resume budget: no usage record for session ${plan.job.sessionId.slice(0, 8)}; not checked.`);
     }
     schedule(plan.job, s, plan.estimate);
   };

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  BYTES_PER_TOKEN,
   estimateResumeTokens,
   checkBudget,
   IncidentBudget,
@@ -9,54 +8,38 @@ import {
   parseLastUsage,
 } from '../src/budget';
 
-test('the estimate matches the measured calibration point', () => {
-  // Spike: a cold resume of a 1,618,394-byte transcript cost 288,574
-  // cache-creation tokens. Hold the estimator to within 5% of that.
-  const measured = 288_574;
-  const estimate = estimateResumeTokens(1_618_394);
-  const drift = Math.abs(estimate - measured) / measured;
-  assert.ok(drift < 0.05, `estimate ${estimate} drifted ${(drift * 100).toFixed(1)}% from ${measured}`);
-});
-
-test('the divisor is the documented one', () => {
-  assert.equal(BYTES_PER_TOKEN, 5.6);
-  assert.equal(estimateResumeTokens(5600), 1000);
-});
-
-test('zero bytes estimates zero', () => {
-  assert.equal(estimateResumeTokens(0), 0);
-});
+const U150 = { input: 1, cacheRead: 100_000, cacheCreate: 50_000 };
 
 test('allows a resume under the cap', () => {
-  const v = checkBudget(500_000, 150_000);
+  const v = checkBudget(500_000, { input: 2, cacheRead: 24_591, cacheCreate: 40_000 });
   assert.equal(v.allowed, true);
-  assert.equal(v.estimate, estimateResumeTokens(500_000));
+  assert.equal(v.estimate, 64_593);
 });
 
 test('refuses a resume over the cap and says why', () => {
-  const v = checkBudget(1_618_394, 150_000);
+  const v = checkBudget(150_000, { input: 2, cacheRead: 24_591, cacheCreate: 407_570 });
   assert.equal(v.allowed, false);
-  assert.match(v.reason!, /288,\d{3}/);
+  assert.match(v.reason!, /432,163/);
   assert.match(v.reason!, /150,000/);
 });
 
 test('checkBudget: an estimate exactly at the cap is allowed, not rejected', () => {
-  // Issue #12 boundary: `estimate > maxResumeTokens` in checkBudget. 5600
-  // bytes estimates to exactly 1000 tokens (Math.round(5600 / 5.6) === 1000,
-  // the same figures the divisor test above uses), an exact tie with the cap.
-  const v = checkBudget(5600, 1000);
-  assert.equal(v.estimate, 1000);
+  // Issue #12 boundary: `estimate > maxResumeTokens` in checkBudget.
+  const v = checkBudget(150_001, U150);
+  assert.equal(v.estimate, 150_001);
   assert.equal(v.allowed, true, 'an estimate exactly at the cap must still be allowed');
+  assert.equal(checkBudget(150_000, U150).allowed, false, 'one over is refused');
 });
 
 test('a cap of zero disables the check', () => {
-  assert.equal(checkBudget(10_000_000, 0).allowed, true);
+  assert.equal(checkBudget(0, { input: 1, cacheRead: 10_000_000, cacheCreate: 0 }).allowed, true);
 });
 
-test('unknown size is allowed but flagged', () => {
-  const v = checkBudget(0, 150_000);
+test('a session with no usage record is unmeasured: allowed, with no estimate', () => {
+  const v = checkBudget(150_000, undefined);
   assert.equal(v.allowed, true);
-  assert.equal(v.estimate, 0);
+  assert.equal(v.estimate, undefined);
+  assert.equal(estimateResumeTokens(undefined), undefined);
 });
 
 test('incident budget accumulates and hard-stops', () => {
@@ -132,22 +115,77 @@ test('parseLastUsage reports nothing when the tail holds no usage at all', () =>
   assert.equal(parseLastUsage(''), undefined);
 });
 
-test('an estimate prefers the usage record over the byte count', () => {
-  const bytes = 11_240_205;
-  const fromBytes = estimateResumeTokens(bytes);
-  const fromUsage = estimateResumeTokens(bytes, { input: 2, cacheRead: 24_591, cacheCreate: 407_570 });
-  assert.equal(fromBytes, 2_007_179, 'the byte estimate is what it always was');
-  assert.equal(fromUsage, 432_163);
-  assert.ok(fromUsage < fromBytes / 4, 'and on a real session it is several times smaller');
+// The two shapes Claude Code really writes for its synthetic limit/overload
+// entry (grep of ~/.claude/projects: 140 of 143 are all-zero).
+const REAL_TURN = { input_tokens: 2, cache_read_input_tokens: 24_591, cache_creation_input_tokens: 407_570 };
+const REAL_TURN_RECORD = { input: 2, cacheRead: 24_591, cacheCreate: 407_570 };
+const SHORT_ZERO = { input_tokens: 0, output_tokens: 0 };
+const LONG_ZERO = {
+  output_tokens_details: null,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  service_tier: null,
+};
+const syntheticLine = (usage: Record<string, unknown>) =>
+  JSON.stringify({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { model: '<synthetic>', usage, content: [{ type: 'text', text: 'API Error: 529' }] },
+  });
+
+for (const [name, zero] of [['short', SHORT_ZERO], ['long', LONG_ZERO]] as const) {
+  test(`parseLastUsage reads the real turn behind a synthetic zero-usage error entry (${name} shape)`, () => {
+    const tail = [usageLine(REAL_TURN), syntheticLine(zero)].join('\n');
+    assert.deepEqual(parseLastUsage(tail), REAL_TURN_RECORD);
+  });
+}
+
+test('parseLastUsage reports nothing when the window holds only synthetic zero-usage entries', () => {
+  const tail = [syntheticLine(SHORT_ZERO), syntheticLine(LONG_ZERO)].join('\n');
+  assert.equal(parseLastUsage(tail), undefined);
+  assert.equal(estimateResumeTokens(parseLastUsage(tail)), undefined, 'so the session is unmeasured');
 });
 
-test('without a usage record the byte estimate still applies', () => {
-  // A session that has never had an assistant turn has nothing to read.
-  assert.equal(estimateResumeTokens(1_618_394, undefined), 288_999);
+test('parseLastUsage reaches a real turn behind a ~3 MB image-bearing entry and a synthetic error', () => {
+  const image = JSON.stringify({
+    type: 'user',
+    message: { content: [{ type: 'image', source: { type: 'base64', data: 'A'.repeat(3_000_000) } }] },
+  });
+  const tail = [usageLine(REAL_TURN), image, syntheticLine(LONG_ZERO)].join('\n');
+  assert.ok(tail.length > 3_000_000);
+  assert.deepEqual(parseLastUsage(tail), REAL_TURN_RECORD);
+});
+
+test('parseLastUsage skips an isApiErrorMessage entry even when its usage is not zero', () => {
+  const flagged = JSON.stringify({ type: 'assistant', isApiErrorMessage: true, message: { usage: { input_tokens: 9, cache_read_input_tokens: 9, cache_creation_input_tokens: 9 } } });
+  assert.deepEqual(parseLastUsage([usageLine(REAL_TURN), flagged].join('\n')), REAL_TURN_RECORD);
+});
+
+test('parseLastUsage skips a <synthetic> model entry even when its usage is not zero', () => {
+  const synthetic = JSON.stringify({ type: 'assistant', message: { model: '<synthetic>', usage: { input_tokens: 9, cache_read_input_tokens: 9, cache_creation_input_tokens: 9 } } });
+  assert.deepEqual(parseLastUsage([usageLine(REAL_TURN), synthetic].join('\n')), REAL_TURN_RECORD);
+});
+
+test('parseLastUsage still reads a real turn that carries neither flag', () => {
+  const real = JSON.stringify({ type: 'assistant', isApiErrorMessage: false, message: { model: 'claude-opus-4', usage: REAL_TURN } });
+  assert.deepEqual(parseLastUsage(real), REAL_TURN_RECORD);
+});
+
+test('parseLastUsage skips an unflagged entry whose counted usage sums to zero', () => {
+  const zero = usageLine({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 });
+  assert.deepEqual(parseLastUsage([usageLine(REAL_TURN), zero].join('\n')), REAL_TURN_RECORD);
+  assert.equal(parseLastUsage(zero), undefined);
+});
+
+test('an estimate is the live context of the usage record', () => {
+  assert.equal(estimateResumeTokens({ input: 2, cacheRead: 24_591, cacheCreate: 407_570 }), 432_163);
 });
 
 test('checkBudget judges the usage-based estimate when there is one', () => {
-  const verdict = checkBudget(11_240_205, 500_000, { input: 2, cacheRead: 24_591, cacheCreate: 407_570 });
-  assert.equal(verdict.allowed, true, 'a session the byte count would have refused');
+  const verdict = checkBudget(500_000, { input: 2, cacheRead: 24_591, cacheCreate: 407_570 });
+  assert.equal(verdict.allowed, true, 'a session a byte count would have refused');
   assert.equal(verdict.estimate, 432_163);
 });

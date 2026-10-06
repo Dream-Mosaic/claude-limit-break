@@ -9,6 +9,7 @@ const NOW = new Date('2026-08-03T12:00:00Z');
 const settings = (over: Record<string, unknown> = {}) =>
   readSettings({ get: <T>(k: string, f: T) => (k in over ? (over[k] as T) : f) });
 const small = () => 100_000;
+const BIG = () => ({ input: 1, cacheRead: 5_000_000, cacheCreate: 0 });
 const noJitter = () => 0;
 
 const hit = (resumeAt: Date, file = FILE) => ({
@@ -40,7 +41,7 @@ test('a transcript that is not a session is ignored, not guessed at', () => {
 });
 
 test('a session too expensive to resume is refused with the numbers', () => {
-  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter, BIG);
   assert.equal(p.kind, 'refuse');
   assert.match(p.reason, /token/i);
 });
@@ -48,7 +49,7 @@ test('a session too expensive to resume is refused with the numbers', () => {
 test('a refusal names the session and folder it refused, so a dismissal can be recorded against them', () => {
   // Task 4b: a dismissed refusal puts that session into the gave-up state,
   // which is per session - the refusal has to say which one.
-  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter);
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter, BIG);
   assert.equal(p.kind, 'refuse');
   if (p.kind !== 'refuse') return;
   assert.equal(p.sessionId, ID);
@@ -58,7 +59,7 @@ test('a refusal names the session and folder it refused, so a dismissal can be r
 test('the budget check can be disabled', () => {
   const p = planResume(
     hit(new Date('2026-08-03T17:00:00Z')), 'limit',
-    settings({ maxResumeTokens: 0 }), () => 5_000_000, NOW, noJitter,
+    settings({ maxResumeTokens: 0 }), small, NOW, noJitter, BIG,
   );
   assert.equal(p.kind, 'schedule');
 });
@@ -80,7 +81,7 @@ test('an overload has no stated time and retries after jitter alone', () => {
 });
 
 test('the estimate is reported so it can be surfaced before resuming', () => {
-  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 560_000, NOW, noJitter);
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter, () => ({ input: 2, cacheRead: 40_000, cacheCreate: 59_998 }));
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
   assert.equal(p.estimate, 100_000);
@@ -220,4 +221,19 @@ test('an ordinary detection leaves offerOnly off the job, so a persisted job sta
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
   assert.equal(Object.hasOwn(p.job, 'offerOnly'), false);
+});
+
+test('a session with no usage record is unmeasured: scheduled, flagged, with no estimate', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 5_000_000, NOW, noJitter, () => undefined);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.estimate, undefined);
+  assert.equal(p.budgetUnmeasured, true);
+});
+
+test('with the cap off, an unmeasured session is not flagged', () => {
+  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings({ maxResumeTokens: 0 }), small, NOW, noJitter, () => undefined);
+  assert.equal(p.kind, 'schedule');
+  if (p.kind !== 'schedule') return;
+  assert.equal(p.budgetUnmeasured, undefined);
 });

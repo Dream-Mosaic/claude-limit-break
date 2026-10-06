@@ -4,7 +4,7 @@ import type { Settings } from './config';
 import type { PendingJob } from './scheduler';
 
 export type Plan =
-  | { kind: 'schedule'; job: PendingJob; estimate: number }
+  | { kind: 'schedule'; job: PendingJob; estimate?: number; budgetUnmeasured?: true }
   // The session is named so a dismissed refusal can be recorded against it
   // (the gave-up state, gaveUp.ts, is per session).
   | { kind: 'refuse'; reason: string; sessionId: string; cwd?: string }
@@ -24,8 +24,8 @@ export function planResume(
   jitter: (min: number, max: number) => number,
   /**
    * The newest usage record in the transcript, when one can be read. It says
-   * what the live context actually is; the byte count only says how much has
-   * ever been written to the file. See estimateResumeTokens.
+   * what the live context actually is. None means unmeasured, which the budget
+   * allows. See estimateResumeTokens.
    */
   readUsage?: (transcript: string) => UsageRecord | undefined,
   /**
@@ -46,7 +46,7 @@ export function planResume(
     // cannot name is how one project's prompt lands in another project.
     return { kind: 'ignore', reason: `Not a session transcript: ${hit.file}` };
   }
-  const verdict = checkBudget(session.bytes, settings.maxResumeTokens, readUsage?.(session.transcript));
+  const verdict = checkBudget(settings.maxResumeTokens, readUsage?.(session.transcript));
   if (!verdict.allowed) {
     return {
       kind: 'refuse',
@@ -62,7 +62,9 @@ export function planResume(
   const jitterMs = jitter(settings.randomDelayMinMinutes, settings.randomDelayMaxMinutes);
   return {
     kind: 'schedule',
-    estimate: verdict.estimate,
+    ...(verdict.estimate !== undefined ? { estimate: verdict.estimate } : {}),
+    // Only worth a log line when a cap was in force and could not be applied.
+    ...(verdict.estimate === undefined && settings.maxResumeTokens > 0 ? { budgetUnmeasured: true as const } : {}),
     job: {
       sessionId: session.sessionId,
       transcript: session.transcript,
