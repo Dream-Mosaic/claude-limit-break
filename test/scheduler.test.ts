@@ -518,3 +518,48 @@ test('F1: a different reset (bases further apart than the grace) is not an upgra
   assert.equal(s.current!.baseResumeAtMs, sooner);
   assert.equal(upgraded.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Wave D fix round 2, N1: every same-reset re-detection - the upgrade and the
+// offer-only no-op included - adopts the limit type onto an untyped job (A9)
+// and moves the stop baseline to the newest detection (wave A, C1).
+// ---------------------------------------------------------------------------
+
+test('F2: an upgrade adopts the type and the newer baseline, and persists both', (t) => {
+  const saved = new Map<string, string>();
+  const store: MementoLike = {
+    get: <T>(k: string) => (saved.has(k) ? (JSON.parse(saved.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      saved.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(store, silent);
+  t.after(() => s.dispose());
+  const base = Date.now() + 20 * 3_600_000;
+  s.schedule({ ...offerJob(base, base + 10 * 60_000), transcriptBytesAtDetection: 500 });
+  s.schedule({ ...jobWithBase(SESSION_A, base - 1000, base + 2 * 60_000), rateLimitType: 'seven_day', transcriptBytesAtDetection: 900 });
+  const stored = store.get<PendingJob[]>('claudeLimitBreak.pending')![0]!;
+  assert.equal(stored.offerOnly, undefined, 'upgraded');
+  assert.equal(stored.rateLimitType, 'seven_day');
+  assert.equal(stored.transcriptBytesAtDetection, 900);
+  assert.equal(stored.resumeAtMs, base + 10 * 60_000, 'the fire time is still the first one');
+});
+
+test('F2: an offer-only no-op still adopts the type and the newer baseline', (t) => {
+  const { s } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  s.schedule({ ...offerJob(base, base), transcriptBytesAtDetection: 500 });
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day', transcriptBytesAtDetection: 900 });
+  assert.equal(s.current!.offerOnly, true);
+  assert.equal(s.current!.rateLimitType, 'seven_day');
+  assert.equal(s.current!.transcriptBytesAtDetection, 900);
+});
+
+test('F2: a type already known is never overwritten by a re-detection', (t) => {
+  const { s } = upgrading(t);
+  const base = Date.now() + 3 * 86_400_000;
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day_opus' });
+  s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day' });
+  assert.equal(s.current!.rateLimitType, 'seven_day_opus');
+});

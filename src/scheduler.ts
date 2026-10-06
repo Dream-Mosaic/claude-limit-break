@@ -274,6 +274,15 @@ export class ResumeScheduler {
         existing.reason === 'limit' &&
         job.reason === 'limit' &&
         Math.abs(existing.baseResumeAtMs - job.baseResumeAtMs) <= RESET_GRACE_MS;
+      // Wave D fix round 2 (N1): each of the three offer-only branches below
+      // returns, so each first takes the newer evidence the re-detection
+      // carries, as the plain same-reset drop further down always has. Only
+      // there: two automatic jobs keep that drop's own exact-base rule, which
+      // is what tells a different reset minutes apart from a re-read.
+      const touchesOffer = sameLimitReset && (existing.offerOnly === true || job.offerOnly === true);
+      if (touchesOffer) {
+        this.adoptReDetection(existing, job);
+      }
       if (sameLimitReset && existing.offerOnly && !job.offerOnly) {
         delete existing.offerOnly;
         this.persist();
@@ -298,34 +307,8 @@ export class ResumeScheduler {
       }
       const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
       if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
-        // Final fix wave A, A9: the dropped re-detection may know which limit
-        // this is when the first detection did not (a text-only notice, then
-        // the flagged entry's quotaLimits). decideOnFire reads the type, so
-        // the job adopts it - only onto a job with none, only for the same
-        // reset, and never its schedule or deadline.
-        if (sameReset && existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
-          existing.rateLimitType = job.rateLimitType;
-          this.persist();
-          this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
-        }
-        // Wave A fix round 1 (review C1): the same for where the stop is. A
-        // retry that ran into the same reset again is newer evidence of the
-        // live stop, and the continued-since check (continuedSince.ts) must
-        // measure from it, not from the first detection.
-        if (
-          sameReset &&
-          job.transcriptBytesAtDetection !== undefined &&
-          job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection
-        ) {
-          const before = existing.transcriptBytesAtDetection;
-          existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
-          this.persist();
-          // Logged like A9's adoption above (wave B, B8, re-review m-new-2): a
-          // later "has continued since it stopped" skip is measured from here.
-          this.log.info(
-            `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
-              `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
-          );
+        if (sameReset) {
+          this.adoptReDetection(existing, job);
         }
         this.log.info(
           sameReset
@@ -350,6 +333,39 @@ export class ResumeScheduler {
     this.startTicking();
     this.onChangeEmitter.fire(this.current);
     return true;
+  }
+
+  /**
+   * What a dropped re-detection of the same reset still contributes to the
+   * job already pending, never its schedule or deadline. Called by every
+   * same-reset branch of schedule() (wave D fix round 2, N1).
+   *
+   * - Final fix wave A, A9: it may know which limit this is when the first
+   *   detection did not (a text-only notice, then the flagged entry's
+   *   quotaLimits). decideOnFire reads the type, so the job adopts it - only
+   *   onto a job with none.
+   * - Wave A fix round 1 (review C1): where the stop is. A retry that ran
+   *   into the same reset again is newer evidence of the live stop, and the
+   *   continued-since check (continuedSince.ts) must measure from it, not
+   *   from the first detection. Logged like A9's adoption (wave B, B8,
+   *   re-review m-new-2): a later "has continued since it stopped" skip is
+   *   measured from here.
+   */
+  private adoptReDetection(existing: PendingJob, job: PendingJob): void {
+    if (existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
+      existing.rateLimitType = job.rateLimitType;
+      this.persist();
+      this.log.info(`Re-detection names the limit for ${job.sessionId} as ${job.rateLimitType}; noted on the pending resume.`);
+    }
+    if (job.transcriptBytesAtDetection !== undefined && job.transcriptBytesAtDetection !== existing.transcriptBytesAtDetection) {
+      const before = existing.transcriptBytesAtDetection;
+      existing.transcriptBytesAtDetection = job.transcriptBytesAtDetection;
+      this.persist();
+      this.log.info(
+        `Re-detection moves where the stop is for ${job.sessionId} to byte ${job.transcriptBytesAtDetection} ` +
+          `(was ${before ?? 'unknown'}); the detection baseline on the pending resume is refreshed.`,
+      );
+    }
   }
 
   /** Cancel one session's pending resume, or every one when no session is named. */
