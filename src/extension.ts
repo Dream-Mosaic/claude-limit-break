@@ -314,11 +314,7 @@ export function activate(context: vscode.ExtensionContext): void {
       releaseClaim(claimsDir(), freshKey, fs, log);
       log.info(`Released this window's own claim on ${freshKey} so the fresh plan can fire.`);
     }
-    if (folderTrusted === false) {
-      log.warn(
-        `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
-      );
-    }
+    warnIfUntrusted(job);
     if (job.offerOnly) {
       // Wave D, D3: "resuming at" would be a lie for a job that only ever
       // offers. Its own notice replaces it.
@@ -327,25 +323,41 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
-      const trustNote =
-        folderTrusted === false
-          ? ' This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt unless you trust it first.'
-          : '';
-      const message = `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).${trustNote}`;
-      if (folderTrusted === false) {
-        // A one-click way to answer the trust dialog ahead of the resume,
-        // right when the user is at the keyboard to see this notice (Task
-        // 5a). The button only ever opens a terminal - see
-        // openClaudeToTrust below - never answers the dialog itself (#2).
-        void Promise.resolve(vscode.window.showInformationMessage(message, TRUST_BUTTON)).then((choice) => {
-          if (choice === TRUST_BUTTON) {
-            void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
-          }
-        });
-      } else {
-        void vscode.window.showInformationMessage(message);
-      }
+      showResumeNotice(job, `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).`);
     }
+  };
+
+  /** The log line for a job whose folder the Claude CLI has not trusted (#5). */
+  const warnIfUntrusted = (job: PendingJob): void => {
+    if (job.folderTrusted === false) {
+      log.warn(
+        `Folder ${job.cwd} is not trusted by the Claude CLI; the resume will stall at its trust prompt unless you trust it first.`,
+      );
+    }
+  };
+
+  /**
+   * Show a notice about a resume that will run unattended - a fresh schedule,
+   * or an offer-only job made automatic (wave D fix round 2, N2). When its
+   * folder is not trusted by the Claude CLI the notice says so and offers
+   * "Open Claude to Trust": a one-click way to answer the trust dialog ahead
+   * of the resume, right when the user is at the keyboard to see this notice
+   * (Task 5a). The button only ever opens a terminal - see openClaudeToTrust
+   * below - never answers the dialog itself (#2).
+   */
+  const showResumeNotice = (job: PendingJob, message: string): void => {
+    if (job.folderTrusted !== false) {
+      void vscode.window.showInformationMessage(message);
+      return;
+    }
+    const withNote =
+      `${message} This folder is not trusted by the Claude CLI yet; the resume will stall at its trust prompt ` +
+      'unless you trust it first.';
+    void Promise.resolve(vscode.window.showInformationMessage(withNote, TRUST_BUTTON)).then((choice) => {
+      if (choice === TRUST_BUTTON) {
+        void vscode.commands.executeCommand(`${NS}.openClaudeToTrust`, job.cwd);
+      }
+    });
   };
 
   /**
@@ -382,7 +394,10 @@ export function activate(context: vscode.ExtensionContext): void {
       `Limit Break: session ${job.sessionId.slice(0, 8)} hit its ${limitLabel(job)} limit again. ` +
       `It resets within ${s.maxWaitHours} hours, so it will now resume automatically at ` +
       `${new Date(job.resumeAtMs).toLocaleTimeString()}.`;
-    announceOnce(job, s, 'upgrade-notice', message, 'upgrade');
+    // N2: it now resumes unattended, so an untrusted folder is called out
+    // exactly as a fresh schedule's notice calls it out.
+    warnIfUntrusted(job);
+    announceOnce(job, s, 'upgrade-notice', message, 'upgrade', () => showResumeNotice(job, message));
   };
 
   /**
@@ -390,7 +405,14 @@ export function activate(context: vscode.ExtensionContext): void {
    * already has: the claim on the job's fire key plus `-<suffix>` (never the
    * fire's own claim), held to the fire claim's own deadline.
    */
-  const announceOnce = (job: PendingJob, s: Settings, suffix: string, message: string, what: string): void => {
+  const announceOnce = (
+    job: PendingJob,
+    s: Settings,
+    suffix: string,
+    message: string,
+    what: string,
+    show: () => void = () => void vscode.window.showInformationMessage(message),
+  ): void => {
     log.info(message);
     if (!s.notify) {
       return;
@@ -401,7 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(`The ${what} notice for ${job.sessionId.slice(0, 8)} was already shown by another window; not repeating it.`);
       return;
     }
-    void vscode.window.showInformationMessage(message);
+    show();
   };
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {

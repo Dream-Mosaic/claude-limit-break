@@ -5748,3 +5748,51 @@ test('F1 (Minor 1): "an Opus limit", and an inherited property name is no label 
     teardown(ctx);
   }
 });
+
+// Wave D fix round 2, N2: an upgraded job now resumes unattended, so an
+// untrusted folder gets the same trust note and button a fresh schedule does.
+test('F2: an upgrade in an untrusted folder carries the trust note and the "Open Claude to Trust" button', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  trustedCwds = new Set();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    const notice = vscodeFake.info.find((m) => m.message.includes('limit again.'));
+    assert.ok(notice, `no upgrade notice; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
+    assert.ok(notice.message.startsWith(upgradeNotice('weekly', resetsAt.getTime())));
+    assert.match(notice.message, /not trusted by the Claude CLI yet/);
+    assert.deepEqual(notice.items, [TRUST_BUTTON]);
+    notice.answer(TRUST_BUTTON);
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 1, 'the button opens the trust terminal');
+    assert.equal(trustTerminalOptions()?.cwd, REAL_CWD);
+  } finally {
+    trustedCwds = 'all';
+    teardown(ctx);
+  }
+});
+
+test('F2: an upgrade in a trusted folder has no trust note and no button', () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  fakeClaimResult = 'claimed';
+  claimResultQueue.length = 0;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    const resetsAt = new Date(Date.now() + 20 * 3_600_000);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day', true);
+    FakeWatcher.latest!.limitFor(SESSION, resetsAt, REAL_CWD, undefined, 'seven_day');
+    const notice = vscodeFake.info.find((m) => m.message.includes('limit again.'));
+    assert.equal(notice?.message, upgradeNotice('weekly', resetsAt.getTime()));
+    assert.deepEqual(notice?.items, []);
+  } finally {
+    teardown(ctx);
+  }
+});
