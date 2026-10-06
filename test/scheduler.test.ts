@@ -467,7 +467,16 @@ test('F1: with default jitter the upgrade is deterministic, whichever way the ro
 });
 
 test('F1: the upgrade is persisted', (t) => {
-  const store = memento();
+  // Serialised on write, as globalState is: a store holding the live job
+  // objects would show the upgrade whether or not it was ever written.
+  const saved = new Map<string, string>();
+  const store: MementoLike = {
+    get: <T>(k: string) => (saved.has(k) ? (JSON.parse(saved.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      saved.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
   const s = new ResumeScheduler(store, silent);
   t.after(() => s.dispose());
   const base = Date.now() + 20 * 3_600_000;
