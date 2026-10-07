@@ -475,11 +475,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (plan.kind === 'refuse') {
       log.warn(plan.reason);
-      // Offered, not just announced. The estimate can be several times too
-      // high on a long session - the live context can include history
-      // that is cheap to re-read - and refusing outright takes the
-      // decision away from the person whose session it is. Saying yes plans
-      // the same resume with the cap lifted for this one incident.
+      // Offered, not just announced. A limit wait always leaves the cache
+      // cold, so a big session is expensive to resume - but whether that is
+      // worth it is the call of the person whose session it is, and refusing
+      // outright takes it away from them. Saying yes plans the same resume
+      // with the cap lifted for this one incident.
       void Promise.resolve(
         vscode.window.showWarningMessage(budgetRefusalNotice(plan.sessionId, plan.reason), 'Resume anyway'),
       ).then((choice) => {

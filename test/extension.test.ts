@@ -4976,6 +4976,7 @@ test('the budget "Resume anyway" override keeps the overload backoff (A6)', asyn
     await flush();
     const refusal = vscodeFake.warningOffers.find((w) => w.items.includes('Resume anyway'));
     assert.ok(refusal, 'setup: the second retry is refused on budget');
+    assert.match(refusal.message, /432,163/, 'the refusal measures the real turn, not the zero-usage entry');
     refusal.answer('Resume anyway');
     await flush();
     assertBackoff({ job: pendingIn(store)[0], before, after: Date.now() }, 15, [5, 30], 'the override');

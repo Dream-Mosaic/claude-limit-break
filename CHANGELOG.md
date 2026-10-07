@@ -116,8 +116,8 @@ The first release.
   exceeds `claudeLimitBreak.maxResumeTokens`, which defaults to 500,000. The
   estimate reads the transcript's newest real `usage` record - the live context
   a cold resume actually has to rebuild. A session with no real usage record is
-  unmeasured and is not refused (the output channel logs it). A limit wait guarantees a cold cache, so a resume reprocesses
-  the whole session.
+  unmeasured and is not refused (the output channel logs it). A limit wait
+  guarantees a cold cache, so a resume reprocesses the whole session.
 - Keeps a separate countdown for every session that hits a limit. The limit
   belongs to the account, so the sessions working when it lands hit it
   together, and each of them is resumed.

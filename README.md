@@ -295,7 +295,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | `headlessPermissionMode` | `""` | Permission mode for headless resumes. Empty denies tool calls; headless does not inherit the session's own mode. |
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
 | `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | Passed as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
-| `maxResumeTokens` | `500000` | Refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. `0` never refuses. |
+| `maxResumeTokens` | `500000` | Refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. A session with no usage record is not checked. `0` never refuses. |
 | `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
 | `transcriptPollSeconds` | `5` | Polling backstop, for when file watching is unreliable. |
 | `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |

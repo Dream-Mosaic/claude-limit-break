@@ -176,6 +176,11 @@ synchronous `claude agents` call has moved to 1.1 below.
 
 Planned for the release after 1.0.
 
+- **Read `usage.iterations[]` when the top-level usage sums to 0.** Some
+  2.1.25x-2.1.27x turns at compaction boundaries report 0 at the top level but
+  carry real numbers in `cache_creation.ephemeral_1h_input_tokens` and
+  `usage.iterations[]`. parseLastUsage skips them, so the budget measures one
+  turn earlier (an overestimate, never a silent pass).
 - **Act on the armed and fired auto-continue lines.** 1.0 only logs Claude
   Code's own armed, cancelled and fired status lines and uses the cancel lines
   to stand down (wave C). A confirmed armed line in the transcript is a better

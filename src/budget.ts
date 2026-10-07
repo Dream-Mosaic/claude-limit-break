@@ -57,6 +57,9 @@ export function parseLastUsage(tail: string): UsageRecord | undefined {
       cacheRead: num(usage.cache_read_input_tokens),
       cacheCreate: num(usage.cache_creation_input_tokens),
     };
+    // Some 2.1.25x-2.1.27x turns at compaction boundaries report 0 here but carry
+    // real numbers in cache_creation.ephemeral_1h_input_tokens / usage.iterations[].
+    // They are skipped, so the result is the turn before: an overestimate, never a silent pass.
     if (contextTokens(record) <= 0) {
       continue;
     }
