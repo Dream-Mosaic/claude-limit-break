@@ -113,7 +113,8 @@ The first release.
 - Resolves the session from the transcript that produced the detection, so a
   resume can never pair one project's session with another project's prompt.
 - Estimates the token cost of a resume before scheduling it and refuses when it
-  exceeds `claudeLimitBreak.maxResumeTokens`, which defaults to 500,000. The
+  exceeds `claudeLimitBreak.maxResumeTokens`. The cap is off by default (`0`);
+  500,000 is a reasonable starting point. The
   estimate reads the transcript's newest real `usage` record - the live context
   a cold resume actually has to rebuild. A session with no real usage record is
   unmeasured and is not refused (the output channel logs it). A limit wait

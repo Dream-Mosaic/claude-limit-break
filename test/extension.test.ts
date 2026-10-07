@@ -2198,6 +2198,35 @@ test('the budget finds the last real turn behind a ~3 MB image entry and the lim
   }
 });
 
+test('with default settings an over-500k session ending in a flagged limit resumes; capped at 500000 it is refused', async () => {
+  const run = async (config: Record<string, unknown>) => {
+    resetVscodeFake();
+    const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+    const [real, limit] = OVER_BUDGET_CONTENT.trimEnd().split('\n');
+    const big = real!.replace('407570', '507570');
+    fs.writeFileSync(transcript, [big, limit].join('\n') + '\n');
+    vscodeFake.config = { ...autoConfig(), ...config };
+    const ctx = contextOver(new Map());
+    start(ctx);
+    try {
+      FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+      await oneTick();
+      return {
+        refused: vscodeFake.warningOffers.some((w) => w.message.includes('estimated')),
+        terminals: vscodeFake.terminals.length,
+        logged: vscodeFake.outputLines.some((l) => l.includes('Resume budget:')),
+      };
+    } finally {
+      teardown(ctx);
+      fs.rmSync(transcript, { force: true });
+    }
+  };
+  assert.deepEqual(await run({}), { refused: false, terminals: 1, logged: false }, 'default: no cap, no log line');
+  const capped = await run({ maxResumeTokens: 500_000 });
+  assert.equal(capped.refused, true);
+  assert.equal(capped.terminals, 0);
+});
+
 test('a session under the cap still resumes when the last line is a zero-usage limit entry', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);

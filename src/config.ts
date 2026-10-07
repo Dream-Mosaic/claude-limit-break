@@ -49,7 +49,7 @@ export function readSettings(c: ConfigSource): Settings {
       c.get('resumePrompt', '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.'),
       '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.',
     ),
-    maxResumeTokens: atLeast(c.get('maxResumeTokens', 500_000), 0, 500_000),
+    maxResumeTokens: atLeast(c.get('maxResumeTokens', 0), 0, 0),
     maxWaitHours: atLeast(c.get('maxWaitHours', 24), 1, 24),
     transcriptPollSeconds: atLeast(c.get('transcriptPollSeconds', 5), 1, 5),
     randomDelayMinMinutes: atLeast(c.get('randomDelayMinMinutes', 5), 0, 5),

@@ -71,7 +71,7 @@ suite('claude-limit-break activation', () => {
       config.get('resumePrompt'),
       '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.',
     );
-    assert.equal(config.get('maxResumeTokens'), 500000);
+    assert.equal(config.get('maxResumeTokens'), 0);
     assert.equal(config.get('maxWaitHours'), 24);
     // Added for 1.0. Each is a default someone would notice if it drifted:
     // the marker is the only sign the extension loaded, the scope decides

@@ -241,8 +241,10 @@ Recovery competes with the quota it is recovering. A usage-limit wait guarantees
 a cold prompt cache, so resuming a large session reprocesses its whole history —
 a measured resume of a 1.6 MB session cost 288,574 cache-creation tokens.
 
-Spend is estimated before resuming and capped, rather than retrying a fixed
-number of times with no idea what each attempt costs. The estimate reads the
+The cap is off by default (`claudeLimitBreak.maxResumeTokens` is `0`). If you
+want one, `500000` is a reasonable starting point. With a cap set, spend is
+estimated before resuming, rather than retrying a fixed number of times with no
+idea what each attempt costs. The estimate reads the
 transcript's newest `usage` record — the live context a cold resume has to
 rebuild. A limit's own error entry carries no usage and is skipped, so it
 is the last real turn that counts. A session with no real turn at all is
@@ -295,7 +297,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | `headlessPermissionMode` | `""` | Permission mode for headless resumes. Empty denies tool calls; headless does not inherit the session's own mode. |
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
 | `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | Passed as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
-| `maxResumeTokens` | `500000` | Refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. A session with no usage record is not checked. `0` never refuses. |
+| `maxResumeTokens` | `0` | Off by default. When set, refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. A session with no usage record is not checked. `0` never refuses; `500000` is a reasonable starting point. |
 | `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
 | `transcriptPollSeconds` | `5` | Polling backstop, for when file watching is unreliable. |
 | `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |
