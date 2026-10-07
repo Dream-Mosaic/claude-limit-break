@@ -1304,7 +1304,7 @@ test('with two limits in one batch the FIRST still decides (unchanged by the sta
   }
 });
 
-test('the /rate-limit-options "Don\'t continue automatically" user entry and the log-only lines are reported too (derived from the 2.1.285 binary)', () => {
+test('the /rate-limit-options "Don\'t continue automatically" user entry and the log-only lines are reported too (binary-derived strings)', () => {
   const wait = 'Automatic continue cancelled. Your session will wait for you instead; /rate-limit-options can arm it again.';
   const userEntry = entry({
     type: 'user',
@@ -1584,7 +1584,7 @@ test('a dated weekly limit with no zone arms nothing and warns that the zone is 
   assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
 });
 
-test('the real v2.1.220 line, met today in a fork, is history: not picked up, one warning', () => {
+test('a real dated-reset line met today in a fork is history: not picked up, one warning', () => {
   // Real line, less the usage block.
   const real = JSON.stringify({
     type: 'assistant',

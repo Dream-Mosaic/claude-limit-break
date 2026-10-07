@@ -548,7 +548,7 @@ const dated = (text: string, basis: string, maxWait = MAXW, readAt = basis) =>
   classifyLimit(text, new Date(basis), maxWait, { trusted: true, readAt: new Date(readAt) });
 const atOf = (v: ReturnType<typeof dated>) => (v?.kind === 'detected' ? v.detection.resumeAt.toISOString() : JSON.stringify(v));
 
-test('the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offer-only weekly limit at 1am CDT', () => {
+test('a real dated-reset sample with no quotaLimits is an offer-only weekly limit at 1am CDT', () => {
   const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10.016Z');
   assert.equal(v?.kind, 'detected');
   if (v?.kind !== 'detected') return;
@@ -558,7 +558,7 @@ test('the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offer-on
   assert.equal(v.detection.rule, 'dated-reset');
 });
 
-test('the real v2.1.270 sample agrees with its own quotaLimits.resetsAt to the second', () => {
+test('a real sample\'s text reset agrees with its own quotaLimits.resetsAt to the second', () => {
   // The same entry carries quotaLimits.resetsAt 1790661600: an independent oracle for the parse.
   const v = dated("You've hit your weekly limit · resets Sep 29, 1am (America/Chicago)", '2026-09-25T01:33:11.483Z');
   assert.equal(atOf(v), new Date(1790661600 * 1000).toISOString());

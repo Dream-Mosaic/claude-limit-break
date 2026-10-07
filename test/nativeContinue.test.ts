@@ -72,7 +72,7 @@ test('the real cancel line is recognised as cancelled, whatever its reason', () 
   }
 });
 
-test('the other auto-continue lines are recognised as other, to be logged (derived from the 2.1.285 binary)', () => {
+test('the other auto-continue lines are recognised as other, to be logged (binary-derived strings)', () => {
   for (const text of [
     'Usage limit available again · continuing now',
     'Usage limit has reset · press enter to continue',

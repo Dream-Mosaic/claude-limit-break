@@ -215,7 +215,7 @@ test('local slash-command entries after a limit are not a continuation', () => {
 // fragment. A real prompt can be that long (pasted images); a synthetic error entry
 // never is. More than the cap of growth since the stop with nothing parseable in the
 // window is a session that moved on.
-test('a 2.1 MB real user line as the last line counts as continued', () => {
+test('a real user line longer than the read window as the last line counts as continued', () => {
   const { file, baseline } = transcriptAtDetection();
   const huge = line({
     type: 'user',

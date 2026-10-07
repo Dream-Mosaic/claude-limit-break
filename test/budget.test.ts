@@ -141,7 +141,7 @@ test('parseLastUsage reports nothing when the window holds only synthetic zero-u
   assert.equal(estimateResumeTokens(parseLastUsage(tail)), undefined, 'so the session is unmeasured');
 });
 
-test('parseLastUsage reaches a real turn behind a ~3 MB image-bearing entry and a synthetic error', () => {
+test('parseLastUsage reaches a real turn behind a very large image-bearing entry and a synthetic error', () => {
   const image = JSON.stringify({
     type: 'user',
     message: { content: [{ type: 'image', source: { type: 'base64', data: 'A'.repeat(3_000_000) } }] },
