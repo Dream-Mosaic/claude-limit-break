@@ -293,9 +293,11 @@ Planned for the release after 1.0.
   reset time, so nothing is armed for it today (the same bucket's "You've hit
   your Fable limit · resets ..." form is). Needs a policy for a limit that
   gives no time to wait for.
-- **A folder picker for "Open Claude to Trust".** The command is hidden from
-  the palette because it needs a folder argument (it logs and ignores a call
-  without one); a picker would let it run from there.
+- **Make "Open Claude to Trust" a nag.** The command is hidden from the
+  palette because it needs a folder argument (it logs and ignores a call
+  without one), so a dismissed untrusted-folder notice leaves nothing to act
+  on until the next one. Keep reminding while a pending session's folder is
+  untrusted (status bar or a repeat notice), rather than adding a picker.
 - **A Limit Break sidebar.** An activity-bar view container with a view
   listing pending, ready and gave-up sessions — the tooltip's
   `buildSessionLines` model already has the data shape for this
@@ -309,6 +311,42 @@ Planned for the release after 1.0.
   that ruling: legibility at 24px with ~2px margin — consider a gauge-only
   crop if the full mark reads too busy that small; a redraw is a one-file
   cost either way.
+
+### Revisit from the 1.0 sign-off
+
+Behaviours 1.0 ships as they are, to be looked at again.
+
+- **Resume an idle terminal automatically.** An idle Claude Code terminal
+  holding the session gets "Resume in Terminal Anyway", never an automatic
+  resume, for an overload, a non-five-hour limit, or a five-hour limit with
+  Claude Code's auto-continue off; a second `claude --resume` would be a second
+  writer. Goes with terminal reuse above. Until then, the five-hour-or-untyped
+  stand-down (and its check about a minute after the fire) stays as it is.
+- **A waiting holder is dropped silently.** At fire time a busy or waiting
+  holder is only logged. Busy is right: a turn is running, so the session is
+  moving. Waiting means it is paused on a permission prompt or a question and
+  needs the user: show "session X is waiting for your input; the limit has
+  reset", with no resume.
+- **A window that decides not to resume keeps its claim.** Other windows skip
+  that reset for up to the reset plus the longest random delay plus 10 minutes.
+  Revisit whether that hold is right.
+- **Overload claim keys.** Session ID plus the error entry's timestamp. Revisit
+  and refine.
+- **Cancel in one window cancels in all.** Revisit.
+- **The overload count is in memory, per window.** A reload or a window opened
+  mid-streak restarts the 5-step backoff. Consider persisting it per session in
+  shared state.
+- **Checks on restored jobs.** A malformed saved job is dropped and a UUID
+  failure at launch is only logged; consider a notice for both.
+- **An unmeasured session skips the budget.** With `maxResumeTokens` on, a
+  session with no real turn in its last 8 MB is resumed unchecked.
+- **The 15-minute "same reset" window for automatic jobs.** Today only
+  offered jobs match within 15 minutes; two automatic jobs need an exact match.
+  Widening it means updating the tests that treat resets 10 minutes apart as
+  different.
+- **Gave-up handling.** The marker clears on the session's next finished turn
+  or from "Dismiss gave-up notices"; a turn that did not fix the cause clears it
+  too. Revisit.
 
 ### Unit-test refactor
 
