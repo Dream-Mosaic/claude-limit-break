@@ -6,11 +6,9 @@ import * as path from 'node:path';
 import { classifyNativeStatus, standDownReason, lastNativeCancel, STAND_DOWN_LABEL } from '../src/nativeContinue';
 
 /**
- * Wave C, C4 and C5: Claude Code's native auto-continue status lines. ARMED
- * and EXITED are real, byte-exact (fd493448 lines 29 and 31, 2026-09-23,
- * v2.1.278). Every other string here is DERIVED from the 2.1.285 binary
- * (research-autocontinue-compaction.md), not observed in a real transcript;
- * the test names say so where it matters.
+ * Claude Code's native auto-continue status lines. ARMED and EXITED are real,
+ * byte-exact; every other string here is DERIVED from the binary, not observed in a
+ * real transcript. The test names say so where it matters.
  */
 
 const ARMED = 'Usage limit reached · continuing automatically at 11:10am · esc or type to cancel';
@@ -57,7 +55,7 @@ const info = (content: unknown, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-// --- C4: recognition by type, subtype and prefix -----------------------------
+// --- recognition by type, subtype and prefix -----------------------------
 
 test('the real armed line is recognised as armed', () => {
   assert.deepEqual(classifyNativeStatus(info(ARMED)), { kind: 'armed', text: ARMED });
@@ -74,7 +72,7 @@ test('the real cancel line is recognised as cancelled, whatever its reason', () 
   }
 });
 
-test('the other auto-continue lines are recognised as other, to be logged (derived from the 2.1.285 binary)', () => {
+test('the other auto-continue lines are recognised as other, to be logged (binary-derived strings)', () => {
   for (const text of [
     'Usage limit available again · continuing now',
     'Usage limit has reset · press enter to continue',
@@ -144,7 +142,7 @@ test('other informational lines and non-objects are not auto-continue status', (
   assert.equal(classifyNativeStatus([info(ARMED)]), undefined);
 });
 
-// --- C5: which cancel reasons stand the extension down -----------------------
+// --- which cancel reasons stand the extension down -----------------------
 
 test('Desktop, cloud, background and the two Esc wordings each map to their reason', () => {
   assert.equal(standDownReason(DESKTOP), 'desktop');

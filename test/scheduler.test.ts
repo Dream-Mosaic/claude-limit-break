@@ -48,9 +48,9 @@ test('a later deadline never replaces an earlier one still counting down', (t) =
 });
 
 test('an identical deadline for the same session is accepted, not ignored', (t) => {
-  // Issue #12 boundary: `job.resumeAtMs > existing.resumeAtMs` in schedule().
-  // An exact tie is not "later", so a repeat notice naming the same deadline
-  // must still be accepted - `>` allows it; `>=` would wrongly drop it.
+  // Boundary: `job.resumeAtMs > existing.resumeAtMs` in schedule(). An exact tie is not
+  // "later", so a repeat notice naming the same deadline must still be accepted -
+  // `>` allows it; `>=` would wrongly drop it.
   const s = new ResumeScheduler(memento(), silent);
   t.after(() => s.dispose());
   const at = Date.now() + 60_000;
@@ -139,10 +139,8 @@ test('a reversed window is treated as a window, not an error', () => {
 
 // --- More than one session -------------------------------------------------
 //
-// A usage limit belongs to the account, not to a session, so every session that
-// is working when it lands hits it at once. On the machine this was written on,
-// 16 of 61 real limit episodes had two or three sessions reporting the same
-// reset within minutes. One slot for all of them resumed only one.
+// A usage limit belongs to the account, not to a session, so every working session
+// hits it at once; one slot for all of them would resume only one.
 
 const SESSION_A = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
@@ -228,17 +226,12 @@ test('cancel with no session named clears every pending job', (t) => {
   assert.equal(s.current, undefined);
 });
 
-// --- Same-reset re-detection (Task 10) --------------------------------------
+// --- Same-reset re-detection ------------------------------------------------
 //
-// planResume rolls a fresh random jitter on every detection (randomDelay.ts),
-// so a repeated "usage limit" notice for the SAME un-jittered reset
-// (baseResumeAtMs) produces a DIFFERENT resumeAtMs each time. On 2026-09-24 a
-// re-detection re-rolled a smaller jitter and moved a window's resume from
-// 2:27:19 to 2:20:11 - the old dedupe only blocked a LATER resumeAtMs
-// replacing an earlier one, so a smaller re-roll for the same reset slipped
-// through and replaced it. The fix: once a job is scheduled for a reset,
-// SAME sessionId + SAME baseResumeAtMs must never be replaced by a
-// re-detection, whichever way its re-rolled jitter happens to move.
+// planResume rolls a fresh random jitter on every detection, so a repeated notice for
+// the SAME un-jittered reset (baseResumeAtMs) yields a DIFFERENT resumeAtMs each time.
+// Once a job is scheduled for a reset, SAME sessionId + SAME baseResumeAtMs must never
+// be replaced by a re-detection, whichever way its re-rolled jitter moves.
 
 const jobWithBase = (sessionId: string, baseResumeAtMs: number, resumeAtMs: number): PendingJob => ({
   ...jobFor(sessionId, resumeAtMs),
@@ -261,9 +254,8 @@ test('a re-detection of the same reset with a smaller re-rolled jitter does not 
 });
 
 test('a re-detection of the same reset with a larger re-rolled jitter also does not move the resume', (t) => {
-  // The pre-existing guard already caught the "later" direction (a strictly
-  // later resumeAtMs was already ignored) - this pins that it still holds
-  // once the fix is keyed on baseResumeAtMs rather than resumeAtMs alone.
+  // A strictly later resumeAtMs was already ignored; this pins that it still holds
+  // now the dedupe is keyed on baseResumeAtMs rather than resumeAtMs alone.
   const s = new ResumeScheduler(memento(), silent);
   t.after(() => s.dispose());
   const base = Date.now() + 60_000;
@@ -284,8 +276,8 @@ test('a genuinely new reset (different baseResumeAtMs) still replaces an earlier
   assert.equal(s.current?.resumeAtMs, soonerBase);
 });
 
-// Task 4c (R4): the limit type is part of the job the memento holds, so it
-// survives a window reload; a job persisted without it reads as undefined.
+// The limit type is part of the job the memento holds, so it survives a window reload;
+// a job persisted without it reads as undefined.
 test('a job keeps its rateLimitType across reconstruction from the memento', (t) => {
   const m = memento();
   const first = new ResumeScheduler(m, silent);
@@ -296,10 +288,10 @@ test('a job keeps its rateLimitType across reconstruction from the memento', (t)
   assert.equal(second.current?.rateLimitType, 'seven_day');
 });
 
-// Final fix wave A, A9: a re-detection of the same reset that the dedupe
-// drops can still carry the limit type the first detection could not read
-// (a text-only notice first, the flagged quotaLimits entry second). The
-// existing job adopts it, persisted; its schedule stays exactly as it was.
+// A re-detection of the same reset that the dedupe drops can still carry the limit
+// type the first detection could not read (a text-only notice first, the flagged
+// quotaLimits entry second). The existing job adopts it, persisted; its schedule
+// stays as it was.
 test('a dropped re-detection of the same reset hands its rateLimitType to a job that had none', (t) => {
   // Serialised on write, as VS Code's globalState is: the plain memento()
   // stores the job objects themselves, so an in-place change would read back
@@ -350,10 +342,9 @@ test('a dropped later deadline for a DIFFERENT reset does not hand over its rate
   assert.equal(s.current?.rateLimitType, undefined);
 });
 
-// Wave A fix round 1 (review C1): a dropped same-reset re-detection also
-// hands over its detection-time transcript size. The re-detection is newer
-// evidence of where the stop is; keeping the first one's baseline is what let
-// a retry that hit the same limit again read as "continued".
+// A dropped same-reset re-detection also hands over its detection-time transcript
+// size: it is newer evidence of where the stop is, and keeping the first baseline
+// would let a retry that hit the same limit again read as "continued".
 test('a dropped re-detection of the same reset refreshes the detection baseline of the job, persisted', (t) => {
   const stored = new Map<string, string>();
   const m: MementoLike = {
@@ -395,8 +386,8 @@ test('a job persisted without rateLimitType reads back with it undefined', (t) =
   assert.equal(s.current.rateLimitType, undefined);
 });
 
-// Wave B, B8 (wave A re-review, m-new-2): the baseline refresh is logged, as
-// A9's type adoption is, so a skip that follows can be traced to it.
+// The baseline refresh is logged, as limit-type adoption is, so a skip that follows
+// can be traced to it.
 test('a refreshed detection baseline is logged, once, with the old and new size; an unchanged or absent size is not', (t) => {
   const lines: string[] = [];
   const log = { info: (m: string) => lines.push(m), warn() {}, error() {} };
@@ -413,13 +404,10 @@ test('a refreshed detection baseline is logged, once, with the old and new size;
   assert.equal(refreshLines().length, 1, 'the same size, or no size, changes nothing and logs nothing');
 });
 
-// ---------------------------------------------------------------------------
-// Wave D fix round 1, Important 1 (the user's decision, 2026-10-02): the
-// latest detection decides. A same-reset re-detection (bases within
-// RESET_GRACE_MS) that is automatic makes an offer-only job automatic,
-// whatever the jitter rolled; an offer-only re-detection changes nothing; an
-// automatic job never becomes offer-only for the same reset.
-// ---------------------------------------------------------------------------
+// The latest detection decides. A same-reset re-detection (bases within
+// RESET_GRACE_MS) that is automatic makes an offer-only job automatic, whatever the
+// jitter rolled; an offer-only re-detection changes nothing; an automatic job never
+// becomes offer-only for the same reset.
 
 const offerJob = (base: number, resumeAt: number): PendingJob => ({ ...jobWithBase(SESSION_A, base, resumeAt), offerOnly: true });
 
@@ -432,7 +420,7 @@ const upgrading = (t: { after(fn: () => void): void }) => {
   return { s, upgraded };
 };
 
-test('F1: zero jitter, same reset: an automatic re-detection upgrades the offer-only job in place', (t) => {
+test('zero jitter, same reset: an automatic re-detection upgrades the offer-only job in place', (t) => {
   const { s, upgraded } = upgrading(t);
   const base = Date.now() + 20 * 3_600_000;
   assert.equal(s.schedule(offerJob(base, base)), true);
@@ -444,7 +432,7 @@ test('F1: zero jitter, same reset: an automatic re-detection upgrades the offer-
   assert.equal(upgraded[0]!.sessionId, SESSION_A);
 });
 
-test('F1: a base 1s earlier with an earlier jitter roll still upgrades, and keeps the first fire time', (t) => {
+test('a base 1s earlier with an earlier jitter roll still upgrades, and keeps the first fire time', (t) => {
   const { s, upgraded } = upgrading(t);
   const base = Date.now() + 20 * 3_600_000;
   s.schedule(offerJob(base, base + 20 * 60_000));
@@ -455,7 +443,7 @@ test('F1: a base 1s earlier with an earlier jitter roll still upgrades, and keep
   assert.equal(upgraded.length, 1);
 });
 
-test('F1: with default jitter the upgrade is deterministic, whichever way the rolls fall', (t) => {
+test('with default jitter the upgrade is deterministic, whichever way the rolls fall', (t) => {
   for (let i = 0; i < 20; i++) {
     const { s, upgraded } = upgrading(t);
     const base = Date.now() + 20 * 3_600_000;
@@ -466,7 +454,7 @@ test('F1: with default jitter the upgrade is deterministic, whichever way the ro
   }
 });
 
-test('F1: the upgrade is persisted', (t) => {
+test('the upgrade is persisted', (t) => {
   // Serialised on write, as globalState is: a store holding the live job
   // objects would show the upgrade whether or not it was ever written.
   const saved = new Map<string, string>();
@@ -486,7 +474,7 @@ test('F1: the upgrade is persisted', (t) => {
   assert.equal(stored?.[0]?.offerOnly, undefined);
 });
 
-test('F1: an offer-only re-detection of an offer-only job changes nothing, whatever the jitter', (t) => {
+test('an offer-only re-detection of an offer-only job changes nothing, whatever the jitter', (t) => {
   const { s, upgraded } = upgrading(t);
   const base = Date.now() + 3 * 86_400_000;
   const first = offerJob(base, base + 10 * 60_000);
@@ -498,7 +486,7 @@ test('F1: an offer-only re-detection of an offer-only job changes nothing, whate
   assert.equal(upgraded.length, 0);
 });
 
-test('F1: an automatic job never becomes offer-only for the same reset', (t) => {
+test('an automatic job never becomes offer-only for the same reset', (t) => {
   const { s, upgraded } = upgrading(t);
   const base = Date.now() + 20 * 3_600_000;
   s.schedule(jobWithBase(SESSION_A, base, base));
@@ -508,7 +496,7 @@ test('F1: an automatic job never becomes offer-only for the same reset', (t) => 
   assert.equal(upgraded.length, 0);
 });
 
-test('F1: a different reset (bases further apart than the grace) is not an upgrade', (t) => {
+test('a different reset (bases further apart than the grace) is not an upgrade', (t) => {
   const { s, upgraded } = upgrading(t);
   const base = Date.now() + 3 * 86_400_000;
   s.schedule(offerJob(base, base));
@@ -519,13 +507,11 @@ test('F1: a different reset (bases further apart than the grace) is not an upgra
   assert.equal(upgraded.length, 0);
 });
 
-// ---------------------------------------------------------------------------
-// Wave D fix round 2, N1: every same-reset re-detection - the upgrade and the
-// offer-only no-op included - adopts the limit type onto an untyped job (A9)
-// and moves the stop baseline to the newest detection (wave A, C1).
-// ---------------------------------------------------------------------------
+// Every same-reset re-detection - the upgrade and the offer-only no-op included -
+// adopts the limit type onto an untyped job and moves the stop baseline to the newest
+// detection.
 
-test('F2: an upgrade adopts the type and the newer baseline, and persists both', (t) => {
+test('an upgrade adopts the type and the newer baseline, and persists both', (t) => {
   const saved = new Map<string, string>();
   const store: MementoLike = {
     get: <T>(k: string) => (saved.has(k) ? (JSON.parse(saved.get(k)!) as T) : undefined),
@@ -546,7 +532,7 @@ test('F2: an upgrade adopts the type and the newer baseline, and persists both',
   assert.equal(stored.resumeAtMs, base + 10 * 60_000, 'the fire time is still the first one');
 });
 
-test('F2: an offer-only no-op still adopts the type and the newer baseline', (t) => {
+test('an offer-only no-op still adopts the type and the newer baseline', (t) => {
   const { s } = upgrading(t);
   const base = Date.now() + 3 * 86_400_000;
   s.schedule({ ...offerJob(base, base), transcriptBytesAtDetection: 500 });
@@ -556,7 +542,7 @@ test('F2: an offer-only no-op still adopts the type and the newer baseline', (t)
   assert.equal(s.current!.transcriptBytesAtDetection, 900);
 });
 
-test('F2: a type already known is never overwritten by a re-detection', (t) => {
+test('a type already known is never overwritten by a re-detection', (t) => {
   const { s } = upgrading(t);
   const base = Date.now() + 3 * 86_400_000;
   s.schedule({ ...offerJob(base, base), rateLimitType: 'seven_day_opus' });

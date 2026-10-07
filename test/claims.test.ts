@@ -185,25 +185,21 @@ test('claimKeyFor for a limit job is sessionId-baseResumeAtMs, the un-jittered r
 });
 
 test('claimKeyFor for an overload job with no entry timestamp falls back to bucketing the DETECTION instant (baseResumeAtMs), not the padded fire time', () => {
-  // Fix round 1: this used to bucket resumeAtMs. resumeAtMs is padded with
-  // each window's own independently-rolled jitter, so two windows detecting
-  // the identical overload landed in different buckets and both fired.
-  // baseResumeAtMs - the moment planResume read `now` at detection - is
-  // near-identical across windows, which is what this key must use.
+  // The key uses baseResumeAtMs (the moment planResume read `now` at detection), not
+  // resumeAtMs: that carries each window's own jitter, so windows would land in
+  // different buckets and both fire.
   const key = claimKeyFor({
     sessionId: 'abc-123',
     baseResumeAtMs: 6_000_000,
-    resumeAtMs: 1_000_000, // a different bucket under the old (buggy) logic - must be ignored
+    resumeAtMs: 1_000_000, // a different bucket - must be ignored
     reason: 'overload',
   });
   assert.equal(key, `abc-123-overload-${Math.floor(6_000_000 / 600_000)}`);
 });
 
 test('claimKeyFor gives two overload jobs with the same detection instant the same key, however far apart their jitter rolled', () => {
-  // The core regression this fix closes: two windows detect the SAME
-  // overload (same baseResumeAtMs) but roll very different backoffs
-  // (randomDelayMinMinutes..randomDelayMaxMinutes, e.g. 5m vs 30m) - their
-  // OWN resumeAtMs values land far apart, but the key must still collide.
+  // Two windows detect the SAME overload (same baseResumeAtMs) but roll very different
+  // backoffs; their resumeAtMs values land far apart, yet the key must still collide.
   const a = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 1_300_000, reason: 'overload' });
   const b = claimKeyFor({ sessionId: 's', baseResumeAtMs: 1_000_000, resumeAtMs: 2_800_000, reason: 'overload' });
   assert.equal(a, b, 'the same detection instant must collide no matter how far apart the jitter rolls landed');
@@ -215,13 +211,12 @@ test('claimKeyFor gives two overload jobs a different key when their detection i
   assert.notEqual(a, b, 'a genuinely different detection instant must not collide just because resumeAtMs matches');
 });
 
-// Final review, Important 3: an overload claim keyed on a 10-minute bucket
-// collided with this window's OWN earlier claim (a fresh 1h claim from a
-// successful resume), so a genuine second overload in the same bucket was
-// dropped. The detection entry's own timestamp is identical in every window
-// (all of them read the same transcript line) and distinct per event.
+// An overload claim keyed on a 10-minute bucket collided with this window's OWN
+// earlier claim (a fresh 1h claim from a successful resume), dropping a genuine
+// second overload in the same bucket. The detection entry's own timestamp is
+// identical in every window and distinct per event.
 
-test('claimKeyFor keys an overload job on its detection entry timestamp when it has one (final review I3)', () => {
+test('claimKeyFor keys an overload job on its detection entry timestamp when it has one', () => {
   const key = claimKeyFor({
     sessionId: 'abc-123',
     baseResumeAtMs: 6_000_000,
@@ -232,7 +227,7 @@ test('claimKeyFor keys an overload job on its detection entry timestamp when it 
   assert.equal(key, 'abc-123-overload-5999123');
 });
 
-test('two distinct overload events in the same 10 minutes get different keys, and both can be claimed (final review I3)', () => {
+test('two distinct overload events in the same 10 minutes get different keys, and both can be claimed', () => {
   const dir = tempDir();
   const first = { sessionId: 's', baseResumeAtMs: 6_000_000, resumeAtMs: 6_300_000, reason: 'overload' as const, entryTimestampMs: 6_000_000 };
   const second = { ...first, baseResumeAtMs: 6_120_000, entryTimestampMs: 6_120_000 };
@@ -242,7 +237,7 @@ test('two distinct overload events in the same 10 minutes get different keys, an
   assert.equal(claimResume(dir, claimKeyFor(second), Date.now(), fs), 'claimed', 'the second event must not collide with the first');
 });
 
-test('the same overload event seen by two windows collides, however their detection instants and jitter differ (final review I3)', () => {
+test('the same overload event seen by two windows collides, however their detection instants and jitter differ', () => {
   const dir = tempDir();
   const windowA = { sessionId: 's', baseResumeAtMs: 6_000_050, resumeAtMs: 6_300_000, reason: 'overload' as const, entryTimestampMs: 5_999_000 };
   const windowB = { ...windowA, baseResumeAtMs: 6_700_000, resumeAtMs: 8_100_000 };
@@ -251,12 +246,12 @@ test('the same overload event seen by two windows collides, however their detect
   assert.equal(claimResume(dir, claimKeyFor(windowB), Date.now(), fs), 'taken');
 });
 
-test('a limit key ignores the entry timestamp: it stays the un-jittered reset (final review I3)', () => {
+test('a limit key ignores the entry timestamp: it stays the un-jittered reset', () => {
   const key = claimKeyFor({ sessionId: 'abc', baseResumeAtMs: 1_000_000, resumeAtMs: 1_500_000, reason: 'limit', entryTimestampMs: 42 });
   assert.equal(key, 'abc-1000000');
 });
 
-// --- claim owner (final review I3) --------------------------------------------
+// --- claim owner --------------------------------------------
 
 test('claimResume records the window that took the claim, and claimOwner reads it back', () => {
   const dir = tempDir();
@@ -271,7 +266,7 @@ test('claimOwner is undefined for a missing claim or one written without an owne
   assert.equal(claimOwner(dir, 'legacy', fs), undefined);
 });
 
-// --- holdClaim (final review I7) -------------------------------------------
+// --- holdClaim -------------------------------------------
 
 test('holdClaim writes a claim that stays fresh until the held deadline, not just for STALE_MS from now', () => {
   // Cancel writes one for a job that may not fire for hours; another window
@@ -322,9 +317,8 @@ test('claimsDir is machine-wide: under the OS temp dir, not per-workspace', () =
   assert.match(dir, /claude-limit-break[\\/]claims$/);
 });
 
-// Wave A fix round 1 (review m2): one deadline for every hold - the automatic
-// fire (A5), the counting Resume Now (M5) and Cancel - so none of them lapses
-// before another window's copy, which fires anywhere up to the longest jitter.
+// One deadline for every hold - the automatic fire, the counting Resume Now and Cancel -
+// so none lapses before another window's copy, which fires anywhere up to the longest jitter.
 test('a hold runs to the reset plus the longest configured jitter plus the margin', () => {
   const MIN = 60_000;
   const job = { baseResumeAtMs: 1_000_000_000, resumeAtMs: 1_000_000_000 + 7 * MIN };
@@ -340,7 +334,7 @@ test('a hold never ends before the fire time of the job itself', () => {
   assert.equal(claimHoldDeadline(job, 0, 30), job.resumeAtMs);
 });
 
-// --- an unusable claims directory fails open (final fix wave B, B3; final review M3) ---
+// --- an unusable claims directory fails open ---
 
 /** A directory path that can never be created: a child of a regular file. */
 function impossibleDir(): string {
@@ -349,7 +343,7 @@ function impossibleDir(): string {
   return path.join(file, 'claims');
 }
 
-test('claimResume fails open when the claims directory cannot be created: claimed, logged, no throw (M3)', () => {
+test('claimResume fails open when the claims directory cannot be created: claimed, logged, no throw', () => {
   const { log, lines } = logger();
   let result: string | undefined;
   assert.doesNotThrow(() => {
@@ -359,7 +353,7 @@ test('claimResume fails open when the claims directory cannot be created: claime
   assert.ok(lines.some((l) => /claims directory/i.test(l)), `the failure must be logged; saw ${JSON.stringify(lines)}`);
 });
 
-test('claimResume fails open when mkdirSync throws for any reason (a fake fs, as the other fail-open tests do) (M3)', () => {
+test('claimResume fails open when mkdirSync throws for any reason (a fake fs, as the other fail-open tests do)', () => {
   const { log, lines } = logger();
   const brokenFs: ClaimFs = {
     ...fs,
@@ -371,7 +365,7 @@ test('claimResume fails open when mkdirSync throws for any reason (a fake fs, as
   assert.ok(lines.length > 0);
 });
 
-test('holdClaim fails open the same way: claimed, no throw (M3, Cancel and the automatic fire both use it)', () => {
+test('holdClaim fails open the same way: claimed, no throw (Cancel and the automatic fire both use it)', () => {
   const { log } = logger();
   let result: string | undefined;
   assert.doesNotThrow(() => {
