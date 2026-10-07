@@ -1,10 +1,5 @@
 /**
- * A `vscode.Tab` reduced to the two fields this extension can actually read
- * off it: the label VS Code shows and the webview's viewType. Kept as a
- * plain object, rather than passing `vscode.Tab` itself around, so the
- * selection logic below is unit-testable without a running VS Code - the
- * same reason `buildTerminalOptions` in resumer.ts works on plain objects
- * instead of the real terminal API.
+ * A `vscode.Tab` reduced to the two fields this extension can read: the label VS Code shows and the webview's viewType. A plain object so the selection logic is unit-testable without VS Code.
  */
 export interface WebviewTab {
   viewType: string;
@@ -12,12 +7,7 @@ export interface WebviewTab {
 }
 
 /**
- * The substring Claude Code's panel view type carries. Not the whole string:
- * `test/integration/panelReopen.itest.ts` created a throwaway webview panel
- * and read back what `vscode.window.tabGroups` reported for it, which came
- * back as `mainThreadWebview-<the requested viewType>` - VS Code renders the
- * webview on its own process and prefixes the id it assigns there. `===`
- * would never match; `includes` does.
+ * The substring Claude Code's panel view type carries, not the whole string: VS Code reports a webview tab as `mainThreadWebview-<the requested viewType>`, so `===` would never match.
  */
 const CLAUDE_PANEL_VIEW_TYPE = 'claudeVSCodePanel';
 
@@ -28,13 +18,7 @@ export function isClaudePanelTab(tab: WebviewTab): boolean {
 /**
  * Choose the one Claude panel tab to close and reopen.
  *
- * `TabInputWebview` carries no session identity - issue #7 confirmed Claude
- * Code itself only reconciles a tab to a session by `title === tab.label`,
- * which this extension cannot do any better at (and the title is not even
- * written to the transcript). So zero matches means nothing to reopen, and
- * more than one means this cannot tell which is the stale one without
- * guessing at someone's open tabs - both return undefined, and the caller
- * falls back to a text-only notice rather than acting on a guess.
+ * `TabInputWebview` carries no session identity; Claude Code itself reconciles a tab to a session only by `title === tab.label`. So zero matches means nothing to reopen, and more than one cannot be told apart without guessing; both return undefined and the caller falls back to a text-only notice.
  */
 export function selectClaudePanelTab(tabs: readonly WebviewTab[]): WebviewTab | undefined {
   const matches = tabs.filter(isClaudePanelTab);

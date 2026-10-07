@@ -1,32 +1,16 @@
 import { MAX_OVERLOAD_RESUMES } from './overloadBackoff';
 
 /**
- * The "gave up" state (plan Task 4, synthesis A8/A9).
+ * The "gave up" state: resume failures this extension will not retry on its own. Each is recorded per session so the status bar shows it instead of returning to the idle eye, which reads like "nothing happened".
  *
- * Some resume failures are final as far as this extension is concerned: it
- * will not try again on its own. Before this module each of them logged (and
- * sometimes notified) once and then the status bar went back to its idle eye,
- * which reads exactly like "nothing ever happened" - the silent failure the
- * whole extension exists to end. So each one is recorded here, per session,
- * and the status bar renders the records until something clears them.
+ * Causes:
+ * - `stall`     a launched resume's transcript did not grow within the grace period (stallWatch.ts).
+ * - `launcher`  no claude executable could be resolved.
+ * - `cwd`       the session's recorded folder is gone (or is a file).
+ * - `budget`    the budget refusal was dismissed without "Resume anyway".
+ * - `overloads` a 6th consecutive overload retry would have been scheduled (overloadBackoff.ts).
  *
- * The four causes are the ones the code can actually observe today, and no
- * others (the brief forbids inventing detection, e.g. of auth failures):
- *
- * - `stall`    the stall watch fired: a launched resume's transcript did not
- *              grow within the grace period (stallWatch.ts).
- * - `launcher` no claude executable could be resolved, so nothing launched.
- * - `cwd`      the session's recorded folder is gone (or is a file), so
- *              nothing launched.
- * - `budget`   the budget refusal was dismissed without "Resume anyway".
- * - `overloads` the session kept stopping on server errors: a 6th
- *              consecutive overload retry would have been scheduled (final
- *              fix wave A, A6; overloadBackoff.ts). Cleared by a finished
- *              turn, like every other cause.
- *
- * Pure: no VS Code, no filesystem, no clock (callers pass `atMs`). One record
- * per session, because the status bar lists sessions, and Task 5b folds these
- * records into the same one-line-per-session tooltip list as pending jobs.
+ * Pure: no VS Code, filesystem or clock (callers pass `atMs`). One record per session, matching the status bar's one-line-per-session list.
  */
 
 export type GaveUpCause = 'stall' | 'launcher' | 'cwd' | 'budget' | 'overloads';
@@ -43,13 +27,7 @@ export interface GaveUpRecord {
 /**
  * Status-bar icon for "a session gave up, and nothing is counting down".
  *
- * circle-slash, not warning or error. `$(error)` reads as this extension
- * itself having crashed, which it has not. `$(warning)` reads as a caution
- * about something still in progress - and the countdown already turns the
- * item's background to the warning colour in its last minute, so a warning
- * glyph would blur into that. circle-slash is "stopped, not trying", which is
- * exactly the state: the extension is healthy and has deliberately stopped
- * retrying this session until something clears it. Pinned in gaveUp.test.ts.
+ * circle-slash, not `$(error)` (reads as the extension crashing) or `$(warning)` (blurs into the countdown's warning background): the extension is healthy and has deliberately stopped retrying.
  */
 export const GAVE_UP_ICON = '$(circle-slash)';
 
@@ -58,24 +36,12 @@ const short = (sessionId: string) => sessionId.slice(0, 8);
 export class GaveUpState {
   private readonly records = new Map<string, GaveUpRecord>();
   /**
-   * `${sessionId}\n${cause}` pairs already warned about (controller ruling 1:
-   * warn once per session per cause). Kept apart from `records` on purpose: a
-   * launched resume clears the record but NOT this, so a resume that stalls
-   * again after a manual retry is shown in the status bar again without
-   * popping the same notification a second time. Only a new detection (or
-   * Cancel) forgets it.
+   * `${sessionId}\n${cause}` pairs already warned about: warn once per session per cause. Kept apart from `records` because a launched resume clears the record but not this, so a repeat stall shows in the status bar without a second notification. Only a new detection (or Cancel) forgets it.
    */
   private readonly warned = new Set<string>();
 
   /**
-   * Record a failure. Returns whether the caller should notify: true the
-   * first time this cause is seen for this session since its last detection,
-   * and always when `manual` - the failure is the answer to something the
-   * user just clicked, and a click with no visible answer is the "looks idle"
-   * failure this state exists to remove (controller ruling on 4b concern 1).
-   * Warn-once is for AUTOMATIC repeats only. Either way the pair is marked
-   * warned, and a repeat replaces the record, so the tooltip shows the latest
-   * time.
+   * Record a failure. Returns whether the caller should notify: true the first time this cause is seen for this session since its last detection, and always when `manual` (the answer to a click must be visible). A repeat replaces the record so the tooltip shows the latest time.
    */
   record(entry: GaveUpRecord, manual = false): boolean {
     this.records.set(entry.sessionId, { ...entry });
@@ -88,10 +54,7 @@ export class GaveUpState {
   }
 
   /**
-   * A new limit/overload detection for this session (any kind): it is live
-   * again, so its record goes, and so does its warn-once memory - the next
-   * failure is about a new attempt and is news. Returns whether a record was
-   * removed, i.e. whether the status bar needs re-rendering.
+   * A new limit/overload detection: the session is live again, so its record and warn-once memory go. Returns whether a record was removed.
    */
   detected(sessionId: string): boolean {
     for (const key of [...this.warned]) {
@@ -108,20 +71,14 @@ export class GaveUpState {
   }
 
   /**
-   * The session finished a turn: it is working again, so its record goes.
-   * Not a new detection, so its warn-once memory stays (fix round 1, ruling
-   * 2a). Returns whether a record was removed.
+   * The session finished a turn, so its record goes; its warn-once memory stays. Returns whether a record was removed.
    */
   turnEnded(sessionId: string): boolean {
     return this.records.delete(sessionId);
   }
 
   /**
-   * "Dismiss gave-up notices" from the menu: every record goes, and nothing
-   * else - no job is touched (the caller never passes it one), and the
-   * warn-once memory stays, since dismissing is "I have seen these", not a
-   * new attempt (fix round 1, ruling 2b). Returns whether anything was
-   * recorded.
+   * "Dismiss gave-up notices": every record goes; no job is touched and warn-once memory stays. Returns whether anything was recorded.
    */
   dismissRecords(): boolean {
     const had = this.records.size > 0;
@@ -144,11 +101,7 @@ export class GaveUpState {
 }
 
 /**
- * Short, per-cause reason for a tooltip line. Each cause reads differently.
- * Exported for Task 5b's unified session-list tooltip (statusBar.ts), which
- * annotates a pending/ready line with just the reason - describeGaveUp below
- * builds a whole standalone line, which is redundant once the id and folder
- * are already on that line from the pending/ready side.
+ * Short per-cause reason for a tooltip line, exported for the unified session list in statusBar.ts, which already shows the id and folder.
  */
 export const REASON: Record<GaveUpCause, string> = {
   stall: 'resume stalled: its transcript did not grow after launch',
@@ -159,9 +112,7 @@ export const REASON: Record<GaveUpCause, string> = {
 };
 
 /**
- * One tooltip line (Markdown) for a gave-up session: short id, folder, cause
- * and time. Task 5b folds this into its single list; it will need to escape
- * the folder, which is user-controlled text, when it does.
+ * One tooltip line (Markdown) for a gave-up session: short id, folder, cause and time. The folder is user-controlled text.
  */
 export function describeGaveUp(r: GaveUpRecord): string {
   const where = r.cwd ? ` in \`${r.cwd}\`` : ' (no folder recorded)';
@@ -169,13 +120,7 @@ export function describeGaveUp(r: GaveUpRecord): string {
 }
 
 /**
- * The notification for a failure that has just made a session give up.
- *
- * Distinct text per cause (synthesis A9), each naming the cause and what the
- * user can do about it. The budget cause is not here: its notification is
- * the refusal itself (budgetRefusalNotice), shown before the user dismisses
- * it - popping a second one right after they closed the first would be the
- * nag this state exists to avoid.
+ * The notification for a failure that has just made a session give up, with distinct text per cause. The budget cause has none here: its notification is the refusal itself (budgetRefusalNotice), and a second one would be a nag.
  */
 export function gaveUpNotice(
   n:
@@ -214,10 +159,7 @@ export function gaveUpNotice(
 }
 
 /**
- * The budget refusal: the one notice for the `budget` cause. It already
- * offers the way through ("Resume anyway"); this adds the session it is about
- * and the lasting fix, so a dismissed refusal has told the user everything
- * the gave-up tooltip will later remind them of.
+ * The budget refusal: the one notice for the `budget` cause. It offers "Resume anyway", plus the session it is about and the lasting fix.
  */
 export function budgetRefusalNotice(sessionId: string, reason: string): string {
   return (

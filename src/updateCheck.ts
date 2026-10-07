@@ -3,17 +3,11 @@ import * as https from 'node:https';
 import { URL } from 'node:url';
 
 /**
- * Notify the user when a newer release exists (issue #1).
+ * Notify the user when a newer release exists.
  *
- * VS Code disables its own update engine for a `.vsix` installed outside the
- * Marketplace, and there is no Marketplace listing here - permanently, by
- * design - so nothing else will ever tell the user a newer build exists.
- * This module polls the GitHub Releases API by hand and decides, purely,
- * whether to say something about it.
+ * VS Code disables its update engine for a `.vsix` installed outside the Marketplace, so nothing else will tell the user a newer build exists. This module polls the GitHub Releases API by hand and decides, purely, whether to say something.
  *
- * `/releases/latest` cannot be relied on: it excludes pre-releases and
- * returns 404 for a project that has only published those. The newest tag is
- * derived from the releases list instead (see {@link newestTag}).
+ * `/releases/latest` excludes pre-releases and returns 404 for a project with only those, so the newest tag is derived from the releases list instead (see {@link newestTag}).
  */
 
 // ---------------------------------------------------------------------------
@@ -23,13 +17,7 @@ import { URL } from 'node:url';
 export type VersionOrder = 'less' | 'equal' | 'greater' | 'unknown';
 
 /**
- * Splits a version string into numeric segments, or undefined if it is not
- * one. Accepts an optional leading `v`/`V` (release tags carry one, the
- * running extension's `package.json` version does not) and any number of
- * dot-separated all-digit segments. Anything else - empty, non-numeric,
- * pre-release/build suffixes like `-rc.1` - is refused rather than guessed
- * at, because a guess here can only ever go one way: telling someone they are
- * behind when they are not.
+ * Splits a version string into numeric segments, or undefined if it is not one. Accepts an optional leading `v`/`V` and any number of dot-separated all-digit segments. Anything else (empty, non-numeric, pre-release/build suffixes like `-rc.1`) is refused rather than guessed at, since a guess can only wrongly tell someone they are behind.
  */
 function parseVersion(raw: string): number[] | undefined {
   const stripped = raw.trim().replace(/^v/i, '');
@@ -42,11 +30,7 @@ function parseVersion(raw: string): number[] | undefined {
 }
 
 /**
- * Compares two version-ish strings. `unknown` covers anything that fails to
- * parse on either side, and is deliberately not `greater`: this feeds a
- * "you are behind" notification, and a value that could not be understood
- * must never be able to trigger one (a malformed tag from a bad release, or a
- * `package.json` typo, fails silent rather than nags falsely).
+ * Compares two version-ish strings. `unknown` covers anything that fails to parse on either side and is deliberately not `greater`: a value that could not be understood must never trigger a "you are behind" notification.
  */
 export function compareVersions(a: string, b: string): VersionOrder {
   const pa = parseVersion(a);
@@ -93,15 +77,11 @@ export type UpdateCheckAction =
   | { kind: 'notify'; latestTag: string }
   | { kind: 'quiet' };
 
-/** "Cheap and infrequent" per the issue - one check a day at most. */
+/** One network check a day at most. */
 export const DEFAULT_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * `context.globalState` keys this module's cached state is expected to live
- * under. Exported so the wiring code and this module agree on names without
- * either side hard-coding the other's strings; namespaced under
- * `claudeLimitBreak.updateCheck.` to stay clear of scheduler.ts's
- * `claudeLimitBreak.pending` and extension.ts's `claudeLimitBreak.ready`.
+ * `context.globalState` keys this module's cached state lives under, exported so the wiring code and this module agree on names. Namespaced under `claudeLimitBreak.updateCheck.` to stay clear of scheduler.ts's `claudeLimitBreak.pending` and extension.ts's `claudeLimitBreak.ready`.
  */
 export const LAST_CHECKED_KEY = 'claudeLimitBreak.updateCheck.lastCheckedMs';
 export const LATEST_TAG_KEY = 'claudeLimitBreak.updateCheck.latestTag';
@@ -111,22 +91,9 @@ export const FIRST_RUN_PROMPT_KEY = 'claudeLimitBreak.updateCheck.firstRunPrompt
 /**
  * What to do this activation, given the cached state and the clock.
  *
- * `check` fires whenever the interval has elapsed (or nothing has ever been
- * checked) - the caller performs the one network call this allows and then
- * calls this function again with `lastCheckedMs` and `latestTag` refreshed,
- * to get the notify/quiet verdict for the value it just fetched. That second
- * call cannot itself return `check` again, because by then `lastCheckedMs` is
- * `now`: the network call this decides is capped at once per activation, but
- * this pure function is cheap to call twice to get both the "should I fetch"
- * and "should I say something" answers out of the one fetch.
+ * `check` fires whenever the interval has elapsed (or nothing has ever been checked); the caller performs the one network call and calls this again with `lastCheckedMs` and `latestTag` refreshed to get the verdict for the fetched value. That second call cannot return `check` again, since `lastCheckedMs` is then `now`.
  *
- * Below the interval, the verdict comes from whatever is already cached:
- * `skip` when there is nothing cached to say anything about, `notify` when
- * the cached tag is newer than `currentVersion` and was not the one the user
- * already dismissed, and `quiet` for every other case - up to date, cached
- * tag is older (a pre-release ahead of the newest tag), the cached tag is
- * malformed (`compareVersions` returns `unknown`, never treated as newer),
- * or the user has already dismissed exactly this tag.
+ * Below the interval the verdict comes from the cache: `skip` when nothing is cached, `notify` when the cached tag is newer than `currentVersion` and not the one the user dismissed, and `quiet` otherwise (up to date, cached tag older, malformed tag, or already dismissed).
  */
 export function decideUpdateCheck(input: UpdateCheckInput): UpdateCheckAction {
   const due = input.lastCheckedMs === undefined || input.now - input.lastCheckedMs >= input.intervalMs;
@@ -155,7 +122,7 @@ export const RELEASES_URL = 'https://api.github.com/repos/Dream-Mosaic/claude-li
 export const RELEASE_TAG_URL = (tag: string): string =>
   `https://github.com/Dream-Mosaic/claude-limit-break/releases/tag/${encodeURIComponent(tag)}`;
 
-/** GitHub returns 403 for an unauthenticated request with no User-Agent at all - verified live. */
+/** GitHub returns 403 for a request with no User-Agent. */
 const USER_AGENT = 'claude-limit-break-update-check';
 
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -168,15 +135,7 @@ interface RawRelease {
 /**
  * Picks the newest tag out of a parsed `/releases` response.
  *
- * Not `/releases/latest` - see the module doc comment for why that 404s for
- * this repo. Every non-draft entry with a parseable `tag_name` is compared
- * with {@link compareVersions}; the response's own order is not trusted as a
- * version sort (nothing in GitHub's docs promises one, only that it is
- * "sorted by most recent", which is a creation-time claim, not a semver one).
- * A draft is skipped because it has nothing published to point a user's
- * download link at. `undefined` covers an empty list, a response that is not
- * an array at all, and a list where nothing parses - every one of those is
- * "no information", not an error.
+ * Every non-draft entry with a parseable `tag_name` is compared with {@link compareVersions}; the response's own order is not trusted as a version sort ("sorted by most recent" is a creation-time claim). A draft has nothing published to link to. `undefined` covers an empty list, a non-array response, and a list where nothing parses: "no information", not an error.
  */
 export function newestTag(releases: unknown): string | undefined {
   if (!Array.isArray(releases)) {
@@ -191,10 +150,7 @@ export function newestTag(releases: unknown): string | undefined {
     if (draft === true || typeof tag_name !== 'string') {
       continue;
     }
-    // Comparing tag_name against itself is a cheap parseability check that
-    // reuses compareVersions' own notion of "malformed" instead of a second
-    // parser: a tag that cannot even equal itself cannot be trusted to
-    // become `best` by default when it is the first (or only) entry seen.
+    // Comparing tag_name against itself is a cheap parseability check reusing compareVersions' notion of "malformed": a tag that cannot equal itself must not become `best` by default as the first entry seen.
     if (compareVersions(tag_name, tag_name) === 'unknown') {
       continue;
     }
@@ -206,17 +162,9 @@ export function newestTag(releases: unknown): string | undefined {
 }
 
 /**
- * GET the repo's releases and return the newest tag, or `undefined` for
- * anything that goes wrong: a non-200 status (403 rate limit chief among
- * them), a request timeout, a network error, or a body that is not valid
- * JSON. None of those may ever throw into the caller - this runs on
- * extension activation, unprompted, and a network hiccup must be invisible.
+ * GET the repo's releases and return the newest tag, or `undefined` for anything that goes wrong (non-200 such as a 403 rate limit, timeout, network error, invalid JSON). None may throw into the caller: this runs unprompted on activation and a network hiccup must be invisible.
  *
- * `url` and `timeoutMs` are parameters (rather than only reading
- * {@link RELEASES_URL}) so a test can point this at a local `node:http`
- * server instead of the real GitHub API; the client picks `node:http` or
- * `node:https` from the URL's own protocol, so an `http://127.0.0.1:port`
- * test URL and the real `https://api.github.com` URL both work unmodified.
+ * `url` and `timeoutMs` are parameters so a test can point this at a local `node:http` server; the client picks `node:http` or `node:https` from the URL's protocol.
  */
 export function fetchLatestReleaseTag(
   url: string = RELEASES_URL,
@@ -263,9 +211,7 @@ export function fetchLatestReleaseTag(
         });
       },
     );
-    // The `timeout` socket option fires an event; it does not abort the
-    // request by itself, so destroy() is what actually stops it and lets
-    // `finish` run instead of hanging until some far-off default timeout.
+    // The `timeout` socket option only fires an event; destroy() is what stops the request and lets `finish` run.
     req.on('timeout', () => {
       req.destroy();
       finish(undefined);
@@ -281,23 +227,14 @@ export function fetchLatestReleaseTag(
 // ---------------------------------------------------------------------------
 
 /**
- * `claudeLimitBreak.checkForUpdates` defaults to false - a network call the
- * user did not ask for is a surprise. To make the feature discoverable
- * without nagging, the user is offered a one-time choice on first activation
- * after install: Enable / Not now / Never ask.
+ * `claudeLimitBreak.checkForUpdates` defaults to false, since a network call the user did not ask for is a surprise. To keep the feature discoverable, the user is offered a one-time choice on first activation after install: Enable / Not now / Never ask.
  */
 export type FirstRunPromptChoice = 'enable' | 'not-now' | 'never';
 
 /**
- * Whether to show the first-run prompt, given whatever answer (if any) is
- * already in globalState.
+ * Whether to show the first-run prompt, given whatever answer (if any) is already in globalState.
  *
- * All three choices are equally terminal here: the issue promises the choice
- * "once", not a "remind me later" cadence, so "Not now" suppresses the
- * prompt exactly like "Never ask" does. They differ only in what
- * {@link shouldEnableUpdateChecks} does with them - "Not now" just declines
- * to turn the setting on, same as "Never ask" - the distinction is for the
- * user's own clarity when picking, not for this module's behaviour.
+ * All three choices suppress the prompt: it is offered once, with no "remind me later". Only Enable turns the setting on (see {@link shouldEnableUpdateChecks}).
  */
 export function shouldOfferFirstRunPrompt(storedAnswer: FirstRunPromptChoice | undefined): boolean {
   return storedAnswer === undefined;
