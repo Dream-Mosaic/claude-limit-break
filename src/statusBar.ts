@@ -146,7 +146,7 @@ export function buildSessionLines(
 }
 
 /**
- * Countdown pill in the status bar, and - when nothing is counting down - a bare marker saying the extension is running. A window showing nothing at all is indistinguishable from a failed install, since this extension is installed from a VSIX to wait for an event hours away. `pending` restores hiding it when idle.
+ * Countdown pill in the status bar, and - when nothing is counting down - a bare marker saying the extension is running. A window showing nothing at all is indistinguishable from a failed install, since this extension is installed from a VSIX to wait for an event hours away. The `pending` setting hides it when idle.
  */
 export class CountdownStatusBar {
   private readonly item: vscode.StatusBarItem;
