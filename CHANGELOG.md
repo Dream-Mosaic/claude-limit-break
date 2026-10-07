@@ -39,7 +39,9 @@ The first release.
   writes, a tool returns, a subagent quotes or you paste never arms a timer: a
   `grep` quoting a banner, a checkpoint note, a percentage-usage warning, even a
   limit notice or an error render quoted word for word. A flagged entry is
-  believed wherever its text appears. The one other shape believed is a usage
+  believed wherever its text appears, except in a subagent's own transcript:
+  a limit or error inside a subagent is left to the parent session, which
+  records its own stop. The one other shape believed is a usage
   limit hit during a manual `/compact` (next entry).
 - Picks up a usage limit hit during compaction. A `/compact` that fails on a
   usage limit is written unflagged, as a `system` / `local_command` entry

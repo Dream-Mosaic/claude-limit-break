@@ -407,6 +407,11 @@ export class TranscriptWatcher {
         if (nativeStatus) {
             return { nativeStatus: { status: nativeStatus, cwd, file }, inputNeeded };
         }
+        // A subagent's failure is reported to its parent, which records its own stop; arming
+        // here would be redundant or wrong, and this file never grows again to show a resume worked.
+        if (isSubagentFile(file)) {
+            return { inputNeeded };
+        }
         const candidates: Candidate[] = [];
         collectStrings(entry, candidates, 0);
         // The one admission gate for a limit or overload: Claude Code itself flagged the entry as an
@@ -427,8 +432,7 @@ export class TranscriptWatcher {
         const basis = writtenAt ?? now;
 
         // Limits only from a flagged entry. Entry type is not consulted: Claude Code writes its
-        // notices as synthetic entries that can carry type "user". Flagged entries in subagents/
-        // files still arm. Turn-end detection above is unaffected.
+        // notices as synthetic entries that can carry type "user".
         if (flagged) {
             // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes on the flagged
             // entry; it wins over the text when present.

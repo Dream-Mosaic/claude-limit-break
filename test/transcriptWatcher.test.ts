@@ -440,24 +440,11 @@ test('a subagent file never arms a limit timer, even quoting a real banner verba
   assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
 });
 
-test('a subagent file still reports turn-end and overload - only limit detection is skipped', () => {
-  // The veto is scoped to limits: a subagent that hits the limit stops its
-  // parent, whose own transcript records it, but a subagent's turn ending or
-  // failing over is still real information this watcher already reports.
+test('a subagent file still reports turn-end; a limit or overload there is left to the parent', () => {
   const turnEndLine = entry({ type: 'assistant', message: { stop_reason: 'end_turn', content: 'Done.' } });
   assert.ok(
     make().inspectLine(turnEndLine, SUBAGENT_FILE).inputNeeded,
     'turn-end must still be reported for a subagent file',
-  );
-
-  const overloadLine2 = entry({
-    type: 'assistant',
-    isApiErrorMessage: true,
-    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
-  });
-  assert.ok(
-    make().inspectLine(overloadLine2, SUBAGENT_FILE).overload,
-    'overload must still be reported for a subagent file',
   );
 });
 
@@ -547,23 +534,42 @@ test('a flagged real banner still arms a timer (positive case)', () => {
   assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-// Flagged entries are exempt from every veto, subagent-file included: a subagent
-// that genuinely hits the limit must still arm.
+// A subagent's failure is reported back to the parent, which writes its own flagged entry,
+// so a flagged entry in a subagents/ file arms nothing; the parent file still does.
 
-test('a flagged banner in a subagents/ file still arms a timer', () => {
+test('a flagged banner in a subagents/ file does not arm a timer, but the same entry in the parent file does', () => {
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
     message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
   });
-  assert.ok(make().inspectLine(line, SUBAGENT_FILE).limit, 'a flagged entry must not be dropped by the subagent-file veto');
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a timer', () => {
+test('a flagged quotaLimits.resetsAt entry in a subagents/ file does not arm a timer, but the parent file does', () => {
   const resetsAt = Date.now() + 2 * 3_600_000;
-  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
-  assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
+  const line = quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours");
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit);
   assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
+});
+
+test('a flagged overload in a subagents/ file arms nothing, but the parent file still does', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+  });
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
+  assert.ok(make().inspectLine(line, FILE).overload);
+});
+
+test('a compaction limit line in a subagents/ file arms nothing', () => {
+  const line = entry(compactionEntry());
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  assert.ok(make().inspectLine(line, FILE).limit, 'control: the parent file arms');
 });
 
 // Overload-detection rules, wired through inspectLine.
@@ -700,8 +706,7 @@ test('an ordinary flagged quotaLimits entry is unaffected by the transient-429 s
   assert.equal(out.overload, undefined);
 });
 
-// The subagent-file veto also covers the overload path's untrusted-text rules.
-// Flagged entries stay exempt.
+// Subagent files arm no overload, flagged or not.
 
 test('an unflagged assistant note in a subagents/ file does not schedule an overload retry', () => {
   const line = entry({
@@ -711,16 +716,14 @@ test('an unflagged assistant note in a subagents/ file does not schedule an over
   assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
 });
 
-test('a flagged banner in a subagents/ file still schedules an overload retry (positive control)', () => {
+test('a flagged banner in a subagents/ file does not schedule an overload retry either', () => {
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
     message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
   });
-  assert.ok(
-    make().inspectLine(line, SUBAGENT_FILE).overload,
-    'a flagged entry must not be dropped by the subagent-file veto',
-  );
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
+  assert.ok(make().inspectLine(line, FILE).overload, 'control: the parent file schedules');
 });
 
 // Every transient render Claude Code documents, as the text of the flagged entry
