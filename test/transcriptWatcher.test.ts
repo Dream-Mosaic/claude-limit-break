@@ -1500,6 +1500,15 @@ test('a structured reset more than 8 days out arms nothing and warns, naming the
   assert.match(warnings[0]!, /more than 8 days out/);
 });
 
+test('with maxWaitHours above 8 days, the absurd warning names that bound', () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 300, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  const out = w.inspectLine(quotaEntry(Date.now() + 13 * 86_400_000, "You've hit your weekly limit"), FILE);
+  assert.equal(out.limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /more than 12\.5 days out/);
+});
+
 test('a structured reset in the past warns as history, once per file however many copies the fork holds', () => {
   const { w, warnings } = warnWatcher();
   const written = new Date(Date.now() - 12 * 3_600_000);

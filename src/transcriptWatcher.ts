@@ -562,7 +562,7 @@ export class TranscriptWatcher {
             return;
         }
         if (rejection.reason === 'absurd') {
-            const boundDays = Math.max(MAX_RESET_DAYS, Math.round(this.getMaxWaitHours() / 24));
+            const boundDays = Number(Math.max(MAX_RESET_DAYS, this.getMaxWaitHours() / 24).toFixed(1));
             this.log.warn(
                 `${what} in session ${session} resets at ${at}, more than ${boundDays} days out, longer than any ` +
                     `Claude usage limit; not picking it up as a likely misread: ${shown}`,
