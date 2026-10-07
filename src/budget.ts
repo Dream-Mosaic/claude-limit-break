@@ -21,19 +21,13 @@ const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v)
 /**
  * The newest REAL usage record in a chunk read off the end of a transcript.
  *
- * Scanned backwards, because the last one is the only one that describes the
- * context as it stands now. Lines that do not parse are skipped rather than
- * thrown on: a fixed-size read off the end of a multi-megabyte file lands
- * mid-line, and that fragment is not a record.
+ * Scanned backwards, because the last one is the only one that describes the context as it
+ * stands now. Lines that do not parse are skipped: a fixed-size read off the end lands mid-line.
  *
- * The trap: at a usage limit or an overload the transcript's LAST line is
- * Claude Code's own synthetic error entry, and that entry carries a `usage`
- * block that is all zeros. Taking "the newest entry with a usage block" read
- * that, estimated 0 tokens, and let every resume through - maxResumeTokens
- * never fired. Measured on one machine's transcripts, 140 of 143 such entries
- * were all-zero. So an entry only counts if it is a real API turn: not flagged
- * `isApiErrorMessage`, not from model `<synthetic>`, and with counted tokens
- * that sum to more than zero. Anything else is skipped and the walk goes on.
+ * At a usage limit or an overload the LAST line is Claude Code's synthetic error entry, whose
+ * `usage` block is all zeros; reading it estimates 0 tokens and lets every resume through. So
+ * an entry only counts if it is a real API turn: not flagged `isApiErrorMessage`, not model
+ * `<synthetic>`, and with counted tokens summing to more than zero.
  */
 export function parseLastUsage(tail: string): UsageRecord | undefined {
   const lines = tail.split(/\r?\n/);
@@ -57,9 +51,9 @@ export function parseLastUsage(tail: string): UsageRecord | undefined {
       cacheRead: num(usage.cache_read_input_tokens),
       cacheCreate: num(usage.cache_creation_input_tokens),
     };
-    // Some 2.1.25x-2.1.27x turns at compaction boundaries report 0 here but carry
-    // real numbers in cache_creation.ephemeral_1h_input_tokens / usage.iterations[].
-    // They are skipped, so the result is the turn before: an overestimate, never a silent pass.
+    // Some compaction-boundary turns report 0 here but carry real numbers in
+    // cache_creation.ephemeral_1h_input_tokens / usage.iterations[]. They are skipped, so the
+    // result is the turn before: an overestimate, never a silent pass.
     if (contextTokens(record) <= 0) {
       continue;
     }
@@ -69,14 +63,11 @@ export function parseLastUsage(tail: string): UsageRecord | undefined {
 }
 
 /**
- * What resuming this session should cost: the live context of its newest real
- * turn, or `undefined` when no real turn exists.
+ * What resuming this session should cost: the live context of its newest real turn, or
+ * `undefined` when no real turn exists.
  *
- * There is no byte-count fallback. A transcript accumulates everything ever
- * written to it - turns already summarised away by compaction, whole segments
- * a reload replayed verbatim, bookkeeping lines that never reach a prompt - and
- * on this project's own 11.2 MB session that read 2,007,179 tokens against a
- * measured 432,163. A session with no real usage record anywhere in the file
+ * There is no byte-count fallback: a transcript accumulates summarised-away turns, replayed
+ * segments and bookkeeping lines, and overestimates badly. A session with no real usage record
  * never completed an API turn, so it is small and unmeasured, not expensive.
  */
 export function estimateResumeTokens(usage?: UsageRecord): number | undefined {
