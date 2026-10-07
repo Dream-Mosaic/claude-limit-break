@@ -30,14 +30,9 @@ test('detects every documented limit format', () => {
     ['Session limit reached. Try again in 45 minutes', 'duration-minutes'],
     ['You have reached your usage limit. Try again in 5 hours.', 'phrasing'],
     ['Error 429: rate limit exceeded, try again in 2 hours', '429-routes-here'],
-    // Captured verbatim from a real transcript on 2026-09-09, when two probe
-    // sessions hit an actual limit. The bare epoch form above was written from
-    // the docs; this is what Claude Code really writes, with a status prefix and
-    // a middot ahead of the notice the parser is looking for.
+    // Real transcript text: a status prefix and a middot ahead of the notice.
     [`API Error: Request rejected (429) · Claude AI usage limit reached|${epochAt('2026-08-03T17:00:00Z')}`, 'real-429-prefixed'],
-    // Also captured verbatim, 2026-09-10 and 2026-09-11, from this project's own
-    // sessions hitting genuine limits. Note the middot separator, where the form
-    // taken from the docs above uses a hyphen, and the bare hour with no minutes.
+    // Real notices: a middot separator (the documented form uses a hyphen), and a bare hour with no minutes.
     ["You've hit your session limit · resets 12:40am (America/Chicago)", 'real-clock+tz-middot'],
     ["You've hit your session limit · resets 2am (America/Chicago)", 'real-bare-hour'],
   ];
@@ -47,26 +42,14 @@ test('detects every documented limit format', () => {
 });
 
 test('a bullet glued to the reset time still parses', () => {
-  // Claude-Autopilot's issue #25 was a live break: the CLI started writing
-  // "5-hour limit reached ∙ resets 1am" and their regex, which had the
-  // separator baked in, stopped matching. Their PR #26 then had to handle
-  // three different bullet codepoints.
-  //
-  // This parser never had that exposure, but NOT because of the bullet class in
-  // `normalize` - the patterns simply do not care what sits between the hint and
-  // the time. `5-hour limit reached BANANA resets 1am` parses. Which means the
-  // obvious regression test - the notice with a bullet where the separator goes -
-  // proves nothing: it passes with bullet normalisation deleted. Removing that
-  // line leaves the whole suite green, so nothing here pinned it.
-  //
-  // The one shape that genuinely depends on it is a bullet with no spaces
-  // between `resets` and the time, which reaches the time matcher as a single
-  // token. That is what this test pins. It fails if the bullet class in
-  // `normalize` is removed; the cases above do not.
+  // The patterns ignore what sits between the hint and the time, so a bullet with
+  // spaces around it passes even without bullet normalisation. A bullet with no
+  // spaces reaches the time matcher as one token, and fails if the bullet class in
+  // `normalize` is removed.
   const glued = '5-hour limit reached resets∙1am';
   assert.ok(detectLimit(glued, NOW, MAXW), 'bullet glued to the time must normalise away');
 
-  // All five separators Claude Code has been seen to use, plus the ASCII form.
+  // The separators Claude Code uses, plus the ASCII form.
   for (const sep of ['∙', '·', '•', '‧', '●', '-']) {
     const text = `5-hour limit reached ${sep} resets 1am`;
     assert.ok(detectLimit(text, NOW, MAXW), `separator ${JSON.stringify(sep)}: ${text}`);
@@ -85,8 +68,7 @@ test('ignores prose and source code that merely discuss limits', () => {
   }
 });
 
-// Wave D (policy B): beyond the wait horizon is no longer dropped - it is
-// offer-only (see the D1 tests below). Only past MAX_RESET_DAYS is rejected.
+// Beyond the wait horizon is offer-only; only past MAX_RESET_DAYS is it rejected.
 test('a reset time beyond the wait horizon is offer-only, not automatic', () => {
   assert.equal(detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW)?.offerOnly, true);
 });
@@ -116,7 +98,7 @@ test('formatDuration renders compact countdowns', () => {
   assert.equal(formatDuration(0), '0s');
   assert.equal(formatDuration(42_000), '42s');
   assert.equal(formatDuration(3_600_000 * 4 + 60_000 * 32), '4h 32m');
-  // Wave D fix round 1, Minor 4: a day unit, so a weekly reset is not "167h 0m".
+  // A day unit, so a weekly reset is not "167h 0m".
   assert.equal(formatDuration(3_600_000 * 23 + 60_000 * 59), '23h 59m');
   assert.equal(formatDuration(86_400_000), '1d 0h');
   assert.equal(formatDuration(86_400_000 * 6 + 3_600_000 * 23 + 60_000 * 59), '6d 23h');
@@ -145,9 +127,7 @@ test('a trusted entry bypasses the source-code guard', () => {
 });
 
 test('a real captured 429 notice resolves to the instant it names, prefix and all', () => {
-  // Regression for the shape recovered from the 2026-09-09 probe sessions. The
-  // epoch is the reset time; the surrounding "API Error: Request rejected
-  // (429) · " prefix must not shift or defeat it.
+  // The "API Error: Request rejected (429) · " prefix must not shift or defeat the epoch.
   const resetAt = new Date('2026-08-03T17:00:00Z');
   const hit = detectLimit(
     `API Error: Request rejected (429) · Claude AI usage limit reached|${epochAt(resetAt.toISOString())}`,
@@ -159,11 +139,9 @@ test('a real captured 429 notice resolves to the instant it names, prefix and al
 });
 
 test('the real session-limit notices this project captured resolve to the right instant', () => {
-  // Two genuine notices, copied out of transcripts rather than written from the
-  // docs. Between them they cover the two ways the observed wording differs from
-  // the documented form: a middot rather than a hyphen before "resets", and an
-  // hour with no minutes. NOW is 2026-08-03T12:00:00Z, so both resolve to the
-  // next occurrence of that clock time in Chicago, which is on CDT (UTC-5).
+  // Two real notices: a middot rather than a hyphen before "resets", and an hour
+  // with no minutes. NOW is 2026-08-03T12:00:00Z, so both resolve to the next
+  // occurrence of that clock time in Chicago, on CDT (UTC-5).
   const cases: [string, string][] = [
     ["You've hit your session limit · resets 12:40am (America/Chicago)", '2026-08-04T05:40:00.000Z'],
     ["You've hit your session limit · resets 2am (America/Chicago)", '2026-08-04T07:00:00.000Z'],
@@ -175,25 +153,15 @@ test('the real session-limit notices this project captured resolve to the right 
   }
 });
 
-test('a zoneless reset time crossing a DST change still resolves to the right wall clock (#10)', () => {
-  // "You have hit your session limit, resets 5am" carries no zone of its own,
-  // so this exercises the "no zone named in the notice" branch of
-  // resolveClockTime - the one that used to roll an already-past reading
-  // forward by a flat 24h (DAY_MS) instead of advancing the calendar date and
-  // re-deriving the wall clock. A `zone` override pins the case to
-  // America/Chicago without depending on the machine's own zone: `TZ` is not
-  // reliably honoured by Node on Windows, so a bare `process.env.TZ` swap
-  // would not actually move this test.
-  //
-  // Each `now` is 22:00 local the night before the reset, exactly as in issue
-  // #10's repro. The three nights are the issue's own table:
-  //   2024-03-09 -> reset morning 2024-03-10 is the US spring-forward day.
-  //   2024-11-02 -> reset morning 2024-11-03 is the US fall-back day.
-  //   2024-06-10 -> control, no DST crossing, isolates the cause.
-  // In every case the expected wall clock is 05:00 America/Chicago. Before
-  // the fix this resolved to 06:00 (spring forward) and, worse, 04:00 (fall
-  // back) - an hour *before* the limit actually lifts, resuming into a
-  // session that is still limited.
+test('a zoneless reset time crossing a DST change still resolves to the right wall clock', () => {
+  // No zone in the notice exercises the "no zone named" branch of resolveClockTime:
+  // the calendar date must advance and the wall clock be re-derived, not a flat 24h
+  // added. A `zone` override pins America/Chicago, since `TZ` is not reliably
+  // honoured by Node on Windows. Each `now` is 22:00 local the night before the
+  // reset; the expected wall clock is 05:00 Chicago in every case:
+  //   2024-03-09 -> reset morning is the US spring-forward day.
+  //   2024-11-02 -> reset morning is the US fall-back day.
+  //   2024-06-10 -> control, no DST crossing.
   const text = 'You have hit your session limit, resets 5am';
   const cases: [string, string, string][] = [
     ['2024-03-09 spring forward', '2024-03-10T04:00:00.000Z', '2024-03-10T10:00:00.000Z'],
@@ -208,22 +176,11 @@ test('a zoneless reset time crossing a DST change still resolves to the right wa
   }
 });
 
-test('a wall-clock time inside a DST fall-back repeated hour resolves to the LATER instant (A7)', () => {
-  // America/Chicago falls back on 2026-11-01: the clock strikes 2:00am and is
-  // set back to 1:00am, so the wall-clock hour 01:00-01:59 happens twice -
-  // once on CDT (UTC-5), once on CST (UTC-6), an hour apart in real time.
-  // "resets 1:30am" is genuinely ambiguous between them. Before this fix,
-  // zonedWallClockToInstant's 2-pass convergence always lands on whichever
-  // offset applies AT the naive target instant - which is always the
-  // EARLIER (CDT) occurrence, confirmed by direct execution against the
-  // unmodified algorithm (2026-11-01T06:30:00.000Z, not the later
-  // 07:30:00.000Z). The brief requires the LATER instant: waking an hour
-  // late finds the banner (if any) still live and safe to re-check; waking
-  // an hour early risks resuming into a session that is still limited.
-  //
-  // `now` is 2026-11-01T05:30:00Z, which is 00:30 local in Chicago (still
-  // CDT, before the transition) - so "today" in the zone is Nov 1 and the
-  // dayOffset=0 candidate is the one under test.
+test('a wall-clock time inside a DST fall-back repeated hour resolves to the LATER instant', () => {
+  // America/Chicago falls back on 2026-11-01, so 01:00-01:59 happens twice (CDT,
+  // then CST). "resets 1:30am" is ambiguous; the LATER instant is safe, since waking
+  // early risks resuming into a session that is still limited.
+  // `now` is 2026-11-01T05:30:00Z (00:30 local, still CDT), so dayOffset=0 is under test.
   const now = new Date('2026-11-01T05:30:00Z');
   const text = "You've hit your session limit · resets 1:30am (America/Chicago)";
   const hit = detectLimit(text, now, MAXW);
@@ -235,33 +192,11 @@ test('a wall-clock time inside a DST fall-back repeated hour resolves to the LAT
   );
 });
 
-test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the safe, LATER side of the gap (A7)', () => {
-  // America/Chicago springs forward on 2026-03-08: the clock strikes 2:00am
-  // and immediately jumps to 3:00am, so the wall-clock hour 02:00-02:59
-  // never happens at all. "resets 2:30am" names a reading that does not
-  // exist.
-  //
-  // Direct execution against the code as bbff534 left it (the 2-pass
-  // fall-back fix, with no gap-specific handling) showed it resolves this to
-  // 2026-03-08T07:30:00.000Z - which reads back as 01:30 CST, an hour
-  // EARLIER than the literal (nonexistent) 02:30 reading asked for. That
-  // happens because the 2-pass loop's second pass re-resolves the offset at
-  // its own first-pass candidate (already past the transition, so CDT),
-  // overshooting onto the early side of the jump. This is the unsafe
-  // direction the brief warns about: waking early risks resuming into a
-  // session that has not actually reset. So this is a case where the test
-  // shows the (unmodified) code wrong, per the brief's "change the
-  // implementation only if a test shows it is wrong" - the implementation
-  // was changed to detect a resolved instant that does not read back the
-  // requested hour:minute (proof the reading fell in a skipped hour) and
-  // step forward one hour onto the safe side instead: 2026-03-08T08:30:00Z,
-  // which reads 03:30 CDT - the first real instant on the other side of the
-  // jump. Late is safe (a still-live limit is simply re-checked); early is
-  // not (it resumes a session mid-limit).
-  //
-  // `now` is 2026-03-08T06:30:00Z, which is 00:30 local in Chicago (still
-  // CST, before the 08:00Z transition) - so "today" in the zone is Mar 8 and
-  // the dayOffset=0 candidate is the one under test.
+test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the safe, LATER side of the gap', () => {
+  // America/Chicago springs forward on 2026-03-08, so 02:00-02:59 never happens.
+  // "resets 2:30am" names a nonexistent reading; it must resolve to the safe, LATER
+  // side of the gap (03:30 CDT, 2026-03-08T08:30:00Z), never an hour early.
+  // `now` is 2026-03-08T06:30:00Z (00:30 local, still CST), so dayOffset=0 is under test.
   const now = new Date('2026-03-08T06:30:00Z');
   const text = "You've hit your session limit · resets 2:30am (America/Chicago)";
   const hit = detectLimit(text, now, MAXW);
@@ -273,11 +208,8 @@ test('a wall-clock time inside a DST spring-forward SKIPPED hour resolves to the
   );
 });
 
-// Issue #12: mutation testing found 10 of LIMIT_HINTS' entries could each be
-// deleted without any test failing - nothing pinned any one of them
-// individually. Each test below uses the exact input from the issue's table,
-// chosen so it trips only that one hint (checked by hand against every other
-// pattern in the array); deleting the hint it targets must turn it red.
+// Each test uses an input that trips only one LIMIT_HINTS entry, so deleting that
+// hint turns it red.
 test('LIMIT_HINTS: \\blimit reached\\b', () => {
   assert.ok(looksLikeLimitMessage('Limit reached. Try again in 3 hours'));
 });
@@ -318,8 +250,7 @@ test('LIMIT_HINTS: 429...too many requests', () => {
   assert.ok(looksLikeLimitMessage('429 Too Many Requests. Try again in 3 hours'));
 });
 
-// Issue #12: normalize()'s curly-quote, dash and escaped-newline transforms
-// were each unpinned - deleting any one line left the whole suite green.
+// normalize()'s curly-quote, dash and escaped-newline transforms are each pinned.
 test('normalize(): curly quotes fold to straight quotes', () => {
   assert.equal(normalize("You’ve hit your limit"), "You've hit your limit");
   assert.equal(normalize('Claude said “wait”'), 'Claude said "wait"');
@@ -331,16 +262,12 @@ test('normalize(): unicode dashes fold to ASCII hyphen', () => {
 });
 
 test('normalize(): JSON-escaped newlines become spaces', () => {
-  // A literal backslash-n (two characters), as seen when a notice is captured
-  // raw out of a JSON payload rather than parsed first.
+  // A literal backslash-n (two characters), as in a notice captured raw from a JSON payload.
   assert.equal(normalize('Usage limit reached.\\nTry again in 5 hours'), 'Usage limit reached. Try again in 5 hours');
 });
 
-// Issue #12 boundaries. 400/401 are hardcoded rather than derived from
-// MAX_NOTICE_LENGTH, so a mutation to the constant itself (400 -> 399) shows
-// up as a wrong-length string relative to the fixed boundary this test
-// checks, instead of the test silently re-deriving a new boundary and
-// staying green.
+// 400/401 are hardcoded rather than derived from MAX_NOTICE_LENGTH, so a mutation
+// of the constant shows up as a wrong-length string.
 test('detectLimit: MAX_NOTICE_LENGTH boundary (400 accepted, 401 rejected)', () => {
   const base = 'Usage limit reached. Try again in 5 hours.';
   const at400 = base + 'x'.repeat(400 - base.length);
@@ -357,14 +284,9 @@ test('detectLimit: the wait-horizon boundary accepts an exact tie', () => {
   assert.equal(hit.resumeAt.getTime(), NOW.getTime() + 24 * 3_600_000);
 });
 
-// ---------------------------------------------------------------------------
-// RESET_GRACE_MS: a resolved reset in the past is still due now within the
-// window, and history just beyond it. `readAt` - the real current time - is
-// deliberately distinct from `now` - the basis a relative notice is resolved
-// against - to pin that the grace check is decided against the former, not
-// the latter (transcriptWatcher passes the entry's own timestamp as `now`
-// and the actual wall clock as `readAt`).
-// ---------------------------------------------------------------------------
+// RESET_GRACE_MS: a resolved reset in the past is still due now within the window,
+// and history beyond it. `readAt` (the real clock) is distinct from `now` (the basis
+// a relative notice resolves against): the grace check must use `readAt`.
 
 test('detectLimit: RESET_GRACE_MS boundary, decided against readAt rather than the resolving basis', () => {
   const readAt = new Date('2026-08-03T12:00:00Z');
@@ -382,18 +304,13 @@ test('detectLimit: RESET_GRACE_MS boundary, decided against readAt rather than t
 });
 
 test('detectLimit: omitting readAt keeps every existing caller unaffected (readAt defaults to now)', () => {
-  // Every caller before readAt existed passed a single time reference for
-  // both roles; the default must reproduce that.
+  // The default reuses one time reference for both roles.
   const past = 'Claude AI usage limit reached. Try again in 10 minutes';
   assert.ok(detectLimit(past, new Date(NOW.getTime() - 20 * 60_000), MAXW), 'still within grace of its own basis');
 });
 
-// ---------------------------------------------------------------------------
-// resolveStructuredReset: quotaLimits.resetsAt, an already-absolute instant.
-// Same grace and horizon rules as detectLimit, but only one time reference -
-// there is no separate "written at" basis for an absolute value to resolve
-// against.
-// ---------------------------------------------------------------------------
+// resolveStructuredReset: quotaLimits.resetsAt, an absolute instant. Same grace and
+// horizon rules as detectLimit, with a single time reference.
 
 test('resolveStructuredReset: RESET_GRACE_MS boundary, both sides', () => {
   const now = new Date('2026-08-03T12:00:00Z');
@@ -413,16 +330,12 @@ test('resolveStructuredReset: a non-finite value is rejected outright', () => {
   assert.equal(resolveStructuredReset(NaN, new Date(), MAXW).kind, 'rejected');
 });
 
-// ---------------------------------------------------------------------------
-// The clock-reset rollover, made grace-aware so a notice read moments after
-// its own clock time struck is not skipped forward a full day.
-// ---------------------------------------------------------------------------
+// The clock-reset rollover is grace-aware: a notice read moments after its clock
+// time struck is not rolled a full day forward.
 
 test('the clock-reset rollover accepts a today occurrence still inside the grace window', () => {
-  // 1:05am America/Chicago (CST, UTC-6): five minutes after the target clock
-  // time, inside RESET_GRACE_MS. Without the grace-aware rollover this would
-  // be judged "already past" and rolled a full day forward, to tomorrow's
-  // 1am - a ~24h miss for a limit that lifted five minutes ago.
+  // 1:05am Chicago (CST, UTC-6): five minutes past the target, inside RESET_GRACE_MS,
+  // so it is due now, not rolled to tomorrow.
   const now = new Date('2026-01-15T07:05:00Z');
   const hit = detectLimit("You've hit your session limit - resets 1am (America/Chicago)", now, MAXW);
   assert.ok(hit, "today's occurrence, five minutes gone, must still be picked");
@@ -438,17 +351,12 @@ test('the clock-reset rollover still rolls to tomorrow once the grace window has
   assert.equal(hit.resumeAt.toISOString(), '2026-01-16T07:00:00.000Z', "tomorrow's 1am CST");
 });
 
-// ---------------------------------------------------------------------------
-// Task 3 (synthesis A3): text that merely LOOKS like a limit banner - a
-// percentage-usage status line, or text someone else is visibly quoting -
-// must not arm a timer on the untrusted path. A flagged entry (Claude Code's
-// own rate-limit marker) is unaffected, exactly like the existing
-// looksLikeCode guard.
-// ---------------------------------------------------------------------------
+// Text that merely looks like a limit banner (a percentage status line, visibly
+// quoted text) must not arm a timer on the untrusted path. A flagged entry is
+// unaffected, like the looksLikeCode guard.
 
 test('a percentage-usage status line does not arm untrusted, but does trusted (real false positive)', () => {
-  // Captured verbatim, 2026-09-23: "You've used 91% of your session limit ·
-  // resets 12:40pm" armed a timer from an untrusted entry.
+  // A usage-percentage status line, not a limit notice.
   const text = "You've used 91% of your session limit · resets 12:40pm";
   assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a usage-percentage line must not arm');
   assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
@@ -471,13 +379,13 @@ test('a bare "path:line-" grep prefix (no file extension) is still recognised', 
   assert.equal(detectLimit(text, NOW, MAXW), undefined);
 });
 
-test('fix round 1: an absolute Windows path with a drive letter is still recognised as a grep prefix', () => {
+test('an absolute Windows path with a drive letter is still recognised as a grep prefix', () => {
   const text = 'C:\\Users\\x\\y.ts:12:Claude AI usage limit reached. Try again in 5 hours';
   assert.equal(detectLimit(text, NOW, MAXW), undefined, 'untrusted: a drive-letter grep citation must not arm');
   assert.ok(detectLimit(text, NOW, MAXW, { trusted: true }), 'trusted: the same text is unaffected by the veto');
 });
 
-test('fix round 1: drive-letter support does not open a hole for real banners', () => {
+test('drive-letter support does not open a hole for real banners', () => {
   // "12:40pm" must not itself be read as a drive letter + path.
   const cases = [
     "You've hit your session limit · resets 12:40am (America/Chicago)",
@@ -520,18 +428,13 @@ test('looksLikeQuotedNotice checks each physical line, since normalize() collaps
   assert.ok(looksLikeQuotedNotice(text));
 });
 
-test('fix round 1: looksLikeQuotedNotice recognises an absolute Windows path with a drive letter', () => {
+test('looksLikeQuotedNotice recognises an absolute Windows path with a drive letter', () => {
   assert.ok(looksLikeQuotedNotice('C:\\Users\\x\\y.ts:12: Claude AI usage limit reached'), 'drive-letter grep prefix');
   assert.equal(looksLikeQuotedNotice("You've hit your session limit \u00b7 resets 12:40pm"), false, '"12:40pm" is not a drive letter');
 });
 
-// ---------------------------------------------------------------------------
-// Task 4c (R4): a text-path detection names the limit TYPE when the notice
-// does. The labels are the 2.1.282 binary's own `vue` map
-// (research-api-errors-binary.md Q1), inverted; holderPolicy uses the type to
-// decide whether Claude Code's native auto-continue covers the limit (it arms
-// for five_hour only, Q4).
-// ---------------------------------------------------------------------------
+// A text-path detection names the limit type when the notice does; holderPolicy
+// uses it to decide whether native auto-continue (five_hour only) covers the limit.
 
 const LIMIT_TYPE_CASES: [string, string | undefined][] = [
   ["You've hit your session limit · resets 2am (America/Chicago)", 'five_hour'],
@@ -540,7 +443,7 @@ const LIMIT_TYPE_CASES: [string, string | undefined][] = [
   ["You've hit your Sonnet limit · resets 2am (America/Chicago)", 'seven_day_sonnet'],
   ["You've hit your Fable limit · resets 2am (America/Chicago)", 'seven_day_overage_included'],
   ["You've hit your usage credit limit · resets 2am (America/Chicago)", 'overage'],
-  // Progress-saved suffix the binary appends (function dh).
+  // Progress-saved suffix Claude Code appends.
   ["You've hit your weekly limit · resets 2am (America/Chicago) · progress saved", 'seven_day'],
   // Text that does not name a type leaves it undefined.
   ['Claude AI usage limit reached. Try again in 5 hours', undefined],
@@ -553,63 +456,58 @@ for (const [text, type] of LIMIT_TYPE_CASES) {
     const hit = detectLimit(text, NOW, MAXW, { trusted: true });
     assert.ok(hit, text);
     assert.equal(hit.rateLimitType, type);
-    // An absent type is an absent key, so a detection stays deep-equal to one
-    // written before the field existed.
+    // An absent type is an absent key, so a detection deep-equals one without the field.
     assert.equal(Object.hasOwn(hit, 'rateLimitType'), type !== undefined);
   });
 }
 
-// ---------------------------------------------------------------------------
-// Wave D, D1 (policy B, the user's decision): resolveStructuredReset tells its
-// three outcomes apart. Within maxWaitHours: automatic, as before. Beyond it
-// but no more than MAX_RESET_DAYS (8) out - a weekly limit, which is at most
-// 7 days - offer-only. Further out, or further in the past than the grace,
-// rejected with a reason the caller logs.
-// ---------------------------------------------------------------------------
+// resolveStructuredReset's three outcomes: within maxWaitHours automatic; beyond it
+// up to MAX_RESET_DAYS (8; a weekly reset is at most 7 days) offer-only; further out,
+// or further past than the grace, rejected with a reason the caller logs.
 
 const D1_NOW = new Date('2026-08-03T12:00:00Z');
 const secs = (ms: number) => ms / 1000;
 
-test('D1: a structured reset within maxWaitHours is automatic, a tie at the horizon included', () => {
+test('a structured reset within maxWaitHours is automatic, a tie at the horizon included', () => {
   const inTwo = resolveStructuredReset(secs(D1_NOW.getTime() + 2 * 3_600_000), D1_NOW, MAXW);
   assert.deepEqual(inTwo, { kind: 'auto', at: new Date(D1_NOW.getTime() + 2 * 3_600_000) });
   const atHorizon = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000), D1_NOW, MAXW);
   assert.equal(atHorizon.kind, 'auto', 'exactly at the horizon is still automatic');
 });
 
-test('D1: a structured reset one second past maxWaitHours is offer-only', () => {
+test('a structured reset one second past maxWaitHours is offer-only', () => {
   const v = resolveStructuredReset(secs(D1_NOW.getTime() + MAXW * 3_600_000) + 1, D1_NOW, MAXW);
   assert.equal(v.kind, 'offerOnly');
 });
 
-test('D1: a weekly reset (7 days out) is offer-only, and the 8-day bound is inclusive', () => {
+test('a weekly reset (7 days out) is offer-only, and the 8-day bound is inclusive', () => {
   assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, MAXW).kind, 'offerOnly');
   const atBound = resolveStructuredReset(secs(D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000), D1_NOW, MAXW);
   assert.equal(atBound.kind, 'offerOnly', 'exactly 8 days out is still believed');
   assert.equal(MAX_RESET_DAYS, 8);
 });
 
-test('D1: a structured reset more than 8 days out is rejected as absurd, with its instant', () => {
+test('a structured reset more than 8 days out is rejected as absurd, with its instant', () => {
   const at = D1_NOW.getTime() + MAX_RESET_DAYS * 86_400_000 + 1000;
   assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'absurd', at: new Date(at) });
 });
 
-test('D1: raising maxWaitHours turns a weekly reset automatic, but never past the 8-day bound', () => {
+test('raising maxWaitHours turns a weekly reset automatic, but never past the 8-day bound', () => {
   assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, 7 * 24).kind, 'auto');
   const nineDays = resolveStructuredReset(secs(D1_NOW.getTime() + 9 * 86_400_000), D1_NOW, 10 * 24);
   assert.equal(nineDays.kind, 'rejected', 'a huge maxWaitHours does not lift the misread bound');
 });
 
-test('D1: a structured reset further back than the grace is rejected as past, with its instant', () => {
+test('a structured reset further back than the grace is rejected as past, with its instant', () => {
   const at = D1_NOW.getTime() - RESET_GRACE_MS - 1000;
   assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'past', at: new Date(at) });
 });
 
-test('D1: a non-finite structured reset is rejected as unparseable', () => {
+test('a non-finite structured reset is rejected as unparseable', () => {
   assert.deepEqual(resolveStructuredReset(Number.NaN, D1_NOW, MAXW), { kind: 'rejected', reason: 'unparseable' });
 });
 
-test('D1: detectLimit applies the same three outcomes to text', () => {
+test('detectLimit applies the same three outcomes to text', () => {
   const offer = detectLimit('Usage limit reached. Try again in 40 hours', NOW, MAXW);
   assert.equal(offer?.offerOnly, true, '40 hours out is offer-only at maxWaitHours 24');
   assert.equal(offer?.resumeAt.getTime(), NOW.getTime() + 40 * 3_600_000);
@@ -625,7 +523,7 @@ test('D1: detectLimit applies the same three outcomes to text', () => {
   assert.equal(retry?.kind === 'rejected' ? retry.reason : JSON.stringify(retry), 'absurd');
 });
 
-test('D1: classifyLimit tells "not a notice at all" (undefined) from a notice it could not use', () => {
+test('classifyLimit tells "not a notice at all" (undefined) from a notice it could not use', () => {
   assert.equal(classifyLimit('Claude finished the task successfully.', NOW, MAXW), undefined);
   const v = classifyLimit("You've hit your monthly spend limit · raise it at claude.ai/settings/usage", NOW, MAXW);
   assert.deepEqual(v, { kind: 'rejected', reason: 'unparseable' });
@@ -633,31 +531,24 @@ test('D1: classifyLimit tells "not a notice at all" (undefined) from a notice it
   assert.equal(past?.kind === 'rejected' ? past.reason : '', 'past');
 });
 
-test('D1: an automatic reading from a later rule still beats an offer-only one from an earlier rule', () => {
-  // The iso rule (earlier) reads 3 days out; the duration rule (later) reads
-  // 2 hours. "The first rule that yields a usable instant wins" was always
-  // about the automatic horizon; an offer is only taken when nothing is.
+test('an automatic reading from a later rule still beats an offer-only one from an earlier rule', () => {
+  // The iso rule (earlier) reads 3 days out; the duration rule (later) reads 2 hours.
+  // An offer is only taken when no rule yields an automatic reading.
   const v = detectLimit('Usage limit reached, resets at 2026-08-06T12:00:00Z. Try again in 2 hours', NOW, MAXW);
   assert.equal(v?.resumeAt.getTime(), NOW.getTime() + 2 * 3_600_000);
   assert.equal(v?.offerOnly, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Wave D, D2: the dated reset text Claude Code writes for a reset more than
-// 24h out (its `Zd` formatter: `toLocaleString("en-US", {month: "short", day:
-// "numeric", hour: "numeric", ...})`), in the two shapes the sources show -
-// "Aug 4, 1am" (real transcripts) and "Jun 3 at 4pm" (GitHub #68816) - plus
-// the docs' weekday form "Mon 12:00am". A zone in parentheses is required:
-// resolved with the same zone and DST machinery as the clock rule, the year
-// being the next occurrence on or after the entry's own timestamp.
-// ---------------------------------------------------------------------------
+// The dated reset text Claude Code writes for a reset more than 24h out: "Aug 4, 1am",
+// "Jun 3 at 4pm", and the docs' weekday form "Mon 12:00am". A zone in parentheses is
+// required; the year is the next occurrence on or after the entry's own timestamp.
 
 /** Resolve one notice the way the watcher does: trusted, against `basis`, read now at `readAt`. */
 const dated = (text: string, basis: string, maxWait = MAXW, readAt = basis) =>
   classifyLimit(text, new Date(basis), maxWait, { trusted: true, readAt: new Date(readAt) });
 const atOf = (v: ReturnType<typeof dated>) => (v?.kind === 'detected' ? v.detection.resumeAt.toISOString() : JSON.stringify(v));
 
-test('D2: the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offer-only weekly limit at 1am CDT', () => {
+test('the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offer-only weekly limit at 1am CDT', () => {
   const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10.016Z');
   assert.equal(v?.kind, 'detected');
   if (v?.kind !== 'detected') return;
@@ -667,29 +558,28 @@ test('D2: the real v2.1.220 sample (session 1e8a6fb6, no quotaLimits) is an offe
   assert.equal(v.detection.rule, 'dated-reset');
 });
 
-test('D2: the real v2.1.270 sample agrees with its own quotaLimits.resetsAt to the second', () => {
-  // Session 1e8a6fb6, 2026-09-25T01:33:11.483Z: the same entry carries
-  // quotaLimits.resetsAt 1790661600 - an independent oracle for the parse.
+test('the real v2.1.270 sample agrees with its own quotaLimits.resetsAt to the second', () => {
+  // The same entry carries quotaLimits.resetsAt 1790661600: an independent oracle for the parse.
   const v = dated("You've hit your weekly limit · resets Sep 29, 1am (America/Chicago)", '2026-09-25T01:33:11.483Z');
   assert.equal(atOf(v), new Date(1790661600 * 1000).toISOString());
 });
 
-test('D2: raising maxWaitHours makes the same dated reset automatic', () => {
+test('raising maxWaitHours makes the same dated reset automatic', () => {
   const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-07-31T04:55:10.016Z', 7 * 24);
   assert.equal(v?.kind === 'detected' ? Object.hasOwn(v.detection, 'offerOnly') : 'not detected', false);
 });
 
-test('D2: the "Jun 3 at 4pm (Europe/Berlin)" form from GitHub #68816 resolves in CEST', () => {
+test('the "Jun 3 at 4pm (Europe/Berlin)" form resolves in CEST', () => {
   assert.equal(atOf(dated("You've hit your weekly limit · resets Jun 3 at 4pm (Europe/Berlin)", '2026-06-01T10:00:00Z')), '2026-06-03T14:00:00.000Z');
 });
 
-test('D2: minutes are read when present', () => {
+test('minutes are read when present', () => {
   assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 1:30am (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T06:30:00.000Z');
   assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 12pm (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T17:00:00.000Z');
   assert.equal(atOf(dated("You've hit your weekly limit · resets Aug 4, 12am (America/Chicago)", '2026-07-31T04:55:10Z')), '2026-08-04T05:00:00.000Z');
 });
 
-test('D2: across New Year, a December entry saying "resets Jan 2" lands in the next year', () => {
+test('across New Year, a December entry saying "resets Jan 2" lands in the next year', () => {
   assert.equal(atOf(dated("You've hit your weekly limit · resets Jan 2, 1am (America/Chicago)", '2026-12-29T15:00:00Z')), '2027-01-02T07:00:00.000Z');
   assert.equal(atOf(dated("You've hit your weekly limit · resets Jan 2 at 9am (Europe/Berlin)", '2026-12-29T15:00:00Z')), '2027-01-02T08:00:00.000Z');
   // The zone's own calendar decides the year: 03:00Z on Jan 1 is still Dec 31 in Chicago.
@@ -700,7 +590,7 @@ test('D2: across New Year, a December entry saying "resets Jan 2" lands in the n
   assert.equal(atOf(dated("You've hit your weekly limit · resets Dec 31, 11pm (America/Chicago)", '2026-12-29T15:00:00Z')), '2027-01-01T05:00:00.000Z');
 });
 
-test('D2: a DST week in America/Chicago: the offset in force AT THE RESET is used, not the one at the entry', () => {
+test('a DST week in America/Chicago: the offset in force AT THE RESET is used, not the one at the entry', () => {
   // Spring forward 2026-03-08 02:00 CST -> 03:00 CDT.
   assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 9, 1am (America/Chicago)", '2026-03-05T12:00:00Z')), '2026-03-09T06:00:00.000Z');
   // A reading inside the skipped hour lands on the safe, later side of the gap.
@@ -711,7 +601,7 @@ test('D2: a DST week in America/Chicago: the offset in force AT THE RESET is use
   assert.equal(atOf(dated("You've hit your weekly limit · resets Nov 1, 1:30am (America/Chicago)", '2026-10-28T12:00:00Z')), '2026-11-01T07:30:00.000Z');
 });
 
-test('D2: a DST week in Europe/Berlin, both directions', () => {
+test('a DST week in Europe/Berlin, both directions', () => {
   // Spring forward 2026-03-29 02:00 CET -> 03:00 CEST.
   assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 30 at 4pm (Europe/Berlin)", '2026-03-25T12:00:00Z')), '2026-03-30T14:00:00.000Z');
   assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 29 at 2:30am (Europe/Berlin)", '2026-03-25T12:00:00Z')), '2026-03-29T01:30:00.000Z');
@@ -720,7 +610,7 @@ test('D2: a DST week in Europe/Berlin, both directions', () => {
   assert.equal(atOf(dated("You've hit your weekly limit · resets Oct 25, 2:30am (Europe/Berlin)", '2026-10-21T12:00:00Z')), '2026-10-25T01:30:00.000Z');
 });
 
-test('D2: a dated reset with no zone is not parsed: rejected as unparseable, saying the zone is missing', () => {
+test('a dated reset with no zone is not parsed: rejected as unparseable, saying the zone is missing', () => {
   const v = dated("You've hit your weekly limit · resets Aug 4, 1am", '2026-07-31T04:55:10Z');
   assert.equal(v?.kind, 'rejected');
   if (v?.kind !== 'rejected') return;
@@ -729,7 +619,7 @@ test('D2: a dated reset with no zone is not parsed: rejected as unparseable, say
   assert.equal(detectLimit("You've hit your weekly limit · resets Jun 3 at 4pm", new Date('2026-06-01T10:00:00Z'), MAXW), undefined);
 });
 
-test('D2: a garbage date, time or zone is rejected as unparseable with a reason, never guessed at', () => {
+test('a garbage date, time or zone is rejected as unparseable with a reason, never guessed at', () => {
   const cases: [string, RegExp][] = [
     ["You've hit your weekly limit · resets Feb 30, 1am (America/Chicago)", /not a real date/],
     ["You've hit your weekly limit · resets Aug 44, 1am (America/Chicago)", /not a real date/],
@@ -748,7 +638,7 @@ test('D2: a garbage date, time or zone is rejected as unparseable with a reason,
   }
 });
 
-test('D2: a dated reset more than 8 days out is absurd; one already in the past (a fork read later) is history', () => {
+test('a dated reset more than 8 days out is absurd; one already in the past (a fork read later) is history', () => {
   const far = dated("You've hit your weekly limit · resets Aug 9, 1am (America/Chicago)", '2026-07-31T04:55:10Z');
   assert.equal(far?.kind === 'rejected' ? far.reason : atOf(far), 'absurd');
   // A date before the entry itself rolls to next year, which is absurd too.
@@ -758,13 +648,13 @@ test('D2: a dated reset more than 8 days out is absurd; one already in the past 
   assert.equal(stale?.kind === 'rejected' ? stale.reason : atOf(stale), 'past');
 });
 
-test('D2: a dated reset that struck minutes before the entry stays this year and is due now (grace)', () => {
+test('a dated reset that struck minutes before the entry stays this year and is due now (grace)', () => {
   const v = dated("You've hit your weekly limit · resets Aug 4, 1am (America/Chicago)", '2026-08-04T06:05:00Z');
   assert.equal(atOf(v), '2026-08-04T06:00:00.000Z');
   assert.equal(v?.kind === 'detected' ? v.detection.offerOnly : 'x', undefined, 'due now is automatic');
 });
 
-test('D2: the weekday form "Mon 12:00am", with a zone, is the next such weekday on or after the entry', () => {
+test('the weekday form "Mon 12:00am", with a zone, is the next such weekday on or after the entry', () => {
   // Wednesday 2026-09-30 10:00 CDT -> Monday 2026-10-05 00:00 CDT.
   const v = dated("You've hit your weekly limit · resets Mon 12:00am (America/Chicago)", '2026-09-30T15:00:00Z');
   assert.equal(atOf(v), '2026-10-05T05:00:00.000Z');
@@ -778,20 +668,19 @@ test('D2: the weekday form "Mon 12:00am", with a zone, is the next such weekday 
   assert.equal(atOf(dated("You've hit your weekly limit · resets Mon 9am (Europe/Berlin)", '2026-10-05T10:00:00Z')), '2026-10-12T07:00:00.000Z');
 });
 
-test('D2: the docs\' weekday form exactly as quoted, with no zone, is not parsed and says why', () => {
+test('the docs\' weekday form exactly as quoted, with no zone, is not parsed and says why', () => {
   const v = dated("You've hit your weekly limit · resets Mon 12:00am", '2026-09-30T15:00:00Z');
   assert.equal(v?.kind === 'rejected' ? v.reason : atOf(v), 'unparseable');
   assert.match(v?.kind === 'rejected' ? v.detail ?? '' : '', /no time zone/);
 });
 
-test('D2: the dated forms do not disturb the within-24h clock form', () => {
+test('the dated forms do not disturb the within-24h clock form', () => {
   assert.equal(atOf(dated("You've hit your session limit · resets 2am (America/Chicago)", '2026-08-03T12:00:00Z')), '2026-08-04T07:00:00.000Z');
 });
 
-test('D2: a skipped hour EAST of UTC lands one gap later, not two (London and Berlin, the clock rule too)', () => {
-  // NEXT.md's deferred finding: east of UTC the two-pass resolve already
-  // lands past the gap, and the flat one-hour step then overshot by another
-  // hour. London 2026-03-29: 01:00 GMT -> 02:00 BST, so "1:30am" reads 02:30 BST.
+test('a skipped hour EAST of UTC lands one gap later, not two (London and Berlin, the clock rule too)', () => {
+  // East of UTC the two-pass resolve already lands past the gap, and a flat one-hour
+  // step would overshoot. London 2026-03-29: 01:00 GMT -> 02:00 BST, so "1:30am" reads 02:30 BST.
   assert.equal(atOf(dated("You've hit your weekly limit · resets Mar 29, 1:30am (Europe/London)", '2026-03-25T12:00:00Z')), '2026-03-29T01:30:00.000Z');
   const clock = detectLimit("You've hit your session limit · resets 1:30am (Europe/London)", new Date('2026-03-28T22:00:00Z'), MAXW);
   assert.equal(clock?.resumeAt.toISOString(), '2026-03-29T01:30:00.000Z');

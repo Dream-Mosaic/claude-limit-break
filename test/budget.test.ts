@@ -24,7 +24,7 @@ test('refuses a resume over the cap and says why', () => {
 });
 
 test('checkBudget: an estimate exactly at the cap is allowed, not rejected', () => {
-  // Issue #12 boundary: `estimate > maxResumeTokens` in checkBudget.
+  // Boundary: `estimate > maxResumeTokens` in checkBudget.
   const v = checkBudget(150_001, U150);
   assert.equal(v.estimate, 150_001);
   assert.equal(v.allowed, true, 'an estimate exactly at the cap must still be allowed');
@@ -61,16 +61,9 @@ test('incident budget ignores nonsense usage numbers', () => {
   assert.equal(b.total, 0);
 });
 
-// ---------------------------------------------------------------------------
-// Estimating from the transcript's own usage records.
-//
-// Counting bytes counts everything ever written to the file: turns already
-// summarised away by compaction, segments a reload replayed verbatim, and the
-// bookkeeping lines that never reach a prompt. On a real 11.2 MB session that
-// read 2,007,179 tokens, while the session's own records show the largest
-// cache creation it ever paid was 407,570. The estimate refused a resume that
-// would have cost a quarter of what it claimed.
-// ---------------------------------------------------------------------------
+// Estimating from the transcript's own usage records, not file bytes: bytes also
+// count turns already compacted away, replayed segments and bookkeeping lines that
+// never reach a prompt.
 
 const usageLine = (u: Record<string, number>, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: 'assistant', message: { usage: u }, ...extra });
@@ -115,8 +108,7 @@ test('parseLastUsage reports nothing when the tail holds no usage at all', () =>
   assert.equal(parseLastUsage(''), undefined);
 });
 
-// The two shapes Claude Code really writes for its synthetic limit/overload
-// entry (grep of ~/.claude/projects: 140 of 143 are all-zero).
+// The two shapes Claude Code writes for its synthetic limit/overload entry.
 const REAL_TURN = { input_tokens: 2, cache_read_input_tokens: 24_591, cache_creation_input_tokens: 407_570 };
 const REAL_TURN_RECORD = { input: 2, cacheRead: 24_591, cacheCreate: 407_570 };
 const SHORT_ZERO = { input_tokens: 0, output_tokens: 0 };
