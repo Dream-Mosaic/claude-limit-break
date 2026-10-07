@@ -3,23 +3,11 @@ import * as path from 'node:path';
 import type { Logger } from './log';
 
 /**
- * A machine-wide, filesystem-based claim so that only one VS Code window
- * launches a resume for a given usage-limit reset.
+ * A machine-wide, filesystem-based claim so only one VS Code window launches a resume for a given usage-limit reset.
  *
- * Root cause (2026-09-24): every VS Code window runs its own copy of the
- * extension, and with `watchScope: machine` every copy watches every
- * transcript. Two windows can detect the same limit within milliseconds of
- * each other and each schedule their own resume with their own jitter -
- * Task 2's holder check (holderPolicy.ts) catches a second fire MINUTES
- * later, once the first child shows up in `claude agents`, but it cannot
- * catch two windows firing a second or two apart, before that.
+ * With `watchScope: machine` every window watches every transcript, so two can detect the same limit within milliseconds and each schedule a resume. holderPolicy.ts only catches a second fire minutes later, once the first child shows in `claude agents`.
  *
- * A plain file, not a locking library: `fs.openSync(path, 'wx')` fails
- * atomically when the file already exists, which is all a "first one wins"
- * claim needs. No process needs to be told when it is done with the claim
- * either - a claim just ages out (see the 1h staleness check here, and the
- * 24h sweep in cleanupStaleClaims), so a window that crashes mid-resume
- * cannot wedge every future attempt shut.
+ * `fs.openSync(path, 'wx')` fails atomically when the file exists, which is all a "first one wins" claim needs. Claims are never released on success; they age out (STALE_MS, then cleanupStaleClaims), so a crashed window cannot wedge future attempts.
  */
 
 export type ClaimResult = 'claimed' | 'taken';
@@ -51,36 +39,13 @@ export function claimsDir(): string {
 }
 
 /**
- * The key naming the reset a job belongs to - identical across every window
- * watching the same account, so their independent claim attempts collide on
- * purpose.
+ * The key naming the reset a job belongs to - identical across every window watching the same account, so their claim attempts collide on purpose.
  *
- * A limit job's key is its un-jittered deadline (`baseResumeAtMs`): every
- * window parses the same "Try again in 5 hours" notice into the same
- * instant, before each window's own random padding is added, so this is
- * stable no matter how differently each window's jitter rolled.
+ * A limit job uses its un-jittered deadline (`baseResumeAtMs`): every window parses the same notice into the same instant before adding its own jitter.
  *
- * An overload job has no stated reset time at all - "the jitter *is* the
- * backoff" (policy.ts) - so its key is the identity of the transcript entry
- * that reported it: `entryTimestampMs`, the entry's own `timestamp`
- * (final review, Important 3). Every window reads the same line, so every
- * window gets the same value, and two separate overloads are two separate
- * entries with two separate timestamps.
+ * An overload job has no stated reset time, so it uses `entryTimestampMs`, the reporting transcript entry's own timestamp: the same in every window, and distinct for separate overloads. (A time bucket would collide with this window's own earlier claim, still fresh, and drop a genuine second overload.)
  *
- * That replaced a 10-minute bucket of the detection instant
- * (`baseResumeAtMs`, the moment planResume read `now`). The bucket collided
- * across windows as intended, but also with THIS window's own earlier claim:
- * a successful automatic resume leaves its claim fresh for an hour
- * (STALE_MS), so a genuine second overload in the same bucket found the key
- * 'taken' by itself and was dropped. The bucket survives only as the
- * fallback for a job with no entry timestamp (an entry that carried none, or
- * a job persisted by an older build).
- *
- * Fix round 1 history, still true of that fallback: bucketing `resumeAtMs`
- * - the padded fire time, with each window's own independently-rolled
- * jitter in it - put two windows' copies of the same overload in different
- * buckets far more often than not; `baseResumeAtMs` does not have that
- * problem.
+ * With no entry timestamp it falls back to a 10-minute bucket of `baseResumeAtMs`; the padded `resumeAtMs` would put different windows' copies in different buckets.
  */
 export function claimKeyFor(job: {
   sessionId: string;
@@ -106,13 +71,9 @@ function claimPath(dir: string, key: string): string {
  * One attempt at `fs.openSync(file, 'wx')`.
  *
  * - Succeeds: the claim is ours. 'claimed'.
- * - Fails with EEXIST and the existing file is fresh (under 1h old, per
- *   STALE_MS): someone else already holds it. 'taken'.
- * - Fails with EEXIST and the existing file is stale: it is unlinked here so
- *   the caller can retry the open. 'retry'.
- * - Fails any other way (permissions, a full disk, a bad path): fail open
- *   (Goal 2 - never block a resume nobody is coming back to answer for),
- *   logged so the failure is not silent. 'claimed'.
+ * - Fails with EEXIST and the existing file is fresh: someone else holds it. 'taken'.
+ * - Fails with EEXIST and the existing file is stale: it is unlinked so the caller can retry. 'retry'.
+ * - Fails any other way (permissions, full disk, bad path): fails open, logged. 'claimed'.
  */
 function attempt(
   file: string,
@@ -149,10 +110,7 @@ function attempt(
     return 'retry';
   }
   try {
-    // "<pid> <ms> <window>": the window identity (vscode.env.sessionId) is
-    // what lets claimOwner tell this window's own earlier claim apart from
-    // another window's (final review, Important 3). Last, so an older
-    // build's two-field file simply reads as having no owner.
+    // "<pid> <ms> <window>": the window identity (vscode.env.sessionId) lets claimOwner tell this window's claim from another's. Last, so an older two-field file reads as ownerless.
     fs.writeSync(fd, owner ? `${process.pid} ${nowMs} ${owner}` : `${process.pid} ${nowMs}`);
   } finally {
     fs.closeSync(fd);
@@ -161,18 +119,11 @@ function attempt(
 }
 
 /**
- * Claim `key` for this process. See the module doc for why this exists and
- * why a plain file is enough.
+ * Claim `key` for this process; see the module doc.
  *
- * `dir` and `fs` are both parameters rather than fixed to `claimsDir()` and
- * real `node:fs` - dir so tests use a throwaway temp directory instead of the
- * real machine-wide one, `fs` so a test can simulate the "any other
- * filesystem error" branch without actually breaking the filesystem.
+ * `dir` and `fs` are parameters so tests can use a temp directory and simulate filesystem errors.
  *
- * Retries at most once, on a stale takeover: if the retry itself hits
- * another 'retry' (another process recreated the file between the unlink and
- * the second open - vanishingly unlikely, but not impossible), this fails
- * open rather than looping.
+ * Retries at most once, on a stale takeover; a second 'retry' fails open rather than looping.
  */
 export function claimResume(
   dir: string,
@@ -182,12 +133,7 @@ export function claimResume(
   log: Logger = noopLog,
   owner?: string,
 ): ClaimResult {
-  // Fails open like every other filesystem failure in this module (final fix
-  // wave B, B3; final review M3). Outside any try this threw out of onFire
-  // after the scheduler had already consumed the job, and VS Code swallows a
-  // listener's error: the job was lost without a trace. Cancel reaches this
-  // through holdClaim, so it is covered too. No directory means nothing can
-  // be claimed, so the resume goes ahead as if the claim were ours.
+  // Fails open like every other filesystem failure here: a throw out of onFire would lose the job silently (VS Code swallows listener errors). No directory means nothing can be claimed.
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch (err) {
@@ -204,20 +150,9 @@ export function claimResume(
 }
 
 /**
- * Claim `key` and keep it fresh until `untilMs`, not just for STALE_MS from
- * now. Used by Cancel (final review, Important 7): with watchScope machine
- * every window holds its own copy of the same pending job, and cancelling in
- * one window used to leave every other window to fire it anyway. A claim
- * written at cancel time is what makes the others drop it - but a job can
- * count down for hours, far past STALE_MS, so an ordinary claim would read as
- * abandoned by the time it mattered. Staleness is measured from the file's
- * mtime, so this sets the mtime to the deadline (the cancelled job's own
- * fire time): another window's copy fires within its jitter of that
- * deadline, well inside STALE_MS of it, and the 24h sweep still collects it.
+ * Claim `key` and keep it fresh until `untilMs`, not just STALE_MS from now. Used by Cancel: with watchScope machine every window holds a copy of the job, and a claim at cancel time makes the others drop it. Staleness is measured from the file's mtime, so this sets the mtime to the deadline.
  *
- * A claim someone else already holds is left alone ('taken'), and a failure
- * to set the mtime is logged and otherwise ignored - the claim still exists,
- * it just ages out at the ordinary time.
+ * A claim someone else holds is left alone ('taken'); a failure to set the mtime is logged and ignored.
  */
 export function holdClaim(
   dir: string,
@@ -239,27 +174,13 @@ export function holdClaim(
   return result;
 }
 
-/**
- * How far past the latest possible jittered fire a held claim lasts (final
- * fix wave A, A5): slack for a window whose tick, `claude agents` listing or
- * launch runs a little late.
- */
+/** Slack past the latest possible jittered fire, for a window whose tick, `claude agents` listing or launch runs late. */
 export const CLAIM_MARGIN_MS = 10 * 60_000;
 
 /**
- * The one deadline every hold of a job's claim runs to (wave A fix round 1,
- * review m2): the automatic fire's own claim (A5), the counting Resume Now
- * (M5) and Cancel. Every window watching the machine holds its own copy of
- * the job, padded by its own jitter roll, so another copy can fire anywhere
- * up to the reset plus the longest jitter the setting allows; a hold to THIS
- * window's fire time lapsed early whenever that roll was short. The A6
- * overload backoff sits inside `baseResumeAtMs`, so it is covered too.
+ * The one deadline every hold of a job's claim runs to: the automatic fire, the counting Resume Now, and Cancel. Another window's copy can fire anywhere up to the reset plus the longest jitter the setting allows, so a hold to THIS window's fire time could lapse early.
  *
- * The band is read as `randomJitterMs` reads it - an inverted one is the
- * range it describes - and the deadline is never earlier than the job's own
- * `resumeAtMs` (a job planned under a wider band than the one now in force).
- * Pure; holdClaim only ever moves a claim's mtime forward, so a deadline
- * already in the past still leaves an ordinary claim.
+ * The band is read as `randomJitterMs` reads it (an inverted one is the range it describes), and the deadline is never earlier than the job's own `resumeAtMs`. Pure; holdClaim only moves an mtime forward.
  */
 export function claimHoldDeadline(
   job: { baseResumeAtMs: number; resumeAtMs: number },
@@ -271,16 +192,9 @@ export function claimHoldDeadline(
 }
 
 /**
- * The window identity recorded in `key`'s claim file by claimResume's
- * `owner`, or undefined when there is no such file, it cannot be read, or it
- * was written without one (an older build).
+ * The window identity recorded in `key`'s claim file, or undefined when there is no file, it is unreadable, or it has no owner field.
  *
- * Used for two things. It words a log line - "already claimed by this
- * window" rather than "by another window" (final review, Important 3). And
- * since final fix wave A, A8, it DECIDES one thing: a fresh plan in this
- * window releases a claim on its key only when this window owns it (a
- * Cancel's hold), never one another window holds. Anything unreadable reads
- * as undefined, i.e. not ours, so a doubt never releases a claim.
+ * A fresh plan in this window releases a claim on its key only when this window owns it (a Cancel's hold), never another window's. Anything unreadable reads as not ours.
  */
 export function claimOwner(
   dir: string,
@@ -298,16 +212,9 @@ export function claimOwner(
 }
 
 /**
- * Give up a claim this process took out. Called only when a launch off it
- * failed to start, so a later attempt (another window, or a manual retry) is
- * not blocked by a claim nothing is going to act on. A successful launch
- * never calls this, and neither does the Task 2 holder decision declining
- * (final review, Important 2: this window has handled that reset, and
- * releasing let every other window re-offer it); those claims age out on
- * their own (STALE_MS, then cleanupStaleClaims).
+ * Give up a claim this process took out. Called only when a launch off it failed to start, so a later attempt is not blocked. A successful launch never calls this, nor does a holder decision declining: this window has handled that reset, and releasing would let every other window re-offer it. Those claims age out.
  *
- * Missing file is not an error - the claim may already have expired, or
- * never existed (a manual resume that bypassed the claim check entirely).
+ * A missing file is not an error.
  */
 export function releaseClaim(dir: string, key: string, fs: ClaimFs, log: Logger = noopLog): void {
   try {
@@ -320,14 +227,7 @@ export function releaseClaim(dir: string, key: string, fs: ClaimFs, log: Logger 
 }
 
 /**
- * Delete claim files older than 24h. Run once on activation - disk hygiene
- * for a machine-wide directory nothing else ever cleans, not a correctness
- * mechanism (STALE_MS, an order of magnitude shorter, is what keeps a claim
- * from blocking anything for long).
- *
- * A missing directory (nothing has ever claimed anything on this machine) is
- * not an error. Only `*.claim` files are touched - anything else in the
- * directory is left alone, though nothing else is expected to be there.
+ * Delete claim files older than 24h, once on activation. Disk hygiene for a machine-wide directory, not a correctness mechanism (STALE_MS keeps claims from blocking). A missing directory is not an error; only `*.claim` files are touched.
  */
 export function cleanupStaleClaims(dir: string, nowMs: number, fs: ClaimFs, log: Logger = noopLog): void {
   let entries: string[];

@@ -2,22 +2,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /**
- * Where Claude Code keeps its own files: `$CLAUDE_CONFIG_DIR` when that is set
- * and non-empty, otherwise `~/.claude`.
+ * Where Claude Code keeps its own files: `$CLAUDE_CONFIG_DIR` when set and non-empty, otherwise `~/.claude`.
  *
- * Every read this extension makes under that directory (the transcript tree,
- * the per-pid session records, the user `settings.json`) goes through here, so
- * a relocated configuration directory cannot leave one reader looking at the
- * wrong tree (final review I3). The test is truthiness, not definedness, the
- * same as the CLI's own `process.env.CLAUDE_CONFIG_DIR || ...`: an empty
- * string falls back to `~/.claude` rather than resolving against this
- * process's cwd.
+ * Every read under that directory (transcripts, per-pid session records, user `settings.json`) goes through here. The test is truthiness like the CLI's `process.env.CLAUDE_CONFIG_DIR || ...`: an empty string falls back to `~/.claude`.
  *
- * `~/.claude.json` is a different file with its own resolver
- * (`defaultClaudeConfigPath` in trust.ts) and does not come from here.
- *
- * Read-only by design: nothing in the extension writes under this directory
- * (global constraint 2).
+ * `~/.claude.json` has its own resolver (`defaultClaudeConfigPath` in trust.ts). Read-only: nothing writes under this directory.
  */
 export function claudeHome(): string {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');

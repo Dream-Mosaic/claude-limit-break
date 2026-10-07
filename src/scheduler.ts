@@ -13,64 +13,21 @@ export interface PendingJob {
   prompt: string;
   /** Deadline including jitter. What the scheduler fires on. */
   resumeAtMs: number;
-  /**
-   * Deadline the notice actually stated, before jitter was added. Recorded so a
-   * padded resume time can be traced back to what Claude said; the dedupe in
-   * schedule() compares resumeAtMs, the deadline actually being waited on.
-   */
+  /** Deadline the notice actually stated, before jitter. The dedupe in schedule() compares resumeAtMs, the deadline actually being waited on. */
   baseResumeAtMs: number;
   jitterMs: number;
   reason: 'limit' | 'overload';
-  /**
-   * Whether `cwd` was trusted for CLI use at schedule time (see trust.ts).
-   * Checked once here rather than at fire time, because fire time is when the
-   * user has already walked away - too late to do anything about a stall at
-   * Claude's trust prompt (#5). Undefined for a job with no cwd to check, or
-   * one persisted by a version that predates this field.
-   */
+  /** Whether `cwd` was trusted for CLI use at schedule time (trust.ts). Checked here rather than at fire time, when the user has already walked away. Undefined for a job with no cwd or one persisted before this field. */
   folderTrusted?: boolean;
-  /**
-   * The `timestamp` of the transcript entry this job was detected from, in
-   * ms, when it had one (overload hits only, today). Identifies an overload
-   * event across windows for the cross-window claim (claims.ts claimKeyFor;
-   * final review, Important 3). Absent on a job persisted by an older build,
-   * which falls back to the old 10-minute bucket.
-   */
+  /** The `timestamp` of the transcript entry this job was detected from, in ms (overload hits only). Identifies an overload across windows for the claim (claims.ts claimKeyFor). Absent falls back to the 10-minute bucket. */
   entryTimestampMs?: number;
-  /**
-   * The transcript's size when the job was planned (at detection), when it
-   * could be read. The baseline for the native auto-continue check (final
-   * review, Important 6): a fire is padded 5-30 minutes past the reset, so
-   * Claude Code's own auto-continue has usually written - and often finished
-   * - its turn before this window fires, and growth has to be measured from
-   * before the reset, not from the fire.
-   */
+  /** The transcript's size when the job was planned, when readable: the baseline for the native auto-continue check. A fire is padded past the reset, so Claude Code's auto-continue has usually written its turn by then; growth is measured from before the reset. */
   transcriptBytesAtDetection?: number;
-  /**
-   * Which usage limit stopped the session (`five_hour`, `seven_day`, ...; see
-   * LimitDetection.rateLimitType), for a limit job whose detection could tell.
-   * decideOnFire reads it: Claude Code's native auto-continue covers the
-   * five-hour limit only, so every other type is offered rather than stood
-   * down for. Undefined for an overload, for a limit whose text named no
-   * type, and for a job persisted before this field existed.
-   */
+  /** Which usage limit stopped the session (`five_hour`, `seven_day`, ...; LimitDetection.rateLimitType). decideOnFire reads it: native auto-continue covers the five-hour limit only, so every other type is offered. Undefined for an overload, a limit whose text named no type, or an older persisted job. */
   rateLimitType?: string;
-  /**
-   * The A6 overload backoff this job was planned with (final fix wave A; the
-   * user's decision: +15/+30/+60/+120 minutes for a session's 2nd-5th
-   * consecutive overload resume). Already included in `baseResumeAtMs`;
-   * kept for the log. Absent for a limit and for a first overload retry.
-   */
+  /** The overload backoff this job was planned with (overloadBackoff.ts). Already included in `baseResumeAtMs`; kept for the log. Absent for a limit and for a first overload retry. */
   backoffMs?: number;
-  /**
-   * Wave D, D3 (policy B, the user's decision): the limit resets beyond
-   * maxWaitHours, so this job is never resumed automatically. It is scheduled
-   * like any other - the claim, the status bar and persistence all come with
-   * that - but its fire offers Resume Now (the autoResume-off path) instead
-   * of launching. Absent, never false, on every other job; restoreJob drops a
-   * stored job whose value is anything but `true`, since losing the flag
-   * would turn an offer into an automatic resume.
-   */
+  /** The limit resets beyond maxWaitHours, so this job is never resumed automatically: scheduled like any other (claim, status bar, persistence) but its fire offers Resume Now instead of launching. Absent, never false, otherwise; restoreJob drops a stored job with any other value, since losing the flag would turn an offer into an automatic resume. */
   offerOnly?: true;
 }
 
@@ -85,26 +42,13 @@ export type RestoreResult = { job: PendingJob } | { dropped: string };
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 /**
- * Validate one entry read back from globalState (final review M2, wave B).
+ * Validate one entry read back from globalState.
  *
- * The pending and ready lists are the one place a job reaches `claude
- * --resume` without having been parsed from a transcript this run, and
- * globalState is a JSON file anyone can edit, or an older build can have
- * written badly. So nothing is trusted: the session id must pass
- * `isSessionId` (constraint 4: `--resume` only ever receives a UUID), the
- * strings must be strings, the times finite, and `reason` one of the two
- * values the code branches on. A job that fails any of that is dropped, and
- * the caller logs one line for it.
+ * The pending and ready lists are where a job reaches `claude --resume` without having been parsed from a transcript this run, and globalState is a JSON file anyone can edit. So nothing is trusted: the session id must pass `isSessionId` (`--resume` only ever receives a UUID), strings must be strings, times finite, and `reason` one of the two values the code branches on. A job failing any of that is dropped and the caller logs it.
  *
- * Two things are tolerated rather than dropped. A job saved before the random
- * delay existed has neither `baseResumeAtMs` nor `jitterMs`; they are filled
- * in (treating its deadline as the unpadded one keeps the dedupe working). A
- * `rateLimitType` that is not a non-empty string is only a hint to
- * decideOnFire, so the field is deleted and the job kept: dropping a live
- * resume over a label would cost the user more than the label is worth.
+ * Two things are tolerated. A job saved before the random delay existed lacks `baseResumeAtMs` and `jitterMs`; they are filled in (its deadline is treated as the unpadded one). A `rateLimitType` that is not a non-empty string is only a hint, so the field is deleted and the job kept.
  *
- * Returns the very same object when nothing needed changing, so a caller
- * holding the stored array keeps its references.
+ * Returns the very same object when nothing needed changing, so a caller holding the stored array keeps its references.
  */
 export function restoreJob(raw: unknown): RestoreResult {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -120,8 +64,7 @@ export function restoreJob(raw: unknown): RestoreResult {
   if (typeof j.prompt !== 'string') {
     return { dropped: 'its prompt is not a string' };
   }
-  // Required, unlike baseResumeAtMs: the tick compares against it, and a job
-  // with no usable deadline would sit in the list forever without firing.
+  // Required, unlike baseResumeAtMs: the tick compares against it, and a job with no usable deadline would never fire.
   if (!isFiniteNumber(j.resumeAtMs)) {
     return { dropped: 'its resume time is not a finite number' };
   }
@@ -139,9 +82,7 @@ export function restoreJob(raw: unknown): RestoreResult {
   if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
     return { dropped: 'its folderTrusted is not a boolean' };
   }
-  // Wave D, D3: dropped, never repaired. Deleting a bad offerOnly (the way a
-  // bad rateLimitType is repaired below) would turn a resume the user was
-  // told would only be offered into an automatic one.
+  // Dropped, never repaired: deleting a bad offerOnly would turn a promised offer into an automatic resume.
   if (j.offerOnly !== undefined && j.offerOnly !== true) {
     return { dropped: 'its offerOnly is not true' };
   }
@@ -162,8 +103,7 @@ export function restoreJob(raw: unknown): RestoreResult {
 
 /** Restore a stored job list or bare single-slot job into the jobs worth keeping, logging each one dropped. */
 export function restoreJobs(stored: unknown, log: Logger, what: string): PendingJob[] {
-  // A list since jobs became per-session; a bare object from a version that
-  // kept a single slot, which is carried over rather than lost on upgrade.
+  // A list; or a bare object from a version that kept a single slot, carried over rather than lost.
   const list: unknown[] = Array.isArray(stored) ? stored : stored === undefined || stored === null ? [] : [stored];
   const kept: PendingJob[] = [];
   for (const entry of list) {
@@ -178,18 +118,9 @@ export function restoreJobs(stored: unknown, log: Logger, what: string): Pending
 }
 
 /**
- * Owns the pending resumes - one per session - and the countdown that drives
- * them.
+ * Owns the pending resumes - one per session - and the countdown that drives them. A usage limit belongs to the account, so every session working when it lands hits it at once; a single slot would drop all but one.
  *
- * One per session, not one in total. A usage limit belongs to the account, so
- * every session working when it lands hits it at once: on the machine this was
- * written on, 16 of 61 real limit episodes had two or three sessions reporting
- * the same reset within minutes. A single slot kept one of them and dropped
- * the rest without a word.
- *
- * The countdown is a repeating one-second tick that compares `Date.now()`
- * against each deadline rather than one long `setTimeout`, so suspending or
- * hibernating the machine mid-cooldown cannot skew or swallow the timer.
+ * The countdown is a repeating one-second tick comparing `Date.now()` against each deadline, not one long `setTimeout`, so suspending or hibernating mid-cooldown cannot skew the timer.
  */
 export class ResumeScheduler {
   private timer?: NodeJS.Timeout;
@@ -204,10 +135,7 @@ export class ResumeScheduler {
   readonly onFire = this.onFireEmitter.event;
   /** Fires with the soonest pending job whenever any job is set, cleared or ticks down. */
   readonly onChange = this.onChangeEmitter.event;
-  /**
-   * Fires with an offer-only job that a same-reset automatic re-detection
-   * has just made automatic (wave D fix round 1), so the user can be told.
-   */
+  /** Fires with an offer-only job that a same-reset automatic re-detection has just made automatic, so the user can be told. */
   readonly onUpgrade = this.onUpgradeEmitter.event;
 
   constructor(
@@ -235,37 +163,14 @@ export class ResumeScheduler {
   }
 
   /**
-   * Arm a resume for the job's session. A later deadline never replaces an
-   * earlier one still counting down for the same session: repeated limit
-   * notices for one cooldown would otherwise keep pushing that resume further
-   * out. Deadlines belonging to other sessions are never compared at all.
+   * Arm a resume for the job's session. A later deadline never replaces an earlier one still counting down for the same session, or repeated notices for one cooldown would keep pushing the resume out. Other sessions' deadlines are never compared.
    *
-   * Task 10 fix (2026-09-24): `baseResumeAtMs` - the un-jittered reset - is
-   * also compared, not just `resumeAtMs`. planResume rolls a fresh random
-   * jitter on every detection, so a REPEAT notice for the identical reset
-   * produces a different `resumeAtMs` each time; a re-detection that happened
-   * to re-roll a SMALLER jitter has an earlier `resumeAtMs` than the job
-   * already scheduled, which slipped past the check above (only a strictly
-   * LATER resumeAtMs was ever blocked) and replaced it - on 2026-09-24 this
-   * moved a window's resume from 2:27:19 to 2:20:11 on a re-detection. Same
-   * `baseResumeAtMs` means the same reset no matter which way the new jitter
-   * roll moved it, so it is dropped either way, keeping the first schedule.
+   * `baseResumeAtMs` (the un-jittered reset) is compared too, not just `resumeAtMs`: planResume re-rolls jitter on every detection, so a repeat notice for the identical reset can have an EARLIER `resumeAtMs` and would replace the job. The same base means the same reset, so it is dropped either way, keeping the first schedule.
    *
-   * Wave D fix round 1 (Important 1; the user's decision, 2026-10-02): for
-   * an offer-only job, the latest detection decides, deterministically. A
-   * re-detection of the same reset - bases within RESET_GRACE_MS, since a
-   * second read of the same reset can differ by a second - is handled here,
-   * before any jitter comparison, which used to let a zero or earlier
-   * jitter roll replace the job and silently drop the flag:
-   * - automatic (the session hit the limit again within maxWaitHours of the
-   *   reset): the job already scheduled is made automatic in place. Its fire
-   *   time and base are kept, so its claim key and hold deadline do not move.
-   *   `onUpgrade` fires so the user is told; the return is false, as for any
-   *   re-detection that did not schedule anew.
+   * For an offer-only job the latest detection decides. A re-detection of the same reset (bases within RESET_GRACE_MS, since a second read can differ by a second) is handled before any jitter comparison:
+   * - automatic (the session hit the limit again within maxWaitHours of the reset): the scheduled job is made automatic in place, keeping its fire time and base so its claim key and hold deadline do not move. `onUpgrade` fires so the user is told; the return is false, as for any re-detection that did not schedule anew.
    * - offer-only again: nothing changes.
-   * And an automatic job is never made offer-only for the same reset. That
-   * cannot happen from a real detection (the time left to a reset only
-   * shrinks), so it is refused and logged as unexpected.
+   * An automatic job is never made offer-only for the same reset; a real detection cannot do that (the time left only shrinks), so it is refused and logged as unexpected.
    */
   schedule(job: PendingJob): boolean {
     const existing = this.pending.get(job.sessionId);
@@ -274,11 +179,7 @@ export class ResumeScheduler {
         existing.reason === 'limit' &&
         job.reason === 'limit' &&
         Math.abs(existing.baseResumeAtMs - job.baseResumeAtMs) <= RESET_GRACE_MS;
-      // Wave D fix round 2 (N1): each of the three offer-only branches below
-      // returns, so each first takes the newer evidence the re-detection
-      // carries, as the plain same-reset drop further down always has. Only
-      // there: two automatic jobs keep that drop's own exact-base rule, which
-      // is what tells a different reset minutes apart from a re-read.
+      // Each of the three offer-only branches below returns, so each first takes the newer evidence the re-detection carries, as the plain same-reset drop further down does. Only there: two automatic jobs keep that drop's exact-base rule, which tells a different reset minutes apart from a re-read.
       const touchesOffer = sameLimitReset && (existing.offerOnly === true || job.offerOnly === true);
       if (touchesOffer) {
         this.adoptReDetection(existing, job);
@@ -336,20 +237,10 @@ export class ResumeScheduler {
   }
 
   /**
-   * What a dropped re-detection of the same reset still contributes to the
-   * job already pending, never its schedule or deadline. Called by every
-   * same-reset branch of schedule() (wave D fix round 2, N1).
+   * What a dropped re-detection of the same reset still contributes to the job already pending, never its schedule or deadline. Called by every same-reset branch of schedule().
    *
-   * - Final fix wave A, A9: it may know which limit this is when the first
-   *   detection did not (a text-only notice, then the flagged entry's
-   *   quotaLimits). decideOnFire reads the type, so the job adopts it - only
-   *   onto a job with none.
-   * - Wave A fix round 1 (review C1): where the stop is. A retry that ran
-   *   into the same reset again is newer evidence of the live stop, and the
-   *   continued-since check (continuedSince.ts) must measure from it, not
-   *   from the first detection. Logged like A9's adoption (wave B, B8,
-   *   re-review m-new-2): a later "has continued since it stopped" skip is
-   *   measured from here.
+   * - The limit type: the first detection may not have known it (a text-only notice, then the flagged entry's quotaLimits). decideOnFire reads it, so the job adopts it, only onto a job with none.
+   * - Where the stop is: a retry that ran into the same reset again is newer evidence of the live stop, and the continued-since check (continuedSince.ts) must measure from it. Logged, since a later "has continued since it stopped" skip is measured from here.
    */
   private adoptReDetection(existing: PendingJob, job: PendingJob): void {
     if (existing.rateLimitType === undefined && job.rateLimitType !== undefined) {
@@ -391,12 +282,7 @@ export class ResumeScheduler {
     this.onChangeEmitter.fire(this.current);
   }
 
-  /**
-   * Re-arm the countdown after a window reload or restart. A deadline that
-   * already passed while VS Code was closed is not treated specially: the
-   * next tick sees it is due and fires it there, exactly as it would for any
-   * deadline reached mid-countdown.
-   */
+  /** Re-arm the countdown after a reload or restart. A deadline that passed while VS Code was closed is not special: the next tick sees it is due and fires it. */
   start(): void {
     if (this.pending.size === 0) {
       return;
@@ -405,10 +291,7 @@ export class ResumeScheduler {
     this.onChangeEmitter.fire(this.current);
   }
 
-  /**
-   * Undefined rather than an empty list when nothing is pending, so an idle
-   * store looks exactly as it did before jobs became per-session.
-   */
+  /** Undefined rather than an empty list when nothing is pending. */
   private persist(): void {
     void this.memento.update(STATE_KEY, this.pending.size > 0 ? this.jobs : undefined);
   }

@@ -5,8 +5,7 @@ import type { PendingJob } from './scheduler';
 
 export type Plan =
   | { kind: 'schedule'; job: PendingJob; estimate?: number; budgetUnmeasured?: true }
-  // The session is named so a dismissed refusal can be recorded against it
-  // (the gave-up state, gaveUp.ts, is per session).
+  // The session is named so a dismissed refusal can be recorded against it (gaveUp.ts).
   | { kind: 'refuse'; reason: string; sessionId: string; cwd?: string }
   | { kind: 'ignore'; reason: string };
 
@@ -29,11 +28,7 @@ export function planResume(
    */
   readUsage?: (transcript: string) => UsageRecord | undefined,
   /**
-   * Extra wait for an overload retry, on top of the usual random delay
-   * (final fix wave A, A6 - the user's decision; see overloadBackoff.ts). It
-   * goes into the un-jittered deadline itself, so everything keyed on that
-   * deadline - the cross-window claim's hold (A5) above all - covers it.
-   * Ignored for a limit, which neither counts nor backs off.
+   * Extra wait for an overload retry, on top of the usual random delay (overloadBackoff.ts). It goes into the un-jittered deadline itself, so the cross-window claim's hold covers it. Ignored for a limit.
    */
   overloadBackoffMs = 0,
 ): Plan {
@@ -55,8 +50,7 @@ export function planResume(
       cwd: session.cwd,
     };
   }
-  // An overload has no stated reset time, so the jitter *is* the backoff -
-  // plus, for a session that keeps failing, the A6 step backoff.
+  // An overload has no stated reset time, so the jitter *is* the backoff, plus the step backoff for a session that keeps failing.
   const backoffMs = reason === 'overload' && overloadBackoffMs > 0 ? overloadBackoffMs : 0;
   const base = (hit.detection.resumeAt?.getTime() ?? now.getTime()) + backoffMs;
   const jitterMs = jitter(settings.randomDelayMinMinutes, settings.randomDelayMaxMinutes);
@@ -74,24 +68,15 @@ export function planResume(
       resumeAtMs: base + jitterMs,
       jitterMs,
       reason,
-      // Recorded so the log and a reader of the persisted job can tell a
-      // backed-off retry from an ordinary one; already inside baseResumeAtMs.
+      // Recorded so the log and the persisted job show a backed-off retry; already inside baseResumeAtMs.
       ...(backoffMs > 0 ? { backoffMs } : {}),
-      // Only set when the watcher had one: an absent key, not `undefined`,
-      // keeps the persisted job (globalState) exactly as it was for a hit
-      // without it.
+      // Only set when the watcher had one: an absent key, not `undefined`, keeps the persisted job's shape.
       ...(hit.entryTimestampMs !== undefined ? { entryTimestampMs: hit.entryTimestampMs } : {}),
-      // Which usage limit stopped the session, when the detection could tell
-      // (Task 4c, R4): decideOnFire stands down for Claude Code's native
-      // auto-continue only when it is the five-hour one. Left off, like the
-      // others, when absent.
+      // Which usage limit stopped the session, when known: decideOnFire stands down for native auto-continue only for the five-hour one.
       ...(hit.detection.rateLimitType !== undefined ? { rateLimitType: hit.detection.rateLimitType } : {}),
-      // The native auto-continue check's baseline (final review, Important
-      // 6). resolveSession reports 0 for a size it could not read; that is
-      // "unknown", not a baseline every transcript has grown past.
+      // The native auto-continue check's baseline. resolveSession reports 0 for an unreadable size; that is "unknown", not a baseline every transcript has grown past.
       ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
-      // Wave D, D3 (policy B): a reset beyond maxWaitHours is scheduled like
-      // any other but only ever offered at fire. Absent, not false, otherwise.
+      // A reset beyond maxWaitHours is scheduled like any other but only offered at fire. Absent, not false, otherwise.
       ...(hit.detection.offerOnly === true ? { offerOnly: true as const } : {}),
     },
   };

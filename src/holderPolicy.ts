@@ -13,104 +13,34 @@ export interface OnFireDecision {
   /** Present only when the user should be told, with exactly one button. */
   notice?: { message: string; button: string };
   /**
-   * True only when this stood down for Claude Code's own auto-continue (an
-   * idle terminal at a FIVE-HOUR usage limit - or one whose type is unknown -
-   * with the setting reading as on). Native auto-continue arms only when the
-   * rejection is `status === "rejected"` and `rateLimitType === "five_hour"`
-   * (2.1.282 binary, research-api-errors-binary.md Q4), so a weekly, Opus,
-   * Sonnet, Fable or usage-credit limit never sets this: it is offered
-   * instead. Whether the feature really exists for this account is
-   * unverified - the key's absence reads as on, but the research found the
-   * toggle offered to some accounts only - so the caller checks back after
-   * the stall-watch grace and offers the job if the transcript never grew
-   * (final review, Important 6). That check is also what keeps an unknown
-   * limit type safe.
+   * True only when this stood down for Claude Code's own auto-continue: an idle terminal at a five-hour usage limit (or one of unknown type) with the setting on. Native auto-continue arms only for `status === "rejected"` and `rateLimitType === "five_hour"`, so other limits are offered instead. The feature may not exist for every account, so the caller checks back after the stall-watch grace and offers the job if the transcript never grew; that check also keeps an unknown limit type safe.
    */
   awaitNativeContinue?: true;
 }
 
 const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
 
-/**
- * Appended to every notice that carries {@link RESUME_IN_TERMINAL_BUTTON}
- * (final fix wave A, A4; final review I2): the button opens a NEW terminal on
- * a conversation the existing one still holds, and "Continue it there" alone
- * never said so.
- */
+/** Appended to every notice carrying {@link RESUME_IN_TERMINAL_BUTTON}: the button opens a NEW terminal on a conversation the existing one still holds. */
 const SECOND_TERMINAL = ' Resuming here opens a second terminal on the same conversation.';
 
 /**
- * Whether a holder's status counts as idle for Task 2's purposes.
- *
- * Fix round 1, controller ruling: an unknown or MISSING status counts as
- * idle - fail OPEN, not closed. Goal 2 is to resume unattended, and a
- * listing failure ('unknown', a level up, in `decideOnFire`'s own `holder`
- * parameter) already resumes rather than blocking; a single row whose status
- * is missing or an unrecognised string must not be read more cautiously than
- * a listing that failed outright. Only the two explicit non-idle statuses -
- * 'busy' and 'waiting' - count as not idle. (This replaces the original,
- * opposite reading - "anything other than the literal string 'idle' is not
- * idle" - which the controller called out as backwards for Goal 2.)
+ * Whether a holder's status counts as idle. An unknown or missing status counts as idle (fail open): resuming unattended is the goal, and a failed listing already resumes. Only 'busy' and 'waiting' are not idle.
  */
 function isIdleStatus(status: string | undefined): boolean {
   return status !== 'busy' && status !== 'waiting';
 }
 
 /**
- * Decide what `scheduler.onFire` does with a fired job, given who (if anyone)
- * already holds the session.
+ * Decide what `scheduler.onFire` does with a fired job, given who (if anyone) already holds the session. Resuming into a session a panel or terminal still holds forks the conversation.
  *
- * This exists because of the 2026-09-23 field incident this task is named
- * for: a scheduled resume spawned a second `claude --resume` terminal while a
- * panel tab was still open on the same session, forking the conversation
- * (docs/research/2026-09-20-panel-fork-experiment.md, #6).
+ * `status` ("idle" | "busy" | "waiting") decides the outcome:
+ *   - an IDLE panel resumes as normal (someone left a panel idle at a limit and walked away); stale-tab handling runs after the resume.
+ *   - a busy or waiting panel or terminal means the session is already being continued (by the person, or by Remote Control's auto-continue on a bridged panel), so the job is silently dropped: no spawn, no rememberReady, no notification, just a log line.
+ *   - an idle terminal defers to autoContinueOn for a FIVE-HOUR usage LIMIT, or one of unknown type (treated as five-hour: the follow-up native-continue check offers the job back if nothing grew). When it is OFF the job is remembered and "Resume in Terminal Anyway" is offered. Any OTHER limit type, and any OVERLOAD (`reason`), is never continued natively, so it gets the offer whatever the setting says. Neither case auto-spawns: an idle terminal is a live second writer.
  *
- * The controller corrected this policy mid-implementation (see
- * task-2-report.md): `status` ("idle" | "busy" | "waiting", carried on
- * `holder` by classifyHolder) now decides the outcome, not just which KIND of
- * process holds the session -
- *   - an IDLE panel resumes as normal. This is the product's main use case:
- *     someone leaves a panel idle at a limit and walks away. The existing #7
- *     stale-tab handling (handleStalePanel / onStale) runs after the resume
- *     exactly as it already does; nothing here needs to notify instead of
- *     spawning.
- *   - a panel or terminal that is busy or waiting means the session is
- *     already being continued - by the person, or by Remote Control's own
- *     auto-continue on a bridged panel - so this silently drops the job:
- *     no spawn, no rememberReady, no notification, just a log line (naming
- *     Remote Control when the panel is bridged).
- *   - an idle terminal defers to autoContinueOn for a FIVE-HOUR usage LIMIT
- *     (and for one whose type is unknown): Claude Code's own auto-continue
- *     already covers it when that setting is on (see autoContinue.ts), so
- *     this stays silent there too; only when it is OFF does this remember
- *     the job and offer "Resume in Terminal Anyway". Native auto-continue
- *     arms for `rateLimitType === "five_hour"` only (2.1.282 binary,
- *     research-api-errors-binary.md Q4), so any OTHER limit type - weekly,
- *     Opus, Sonnet, Fable, usage credit - is never continued natively, and
- *     gets the offer whatever the setting says, exactly like an OVERLOAD
- *     (`reason`), which native auto-continue does not cover either (final
- *     review, Critical 1). An unknown type (`undefined`) is treated as
- *     five-hour: the native-continue check that follows a stand-down offers
- *     the job back when nothing grew, so nothing is lost. Neither case
- *     auto-spawns: an idle terminal is a live second writer.
+ * `resume: true` is reserved for 'none', a listing failure ('unknown', which must still resume rather than fail closed and stop every resume where `claude agents` misbehaves), and an idle panel (see {@link isIdleStatus}).
  *
- * `resume: true` is reserved for 'none' (nobody found), a listing failure
- * ('unknown', which must still resume rather than fail closed and silently
- * stop every future resume on a machine where `claude agents` misbehaves),
- * and now an idle panel.
- *
- * {@link isIdleStatus}: only the two explicit statuses 'busy' and 'waiting'
- * count as NOT idle. An unreported or unrecognised status counts as idle -
- * fail OPEN, per the controller's fix-round-1 ruling: Goal 2 is to resume
- * unattended, and a listing failure already resumes rather than blocking, so
- * a single row with no readable status must not be treated more cautiously
- * than that.
- *
- * A DIFFERENT session busy or waiting in the same folder is no longer this
- * function's concern - a second controller ruling replaced "block and
- * notify" with "resume anyway, and tell the resumed model to coordinate";
- * see {@link buildResumePrompt} and `scheduler.onFire` in extension.ts, which
- * calls it directly off the same listing, independently of this decision.
+ * A DIFFERENT busy session in the same folder does not block: see {@link buildResumePrompt}.
  */
 export function decideOnFire(
   holder: SessionHolder | 'unknown',
@@ -148,9 +78,7 @@ export function decideOnFire(
         `${holder.status ?? 'active'}; not starting a second writer.${bridgeNote}`,
     };
   }
-  // terminal, explicitly busy or waiting: the session is already being
-  // worked, so this drops silently. An unreported status is NOT this branch
-  // any more (fix round 1) - it falls through to the idle handling below.
+  // terminal, explicitly busy or waiting: the session is already being worked, so this drops silently. An unreported status falls through to the idle handling below.
   if (!isIdleStatus(holder.status)) {
     return {
       resume: false,
@@ -160,14 +88,7 @@ export function decideOnFire(
         `${holder.status ?? 'active'}; not starting a second writer.`,
     };
   }
-  // terminal, idle. Final review, Critical 1: Claude Code's own
-  // auto-continue (`autoContinueAtUsageLimit`) picks a session back up at a
-  // USAGE LIMIT reset only. It does nothing for a 529, a transient 429 or an
-  // interrupted stream - the overload family - so for an overload job the
-  // setting is irrelevant and the idle terminal is offered below exactly as
-  // if it were off. Before this, the default (a missing key reads as on)
-  // dropped every overload in an idle terminal with a log line claiming
-  // auto-continue would handle it.
+  // terminal, idle. Native auto-continue (`autoContinueAtUsageLimit`) covers a usage limit reset only, not the overload family (529, transient 429, interrupted stream), so for an overload job the setting is irrelevant and the offer is made as if it were off.
   if (reason === 'overload') {
     return {
       resume: false,
@@ -183,11 +104,7 @@ export function decideOnFire(
       },
     };
   }
-  // A limit type other than five_hour (Task 4c, R4): native auto-continue
-  // will not run, so standing down for it - as the branch below does - would
-  // strand the session. Same shape as the overload offer above. The label is
-  // Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); a type this build
-  // does not know is named by its raw key.
+  // A limit type other than five_hour: native auto-continue will not run, so standing down would strand the session. Same shape as the overload offer above. The label is Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); an unknown type is named by its raw key.
   if (rateLimitType !== undefined && rateLimitType !== 'five_hour') {
     // Own keys only: an inherited member ('constructor', '__proto__') is not a label.
     const label = Object.hasOwn(RATE_LIMIT_LABELS, rateLimitType)
@@ -234,16 +151,9 @@ export function decideOnFire(
 }
 
 /**
- * What "Resume in Terminal Anyway" says instead of resuming, when the holder
- * re-read at click time is busy or waiting (final fix wave A, A4; final
- * review I2), or undefined to go ahead.
+ * What "Resume in Terminal Anyway" says instead of resuming when the holder, re-read at click time, is busy or waiting; undefined means go ahead.
  *
- * The offer is made on a holder snapshot from the fire, and the notification
- * does not auto-dismiss: by the click, hours later, the user may be back at
- * that terminal typing, and a second `claude --resume` on it is a fork. The
- * button is the confirmation for the idle case it was offered on, so an idle
- * holder (by {@link isIdleStatus}: fail open), no holder and a failed listing
- * all go ahead. Worded by where the holder is; a busy panel is stopped too.
+ * The notification does not auto-dismiss, so by the click the user may be back at that terminal and a second `claude --resume` would fork it. An idle holder (fail open per {@link isIdleStatus}), no holder and a failed listing all go ahead. Worded by where the holder is; a busy panel is stopped too.
  */
 export function busyAtClickNotice(holder: SessionHolder | 'unknown', shortId: string): string | undefined {
   if (holder === 'unknown' || holder.kind === 'none' || isIdleStatus(holder.status)) {
@@ -254,21 +164,11 @@ export function busyAtClickNotice(holder: SessionHolder | 'unknown', shortId: st
 }
 
 /**
- * The modal warning a MANUAL resume (the resumeNow command, or the
- * off-autoResume "Resume Now" notification's own button) shows before
- * launching into a session someone already holds.
+ * The modal warning a MANUAL resume (the resumeNow command, or the off-autoResume "Resume Now" notification's button) shows before launching into a session someone already holds.
  *
- * Per the same controller correction {@link decideOnFire} documents: an IDLE
- * panel (per {@link isIdleStatus} - fail open, so this also covers an
- * unreported status) needs no modal - that is the ordinary "come back and
- * continue in the panel, or resume by hand instead" case, not a live
- * conflict. Every other live holder still warns: an explicitly busy or
- * waiting holder of either kind, or a terminal of any status (an idle
- * terminal still has someone who might type into it, and unlike an idle
- * panel there is no #7 auto-resync for it).
+ * An IDLE panel (per {@link isIdleStatus}) needs no modal: that is the ordinary "come back and continue" case. Every other live holder still warns: a busy or waiting holder of either kind, or a terminal of any status (someone might type into it, and unlike an idle panel it has no auto-resync).
  *
- * 'none' and 'unknown' both return undefined - nothing to warn about, and (for
- * 'unknown') not knowing is not a reason to block a resume asked for by hand.
+ * 'none' and 'unknown' return undefined: not knowing is not a reason to block a resume asked for by hand.
  */
 export function manualResumeWarning(
   holder: SessionHolder | 'unknown',
@@ -296,15 +196,7 @@ export type BusyPeer = Pick<AgentRow, 'pid' | 'name'>;
 const MAX_PEER_NAME = 64;
 
 /**
- * How a busy peer is named in the resume prompt and the notice that echoes
- * it. The name comes from `claude agents --json` - text this extension does
- * not control, landing in the opening prompt of a session it launches - so
- * (final review minor) it is folded onto one line (CR/LF become a space: a
- * name must not be able to start a line of its own in the prompt), any
- * double quote in it becomes a single one, it is capped at MAX_PEER_NAME
- * characters, and it is quoted, so it reads as a name and not as more of
- * the sentence. The pid fallback is this extension's own number and stays
- * bare.
+ * How a busy peer is named in the resume prompt and notice. The name comes from `claude agents --json`, text this extension does not control, landing in a session's opening prompt, so it is folded onto one line (CR/LF become a space), any double quote becomes a single one, it is capped at MAX_PEER_NAME characters, and it is quoted. The pid fallback is our own number and stays bare.
  */
 export function peerLabel(peer: BusyPeer): string {
   if (peer.name === undefined) {
@@ -315,25 +207,11 @@ export function peerLabel(peer: BusyPeer): string {
 }
 
 /**
- * Append a coordination sentence to the user's resume prompt when one or
- * more DIFFERENT Claude sessions are busy or waiting in the same folder
- * (see liveSessions.ts's `busyFolderPeers`).
+ * Append a coordination sentence to the user's resume prompt when one or more DIFFERENT Claude sessions are busy or waiting in the same folder (see liveSessions.ts's `busyFolderPeers`).
  *
- * A second controller ruling replaced Task 2's original "block and notify"
- * treatment of this case: the extension cannot message another session
- * itself (global constraint #3 - never write into a session this extension
- * did not create), so instead it tells the RESUMED model to, by naming the
- * peer(s) in its own opening prompt and asking it to use SendMessage before
- * editing anything. `resume(job)` still launches the same way either way;
- * the prompt travels as a single argv element to `claude --resume` (see
- * resumer.ts's buildResumeArgs), never shell-quoted by hand, so nothing here
- * needs to SHELL-escape the names it inserts - but they are still text this
- * extension does not control, going into a model's prompt, so each is
- * quoted, kept to one line and capped (see {@link peerLabel}).
+ * The extension never writes into a session it did not create, so it tells the RESUMED model to coordinate: it names the peer(s) in the opening prompt and asks it to use SendMessage before editing anything. The prompt travels as a single argv element (resumer.ts's buildResumeArgs), so nothing here needs shell escaping, but the names are untrusted text, so each is quoted, kept to one line and capped (see {@link peerLabel}).
  *
- * Exactly the user's own prompt, unchanged, when there are no peers - this
- * must never add stray text to the common case, which is every resume with
- * nobody else in the folder.
+ * Exactly the user's prompt, unchanged, when there are no peers.
  */
 export function buildResumePrompt(userPrompt: string, busyPeers: readonly BusyPeer[]): string {
   if (busyPeers.length === 0) {
