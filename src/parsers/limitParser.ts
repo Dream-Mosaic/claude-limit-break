@@ -51,7 +51,7 @@ export interface LimitRejection {
 
 /**
  * Outcome for an already-absolute reset instant: `auto` within maxWaitHours, `offerOnly`
- * beyond it but within {@link MAX_RESET_DAYS}, otherwise rejected.
+ * beyond it but within the bound (the larger of {@link MAX_RESET_DAYS} and maxWaitHours), otherwise rejected.
  */
 export type ResetVerdict = { kind: 'auto'; at: Date } | { kind: 'offerOnly'; at: Date } | LimitRejection;
 
@@ -167,7 +167,7 @@ const DAY_MS = 86_400_000;
 /**
  * The furthest out a reset is believed. The longest limits are seven-day, so a weekly reset
  * is at most 7 days out; a day of slack covers zone or rounding differences. Later is a
- * misread and rejected, whatever maxWaitHours is.
+ * misread and rejected, unless the user set maxWaitHours higher, which then is the bound.
  */
 export const MAX_RESET_DAYS = 8;
 
@@ -180,7 +180,7 @@ function classifyReset(at: Date, basis: Date, readAt: Date, maxWaitHours: number
     if (at.getTime() < readAt.getTime() - RESET_GRACE_MS) {
         return { kind: 'rejected', reason: 'past', at };
     }
-    if (at.getTime() > basis.getTime() + MAX_RESET_DAYS * DAY_MS) {
+    if (at.getTime() > basis.getTime() + Math.max(MAX_RESET_DAYS * DAY_MS, maxWaitHours * HOUR_MS)) {
         return { kind: 'rejected', reason: 'absurd', at };
     }
     if (at.getTime() > basis.getTime() + maxWaitHours * HOUR_MS) {
@@ -585,8 +585,8 @@ export const RESET_GRACE_MS = 15 * 60_000;
  * `opts.readAt` is the real current time, used only to judge whether a passed reset is within
  * {@link RESET_GRACE_MS}; it defaults to `now`.
  *
- * `maxWaitHours` decides automatic versus offer-only; a reset beyond {@link MAX_RESET_DAYS}
- * is rejected as a misread whatever it is set to.
+ * `maxWaitHours` decides automatic versus offer-only; a reset beyond the larger of
+ * {@link MAX_RESET_DAYS} and maxWaitHours is rejected as a misread.
  */
 export function detectLimit(
     rawText: string,
@@ -670,7 +670,7 @@ export function classifyLimit(
 /**
  * Resolve an already-absolute reset time (`quotaLimits.resetsAt`, epoch seconds) against the
  * same grace and horizon rules a parsed notice gets. It wins over the text because nothing
- * can be misread; it is checked only for staleness and absurdity (beyond {@link MAX_RESET_DAYS}).
+ * can be misread; it is checked only for staleness and absurdity (beyond the larger of {@link MAX_RESET_DAYS} and maxWaitHours).
  *
  * The result says which outcome it is: automatic, offer-only, or rejected with a reason.
  * `now` is the real time, used for both horizons and the grace check.

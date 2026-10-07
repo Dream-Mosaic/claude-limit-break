@@ -92,7 +92,8 @@ The first release.
   `maxWaitHours` description says so: "Each new limit hit is judged again, so
   a hit within this window resumes automatically even if an earlier one was
   only offered."
-  A reset more than 8 days out (longer than any Claude limit, so a misread),
+  A reset more than 8 days out, or beyond `maxWaitHours` if that is higher
+  (longer than any Claude limit, so a misread),
   one that already passed (a fork's copy, say) and one with no readable time
   are not picked up, and every one of them is logged with the session and the
   reason - a passed one once per transcript.
@@ -304,7 +305,8 @@ The first release.
   (`resets Mon 12:00am`), which is never read in this machine's zone.
 - A limit that resets more than `maxWaitHours` out is offered at the reset,
   never resumed automatically unless a later hit of the same limit falls
-  within `maxWaitHours`, and one more than 8 days out is not picked up
+  within `maxWaitHours`, and one more than 8 days out (or beyond `maxWaitHours`
+  if that is higher) is not picked up
   at all (see Added).
 - The cancel lines that stand the resume down are matched by wording that was
   read from the Claude Code 2.1.285 binary. A release that rewords them falls

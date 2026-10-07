@@ -461,7 +461,7 @@ export class TranscriptWatcher {
                         : candidates.map((c) => rateLimitTypeFromText(normalize(c.text))).find((t) => t !== undefined);
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
                     const verdict = resolveStructuredReset(resetsAt, now, maxWait);
-                    // Decisive: a value failing the grace/8-day check is history, not a cue to fall back to
+                    // Decisive: a value failing the grace/bound check is history, not a cue to fall back to
                     // the text. Still logged.
                     if (verdict.kind === 'rejected') {
                         this.warnUnscheduled('Usage limit', file, verdict, `quotaLimits.resetsAt ${resetsAt}`);
@@ -562,8 +562,9 @@ export class TranscriptWatcher {
             return;
         }
         if (rejection.reason === 'absurd') {
+            const boundDays = Math.max(MAX_RESET_DAYS, Math.round(this.getMaxWaitHours() / 24));
             this.log.warn(
-                `${what} in session ${session} resets at ${at}, more than ${MAX_RESET_DAYS} days out, longer than any ` +
+                `${what} in session ${session} resets at ${at}, more than ${boundDays} days out, longer than any ` +
                     `Claude usage limit; not picking it up as a likely misread: ${shown}`,
             );
             return;

@@ -492,10 +492,26 @@ test('a structured reset more than 8 days out is rejected as absurd, with its in
   assert.deepEqual(resolveStructuredReset(secs(at), D1_NOW, MAXW), { kind: 'rejected', reason: 'absurd', at: new Date(at) });
 });
 
-test('raising maxWaitHours turns a weekly reset automatic, but never past the 8-day bound', () => {
+test('raising maxWaitHours turns a weekly reset automatic', () => {
   assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 7 * 86_400_000), D1_NOW, 7 * 24).kind, 'auto');
-  const nineDays = resolveStructuredReset(secs(D1_NOW.getTime() + 9 * 86_400_000), D1_NOW, 10 * 24);
-  assert.equal(nineDays.kind, 'rejected', 'a huge maxWaitHours does not lift the misread bound');
+});
+
+test('the 8-day bound yields to a higher maxWaitHours: the bound is max(8 days, maxWaitHours)', () => {
+  const day = 86_400_000;
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 9 * day), D1_NOW, 500).kind, 'auto');
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 9 * day), D1_NOW, 24).kind, 'rejected');
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 13 * day), D1_NOW, 300).kind, 'rejected', 'beyond 300h');
+  assert.equal(resolveStructuredReset(secs(D1_NOW.getTime() + 3 * day), D1_NOW, 24).kind, 'offerOnly');
+});
+
+test('the dated-text path honours the same bound', () => {
+  const text = "You've hit your weekly limit · resets Aug 9, 1am (America/Chicago)";
+  const entry = '2026-07-31T04:55:10Z';
+  const high = dated(text, entry, 500);
+  assert.equal(high?.kind, 'detected');
+  assert.equal(high?.kind === 'detected' ? high.detection.offerOnly : 'x', undefined, 'auto within maxWaitHours');
+  const dflt = dated(text, entry);
+  assert.equal(dflt?.kind === 'rejected' ? dflt.reason : 'x', 'absurd');
 });
 
 test('a structured reset further back than the grace is rejected as past, with its instant', () => {
