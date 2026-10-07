@@ -6,17 +6,10 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 /**
- * Integration tests: these run inside a real VS Code, against the real API.
- *
- * The unit suite covers the logic, but it does so against a hand-written fake
- * `vscode` that stubs only what it needs - so it cannot tell whether the
- * extension actually activates, whether the commands the manifest declares get
- * registered, or whether the settings it declares reach the configuration API
- * with the defaults it claims. A fake agreeing with itself proves none of that.
- * These do.
- *
- * Deliberately a handful. Booting VS Code costs seconds where the unit tests
- * cost milliseconds, so anything provable against the fake stays there.
+ * Integration tests run inside a real VS Code against the real API. The unit
+ * suite's fake `vscode` cannot show that the extension activates, that the
+ * manifest's commands register, or that its settings reach the configuration
+ * API with the claimed defaults. Kept to a handful: booting VS Code is slow.
  */
 
 const ID = 'dream-mosaic.claude-limit-break';
@@ -51,17 +44,14 @@ suite('claude-limit-break activation', () => {
 
   test('cancelling with nothing pending is harmless', async () => {
     await vscode.extensions.getExtension(ID)?.activate();
-    // Nothing to assert beyond "does not throw": the command has to survive
-    // being invoked from the palette when no resume is scheduled, which is the
-    // state a user is most likely to be in.
+    // Must survive being invoked from the palette with no resume scheduled.
     await vscode.commands.executeCommand(`${NS}.cancel`);
   });
 
   test('the declared settings reach the configuration API with their declared defaults', () => {
     const config = vscode.workspace.getConfiguration(NS);
-    // Values chosen to match package.json. A default that disagrees between the
-    // manifest and src/config.ts is invisible to the unit suite, which injects
-    // its own ConfigSource rather than reading VS Code's.
+    // A default that disagrees between package.json and src/config.ts is
+    // invisible to the unit suite, which injects its own ConfigSource.
     assert.equal(config.get('enabled'), true);
     assert.equal(config.get('autoResume'), true);
     assert.equal(config.get('resumeMode'), 'interactive');
@@ -73,10 +63,9 @@ suite('claude-limit-break activation', () => {
     );
     assert.equal(config.get('maxResumeTokens'), 0);
     assert.equal(config.get('maxWaitHours'), 24);
-    // Added for 1.0. Each is a default someone would notice if it drifted:
-    // the marker is the only sign the extension loaded, the scope decides
-    // which sessions are seen at all, and the update check is an outbound
-    // request that must stay off until asked for.
+    // Each default would be noticed if it drifted: the marker is the only sign
+    // the extension loaded, the scope decides which sessions are seen, and the
+    // update check is an outbound request that stays off until asked for.
     assert.equal(config.get('statusBar'), 'always');
     assert.equal(config.get('onStale'), 'notify');
     assert.equal(config.get('watchScope'), 'machine');
@@ -85,10 +74,9 @@ suite('claude-limit-break activation', () => {
 
   test('the execution-adjacent settings are machine-scoped in the running instance', () => {
     const config = vscode.workspace.getConfiguration(NS);
-    // `inspect` exposes where a value may come from. A machine-scoped setting
-    // has no workspace slot at all, which is the property that stops a repo you
-    // merely opened from changing what gets executed. The unit suite asserts
-    // the manifest says so; this asserts VS Code agrees.
+    // A machine-scoped setting has no workspace slot, so a repo you merely
+    // opened cannot change what gets executed. The unit suite asserts the
+    // manifest says so; this asserts VS Code agrees.
     for (const key of ['resumeMode', 'headlessPermissionMode', 'claudeCommand', 'resumePrompt']) {
       const seen = config.inspect(key);
       assert.ok(seen, `${key} is not a known configuration key`);
@@ -102,12 +90,10 @@ suite('claude-limit-break activation', () => {
 });
 
 /**
- * The resume terminal clears inherited Claude session variables by setting
- * them to null in `TerminalOptions.env` (#9). The API types allow null there
- * but the docs do not say what it does, so this checks it against the real
- * terminal: a variable the window genuinely has is removed from the child when
- * nulled - not set to the string "null", and not left alone - while the rest
- * of the environment still comes through.
+ * The resume terminal clears inherited Claude session variables by nulling
+ * them in `TerminalOptions.env`. The docs do not say what null does, so this
+ * checks a real terminal: the variable is removed (not set to "null", not
+ * left alone) and the rest of the environment still comes through.
  */
 suite('resume terminal environment', () => {
   test('a variable set to null in TerminalOptions.env is removed from the child process', async function () {

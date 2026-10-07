@@ -42,7 +42,7 @@ test('claudeHome falls back to ~/.claude when CLAUDE_CONFIG_DIR is unset or empt
   withConfigDir('', () => assert.equal(claudeHome(), DEFAULT));
 });
 
-test('the transcript watcher reads projects from CLAUDE_CONFIG_DIR (final review I3)', () => {
+test('the transcript watcher reads projects from CLAUDE_CONFIG_DIR', () => {
   withConfigDir(CUSTOM, () => assert.equal(transcriptRoot(), path.join(CUSTOM, 'projects')));
 });
 
@@ -51,7 +51,7 @@ test('the transcript watcher falls back to ~/.claude/projects when the variable 
   withConfigDir('', () => assert.equal(transcriptRoot(), path.join(DEFAULT, 'projects')));
 });
 
-test('the session registry reads sessions from CLAUDE_CONFIG_DIR (final review I3)', () => {
+test('the session registry reads sessions from CLAUDE_CONFIG_DIR', () => {
   withConfigDir(CUSTOM, () => assert.equal(sessionRegistryDir(), path.join(CUSTOM, 'sessions')));
 });
 

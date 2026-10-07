@@ -30,9 +30,7 @@ test('compareVersions: a malformed value is unknown, never greater', () => {
   assert.equal(compareVersions('0.1.2', 'not-a-version'), 'unknown');
 });
 
-// ---------------------------------------------------------------------------
 // decideUpdateCheck
-// ---------------------------------------------------------------------------
 
 const HOUR = 60 * 60 * 1000;
 const NOW = 1_700_000_000_000;
@@ -124,9 +122,7 @@ test('decideUpdateCheck: a stale-but-newer dismissal for a DIFFERENT tag still n
   );
 });
 
-// ---------------------------------------------------------------------------
 // newestTag - picking the newest tag out of a parsed /releases response
-// ---------------------------------------------------------------------------
 
 /** The shape of one element of the GitHub /releases response, trimmed to what newestTag reads. */
 const release = (tag_name: string, opts: { draft?: boolean } = {}) => ({
@@ -136,9 +132,8 @@ const release = (tag_name: string, opts: { draft?: boolean } = {}) => ({
 });
 
 test('newestTag: picks the highest version out of several releases', () => {
-  // Real GitHub order for this repo (verified via `gh api .../releases`) is
-  // newest-first already, but nothing documents that as a guarantee - so this
-  // deliberately puts the newest one in the middle.
+  // GitHub returns newest-first, but that is not a documented guarantee, so the
+  // newest one is deliberately in the middle.
   assert.equal(newestTag([release('v0.1.1'), release('v0.1.2'), release('v0.1.0')]), 'v0.1.2');
 });
 
@@ -159,10 +154,8 @@ test('newestTag: undefined when there is nothing usable', () => {
   assert.equal(newestTag(null), undefined);
 });
 
-// ---------------------------------------------------------------------------
 // fetchLatestReleaseTag - against a real node:http server on 127.0.0.1, never
-// against the real GitHub API in a test.
-// ---------------------------------------------------------------------------
+// the real GitHub API.
 
 /**
  * Starts a throwaway server on an OS-assigned port on 127.0.0.1, runs `run`
@@ -187,9 +180,8 @@ async function withServer(
 test('fetchLatestReleaseTag: a normal response resolves the newest tag', async () => {
   await withServer(
     (req, res) => {
-      // GitHub rejects an unauthenticated request with no User-Agent (verified
-      // live: `curl ... --header "User-Agent:"` against the real API returns
-      // 403), so the client sending one is load-bearing enough to assert on.
+      // GitHub rejects an unauthenticated request with no User-Agent, so the
+      // client must send one.
       assert.ok(req.headers['user-agent'], 'request must carry a User-Agent header');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify([release('v0.1.1'), release('v0.1.2')]));
@@ -239,12 +231,9 @@ test('fetchLatestReleaseTag: malformed JSON resolves undefined, not a throw', as
   );
 });
 
-// ---------------------------------------------------------------------------
 // First-run prompt: checkForUpdates defaults to false, so the user is offered
-// the choice once - Enable / Not now / Never ask - on first activation after
-// install. This is the pure state machine only; the UI call (showInformation-
-// Message) belongs to extension.ts.
-// ---------------------------------------------------------------------------
+// Enable / Not now / Never ask once. Pure state machine only; the UI call
+// belongs to extension.ts.
 
 test('shouldOfferFirstRunPrompt: never asked before -> offer it', () => {
   assert.equal(shouldOfferFirstRunPrompt(undefined), true);
@@ -255,8 +244,8 @@ test('shouldOfferFirstRunPrompt: already answered "enable" -> do not offer again
 });
 
 test('shouldOfferFirstRunPrompt: already answered "not-now" -> do not offer again', () => {
-  // The issue promises the choice once, not "remind me later" on a cadence -
-  // so "Not now" is just as terminal as "Never ask" for whether to ask again.
+  // The choice is offered once, not "remind me later", so "Not now" is as
+  // terminal as "Never ask".
   assert.equal(shouldOfferFirstRunPrompt('not-now'), false);
 });
 

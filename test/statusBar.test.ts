@@ -30,10 +30,8 @@ const tooltipText = () => {
   return tooltip?.value ?? '';
 };
 
-// ---------------------------------------------------------------------------
-// escapeMarkdown - Task 5b ruling 2. User-controlled text (folder names) must
-// render literally and never as Markdown syntax or an injected link.
-// ---------------------------------------------------------------------------
+// escapeMarkdown: user-controlled text (folder names) renders literally, never
+// as Markdown or an injected link.
 
 test('escapeMarkdown neutralises emphasis markers', () => {
   assert.equal(escapeMarkdown('*x*'), '\\*x\\*');
@@ -59,12 +57,10 @@ test('escapeMarkdown leaves text with no special characters alone', () => {
   assert.equal(escapeMarkdown('plainName123'), 'plainName123');
 });
 
-// ---------------------------------------------------------------------------
-// trustCommandUri - the command-URI convention from Task 5b's brief: exactly
+// trustCommandUri: exactly
 // `command:<id>?<encodeURIComponent(JSON.stringify([cwd]))>`.
-// ---------------------------------------------------------------------------
 
-test('trustCommandUri targets the Task 5a command with the cwd as its sole argument', () => {
+test('trustCommandUri targets the trust command with the cwd as its sole argument', () => {
   const uri = trustCommandUri('/projects/example');
   assert.equal(uri, `command:claudeLimitBreak.openClaudeToTrust?${encodeURIComponent(JSON.stringify(['/projects/example']))}`);
   const query = uri.slice(uri.indexOf('?') + 1);
@@ -84,13 +80,9 @@ test('trustCommandUri encodes a Windows path with a backslash, a space and a #',
   assert.deepEqual(JSON.parse(decodeURIComponent(query)), [cwd], 'must decode back to the exact cwd');
 });
 
-// Review 1, Important 1: encodeURIComponent leaves `( ) ! ' *` raw (they are
-// "unreserved" per RFC 3986's own definition, which encodeURIComponent
-// follows). A cwd containing any of them - an unbalanced ")" is enough -
-// otherwise sits raw inside the Markdown link's `(...)` target, and a
-// Markdown renderer reads a link target only up to the first unescaped ")":
-// the rest of the encoded JSON (and the folder name after it) spills out as
-// literal tooltip text, and the truncated command runs with no arguments.
+// encodeURIComponent leaves `( ) ! ' *` raw. In a cwd (an unbalanced ")" is
+// enough) they close the Markdown link target early, spilling the rest as
+// literal text and running the command with no arguments.
 test('trustCommandUri also percent-encodes the characters encodeURIComponent leaves raw: ( ) ! \' *', () => {
   for (const cwd of ['/home/me/foo)', '/home/me/project (copy)', "/home/me/it's-mine", '/home/me/*star*', '/home/me/a!b']) {
     const uri = trustCommandUri(cwd);
@@ -104,10 +96,8 @@ test('trustCommandUri also percent-encodes the characters encodeURIComponent lea
   }
 });
 
-// ---------------------------------------------------------------------------
-// buildSessionLines - the pure line-builder behind the tooltip. One line per
-// session: pending/ready first (soonest first), gave-up-only sessions after.
-// ---------------------------------------------------------------------------
+// buildSessionLines: one line per session, pending/ready first (soonest first),
+// gave-up-only sessions after.
 
 const gaveUpRec = (over: Partial<import('../src/gaveUp').GaveUpRecord> = {}) => ({
   sessionId: job().sessionId,
@@ -195,17 +185,13 @@ test('an untrusted job gets a warning marker and a trust link, and reports hasTr
   assert.ok(hasTrustLink);
 });
 
-/**
- * Extracts a Markdown inline link's target the way a renderer does: up to
- * the first UNESCAPED ")" after the opening "(" - the exact mechanism
- * review 1's Important 1 exploited (an unbalanced ")" in the cwd, left raw
- * by `encodeURIComponent`, closed the link target early).
- */
+/** Extracts a Markdown inline link's target the way a renderer does: up to the
+ * first UNESCAPED ")" after the opening "(". */
 const linkTarget = (line: string): string | undefined => line.match(/\[Trust this folder\]\(([^)]*)\)/)?.[1];
 
 const UNBALANCED_PAREN_CWDS = ['/home/me/foo)', '/home/me/project (copy)'];
 for (const cwd of UNBALANCED_PAREN_CWDS) {
-  test(`the trust link target is not truncated by an unbalanced paren in the cwd (${JSON.stringify(cwd)}) (review 1, Important 1)`, () => {
+  test(`the trust link target is not truncated by an unbalanced paren in the cwd (${JSON.stringify(cwd)})`, () => {
     const { lines } = buildSessionLines([job({ folderTrusted: false, cwd })], [], []);
     const href = linkTarget(lines[0]!);
     assert.ok(href, lines[0]);
@@ -235,7 +221,7 @@ test('waitingCount counts a session once even if it were somehow in both lists',
   assert.equal(waitingCount, 1);
 });
 
-test('a session in both jobs and ready keeps its counting-down line, not "ready" (Task 4b fix round 1, finding 1)', () => {
+test('a session in both jobs and ready keeps its counting-down line, not "ready"', () => {
   // One session can genuinely hold a counting-down job and an unrelated
   // stale ready job at once. `ready` must defer to `jobs` for that session,
   // not silently overwrite the soon-to-happen countdown with "ready".
@@ -249,9 +235,7 @@ test('a session in both jobs and ready keeps its counting-down line, not "ready"
   assert.equal(waitingCount, 1);
 });
 
-// ---------------------------------------------------------------------------
-// CountdownStatusBar.update - end to end through the fake vscode item.
-// ---------------------------------------------------------------------------
+// CountdownStatusBar.update, end to end through the fake vscode item.
 
 test('the tooltip warns when the folder is not trusted for the CLI, and marks the string trusted for the link only', () => {
   resetVscodeFake();
@@ -323,9 +307,7 @@ test('the pill does not mention a count for a single session', () => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // Idle presence.
-// ---------------------------------------------------------------------------
 
 test('with nothing pending the item still shows a marker', () => {
   resetVscodeFake();
@@ -383,10 +365,8 @@ test('the tooltip no longer promises that clicking cancels', () => {
   assert.ok(!/click to cancel/i.test(tooltipText()), tooltipText());
 });
 
-// ---------------------------------------------------------------------------
-// Sessions waiting to be started by hand (Task 5b): nothing counting down,
-// but a session is ready. It must not read as idle.
-// ---------------------------------------------------------------------------
+// Sessions waiting to be started by hand: nothing counting down, but one is
+// ready. It must not read as idle.
 
 test('with nothing counting down but a session ready, the item is not the idle eye', () => {
   resetVscodeFake();
@@ -415,11 +395,8 @@ test('statusBar "pending" still shows a ready-only session: it is not idle', () 
   assert.equal(vscodeFake.statusBarItems[0]?.visible, true);
 });
 
-// ---------------------------------------------------------------------------
-// The gave-up state (Task 4b/5b). A session this extension has stopped
-// retrying must not leave the item looking idle: it gets its own icon, and
-// the unified tooltip names each such session and why.
-// ---------------------------------------------------------------------------
+// The gave-up state: a session this extension has stopped retrying gets its own
+// icon, and the tooltip names each such session and why.
 
 const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
 import type { GaveUpRecord } from '../src/gaveUp';
@@ -517,7 +494,7 @@ test('a session both ready and given up (a launcher/cwd failure) is one line, sh
   assert.equal(text.split('0b3d1f66').length - 1, 1, text);
 });
 
-test('the gave-up reminder lists every way a gave-up notice clears (final review minor)', () => {
+test('the gave-up reminder lists every way a gave-up notice clears', () => {
   resetVscodeFake();
   const bar = new CountdownStatusBar();
   bar.update([], [], 'always', [gaveUp()]);
@@ -528,11 +505,9 @@ test('the gave-up reminder lists every way a gave-up notice clears (final review
   assert.match(text, /"Cancel Pending Resume"/);
 });
 
-// ---------------------------------------------------------------------------
-// Wave D, D3: an offer-only job (a limit resetting beyond maxWaitHours) is
-// still waiting, but nothing will launch at its deadline - Resume Now is
-// offered then. The pill and the tooltip must not say "resumes"/"resuming".
-// ---------------------------------------------------------------------------
+// An offer-only job (a limit resetting beyond maxWaitHours) still waits, but
+// nothing launches at its deadline; Resume Now is offered. The pill and tooltip
+// must not say "resumes"/"resuming".
 
 test('an offer-only job is listed as waiting for a manual Resume Now, not as resuming', () => {
   const at = Date.now() + 3 * 86_400_000;
@@ -547,7 +522,7 @@ test('an offer-only job is listed as waiting for a manual Resume Now, not as res
 test('the pill marks an offer-only soonest job as manual rather than counting down to a resume', () => {
   resetVscodeFake();
   const bar = new CountdownStatusBar();
-  // A weekly reset, half an hour short of seven days: counted in days (Minor 4).
+  // A weekly reset, half an hour short of seven days: counted in days.
   const at = Date.now() + 7 * 86_400_000 - 30 * 60_000;
   bar.update([job({ resumeAtMs: at, baseResumeAtMs: at, offerOnly: true })]);
   const text = vscodeFake.statusBarItems[0]?.text ?? '';

@@ -7,17 +7,15 @@ installVscodeStub();
 const { ResumeScheduler, restoreJob } = require('../src/scheduler') as typeof import('../src/scheduler');
 import type { MementoLike } from '../src/scheduler';
 
-// Final fix wave B, B2 (final review M2): the pending and ready lists come back
-// from globalState, which anyone can edit and an older build may have written
-// badly. A job that fails validation is dropped with one log line; it must
-// never reach `claude --resume`.
+// Pending and ready lists come back from globalState, which can be edited by
+// hand or badly written by an older build. A job that fails validation is
+// dropped with one log line; it must never reach `claude --resume`.
 
 const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
 
-// One clock read for the whole file: `valid()` and `full()` are called more
-// than once in a test and compared (deepEqual), so two `Date.now()` reads a
-// millisecond apart made the comparison flaky.
+// One clock read for the whole file: valid() and full() are compared with
+// deepEqual, so two Date.now() reads would be flaky.
 const NOW = Date.now();
 
 const valid = (): Record<string, unknown> => ({
@@ -177,11 +175,9 @@ test('a stored value that is not a job list at all restores nothing and does not
 });
 
 
-// Wave D, D3: offerOnly is persisted, and it is the one field whose loss would
-// ESCALATE autonomy - a weekly limit the user was told would only be offered
-// would launch on its own instead. So a bad value drops the job (with the
-// usual warn line) rather than deleting the field the way a bad
-// rateLimitType is repaired.
+// offerOnly is the one persisted field whose loss would ESCALATE autonomy (an
+// offer-only weekly limit would launch on its own), so a bad value drops the
+// job rather than being repaired like rateLimitType.
 test('an offer-only job survives restoreJob with the flag intact', () => {
   const result = restoreJob({ ...full(), offerOnly: true });
   assert.ok('job' in result);
