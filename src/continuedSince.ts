@@ -1,47 +1,30 @@
 import * as nodeFs from 'node:fs';
 
 /**
- * Is a session PAST the stop it was detected at? (Final fix wave A, A3:
- * final review I1, M5 and M7; refined by wave A fix round 1, review C1.)
+ * Is a session PAST the stop it was detected at?
  *
- * A resume is only ever for a live, still-unhandled stop. The job carries the
- * transcript's size at detection (`transcriptBytesAtDetection`), so whatever
- * was appended after that is what happened to the session since. A real
- * `user` or `assistant` entry there means somebody - the user at a panel or a
- * terminal, Claude Code's own auto-continue, another window's resume - took
- * the session on, and a resume on top of a session that is still going forks
- * the conversation: the idle-panel race of final review I1, where the user
- * comes back at 2:12, types, the turn ends, and a fire padded to 2:25 finds an
- * idle panel and resumes anyway.
+ * A resume is only for a live, still-unhandled stop. The job carries the transcript's size at
+ * detection (`transcriptBytesAtDetection`); a real `user` or `assistant` entry appended after
+ * that means somebody (the user, Claude Code's auto-continue, another window's resume) took
+ * the session on, and resuming a session that is still going forks the conversation.
  *
- * But taking it on is not the same as getting past it (review C1). The
- * commonest reaction to a limit is "try again", and a retry - by hand, from
- * Remote Control, or a background task's `<task-notification>` turn - that
- * runs into the same limit writes a real prompt and then another flagged
- * error entry. The review found 43 of those on this machine, 38 with an
- * identical `quotaLimits.resetsAt`. That session is stopped, at a live stop,
- * and must still be resumed. So the appended `user` and `assistant` entries
- * are walked in order: a real one sets "continued", a flagged
- * (`isApiErrorMessage: true`) one clears it again, and the LAST of them
- * decides.
+ * But taking it on is not getting past it: a retry that runs into the same limit writes a real
+ * prompt and then another flagged error entry, and that session is still stopped. So the
+ * appended entries are walked in order: a real one sets "continued", a flagged
+ * (`isApiErrorMessage: true`) one clears it, and the LAST of them decides.
  *
  * What neither sets nor clears it:
- * - The unflagged `<synthetic>` assistant entries ("No response requested.",
- *   the Task 4c scan): they are Claude Code talking, not the session moving.
- * - Local slash commands (review I1): `/usage`, `/status`, `/model` write
- *   `user` entries starting `<local-command-caveat>`, `<command-name>` or
- *   `<local-command-stdout>`, and make no API call - checking when a limit
- *   resets is not getting past it. Other `isMeta` entries still count: the
- *   native auto-continue's own "Continue from where you left off." is one.
- * - Any other entry type (`system`, `summary`, hook and snapshot records):
- *   a trailing hook entry is not a turn (final review M7).
- * - Unparseable or partial lines: the tail may still be mid-write, and a tail
- *   read can start mid-line.
+ * - Unflagged `<synthetic>` assistant entries ("No response requested."): Claude Code talking,
+ *   not the session moving.
+ * - Local slash commands (`/usage`, `/status`, `/model`): `user` entries starting
+ *   `<local-command-caveat>`, `<command-name>` or `<local-command-stdout>`. Checking when a
+ *   limit resets is not getting past it. Other `isMeta` entries still count: native
+ *   auto-continue's "Continue from where you left off." is one.
+ * - Any other entry type (`system`, `summary`, hook and snapshot records).
+ * - Unparseable or partial lines: the tail may be mid-write, and a tail read can start mid-line.
  *
- * Fails OPEN - false - when it cannot tell: no baseline (a job persisted by an
- * older build), an unreadable transcript, or one now shorter than its
- * baseline (replaced). Goal 2 is to resume unattended; not knowing is not a
- * reason to strand a session, and this was the behaviour before the check.
+ * Fails OPEN (false) when it cannot tell: no baseline, an unreadable transcript, or one now
+ * shorter than its baseline. Not knowing is not a reason to strand a session.
  */
 export function continuedSince(
   transcriptPath: string,
@@ -72,13 +55,10 @@ export function continuedSince(
       continued = verdict;
     }
   }
-  // Wave B, B8 (wave A re-review, m-new-1). The window started past the
-  // baseline, so more than MAX_CONTINUED_READ_BYTES was appended, and not one
-  // line in it parsed: the last line alone is longer than the window. A
-  // synthetic error entry is a few hundred bytes, never megabytes, so a line
-  // that long is a real prompt (pasted images, say) and the session moved on.
-  // When the window starts AT the baseline, an unparseable tail is only a
-  // partial write, which is not news.
+  // The window started past the baseline and not one line parsed: the last line alone is longer
+  // than the window. A synthetic error entry is never that large, so it is a real prompt and the
+  // session moved on. When the window starts AT the baseline, an unparseable tail is only a
+  // partial write.
   if (from > (baselineBytes ?? 0) && !parsedAny) {
     return true;
   }
@@ -87,14 +67,10 @@ export function continuedSince(
 
 /**
  * What was appended to a transcript since `baselineBytes`, bounded to the last
- * {@link MAX_CONTINUED_READ_BYTES} and never reaching back before the
- * baseline. The window {@link continuedSince} judges, shared (wave C, C5) with
- * the native auto-continue cancel scan so both read exactly the same bytes.
- * `from` is where the text starts: past the baseline when the cap bit, in
- * which case its first line may be a fragment. Undefined when it cannot be
- * read: no or an invalid baseline (a job from an older build), an unreadable
- * transcript, or one no longer than its baseline (nothing appended, or
- * replaced).
+ * {@link MAX_CONTINUED_READ_BYTES} and never before the baseline. Shared with the native
+ * auto-continue cancel scan so both read the same bytes. `from` is where the text starts (past
+ * the baseline when the cap bit, so its first line may be a fragment). Undefined when
+ * unreadable: no or invalid baseline, an unreadable transcript, or one no longer than its baseline.
  */
 export function readAppendedWindow(
   transcriptPath: string,
@@ -109,10 +85,8 @@ export function readAppendedWindow(
     if (size <= baselineBytes) {
       return undefined;
     }
-    // The TAIL, bounded: the last entry decides, and a resumed session can
-    // append megabytes before this runs. Never earlier than the baseline -
-    // history before the stop is not news. A start inside a line just makes
-    // that first fragment unparseable, and it is skipped.
+    // The TAIL, bounded: the last entry decides. Never earlier than the baseline. A start inside
+    // a line leaves an unparseable first fragment, which is skipped.
     const from = Math.max(baselineBytes, size - MAX_CONTINUED_READ_BYTES);
     const length = size - from;
     const buffer = Buffer.alloc(length);
@@ -140,10 +114,8 @@ export interface ContinuedFs {
 }
 
 /**
- * Where a `user` entry carrying a local slash command's output starts (review
- * I1). `local-command-stderr` joined in wave C (C2): a command that fails -
- * a `/compact` that hit the limit again - writes its error there, and it is
- * no more the session moving on than stdout is.
+ * Where a `user` entry carrying a local slash command's output starts. stderr counts too: a
+ * failing command is no more the session moving on than stdout is.
  */
 const LOCAL_COMMAND_RE = /^\s*<(?:command-name|local-command-stdout|local-command-stderr|local-command-caveat)>/;
 
