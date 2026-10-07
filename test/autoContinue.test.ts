@@ -6,10 +6,8 @@ import { autoContinueEnabled } from '../src/autoContinue';
 
 const CWD = '/work/app';
 
-/** A reader over an in-memory map, keyed by the exact path asked for, folded
- * to forward slashes so a test does not need to know which separator
- * `path.join` chose on the host platform running the suite. Throws for
- * anything else, the same as a real fs.readFileSync on a missing file. */
+/** In-memory reader keyed by path (folded to forward slashes, so tests ignore
+ * the host separator); throws for anything else, like a missing file. */
 const reader = (files: Record<string, string>) => (p: string) => {
   const key = p.replace(/\\/g, '/');
   if (!(key in files)) {
@@ -40,8 +38,7 @@ function withoutConfigDir(fn: () => void): void {
 }
 
 test('autoContinueEnabled defaults to on when no layer sets the key', () => {
-  // claude.exe 2.1.281: `setting ?? (autoContinueKeyPresence === "absent")` -
-  // absent reads as present-and-true, not as false.
+  // An absent key reads as present-and-true, not false.
   assert.equal(autoContinueEnabled(CWD, 'linux', reader({})), true);
 });
 
@@ -100,9 +97,8 @@ test('autoContinueEnabled prefers <cwd>/.claude/settings.local.json over <cwd>/.
 });
 
 test('autoContinueEnabled skips a layer whose JSON parses but is not an object', () => {
-  // JSON.parse('null') and JSON.parse('42') both succeed; neither can be
-  // indexed for the setting key without throwing, so this must be skipped
-  // exactly like a missing or malformed file, not crash the whole read.
+  // JSON.parse('null') and ('42') succeed but cannot be indexed; skip them like
+  // a malformed file.
   const files = {
     [path.posix.join(CWD, '.claude', 'settings.local.json')]: 'null',
     [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
@@ -141,8 +137,6 @@ test('autoContinueEnabled skips a layer whose key is present but not a boolean',
 });
 
 test('autoContinueEnabled skips a layer that cannot be read at all', () => {
-  // No file at settings.local.json (a real fs.readFileSync throws ENOENT);
-  // the next layer down still decides.
   const files = {
     [path.posix.join(CWD, '.claude', 'settings.json')]: JSON.stringify({ autoContinueAtUsageLimit: false }),
   };
@@ -158,8 +152,7 @@ test('autoContinueEnabled skips a layer with malformed JSON rather than throwing
 });
 
 test('autoContinueEnabled skips the two cwd-scoped layers entirely when there is no cwd', () => {
-  // A job can be scheduled with no cwd (see PendingJob). Only the managed and
-  // user-level layers can possibly apply.
+  // A job can have no cwd; only the managed and user layers apply.
   withoutConfigDir(() => {
     const files = {
       [path.posix.join(os.homedir().replace(/\\/g, '/'), '.claude', 'settings.json')]: JSON.stringify({

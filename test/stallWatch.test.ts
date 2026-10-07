@@ -31,9 +31,8 @@ test('an empty transcript that stays empty is a stall', () => {
 });
 
 test('the grace period is scheduling advice, not part of the verdict', () => {
-  // stallVerdict takes no clock on purpose. When it re-checked the elapsed
-  // time against this constant, a caller that shortened its timer got "too
-  // soon" for healthy resumes and could not tell them from stalls.
+  // stallVerdict takes no clock on purpose: a caller with a shortened timer
+  // would get "too soon" for healthy resumes.
   assert.equal(typeof GRACE_MS, 'number');
   assert.ok(GRACE_MS > 0);
   assert.equal(stallVerdict.length, 1, 'the verdict depends on bytes alone');

@@ -2,11 +2,9 @@ import assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 
 /**
- * Probes for the two behaviours issue #7 could not settle by reading source -
- * both are VS Code's own behaviour, not Claude Code's, so a real Extension
- * Development Host can answer them where the unit suite's fake `vscode`
- * cannot. src/panelTab.ts and src/reopenOffer.ts cite the findings recorded
- * here; change this file's behaviour and those comments go stale with it.
+ * Probes for VS Code's own panel-reopen behaviour, which the unit suite's fake
+ * `vscode` cannot answer. src/panelTab.ts and src/reopenOffer.ts cite the
+ * findings here; keep them in step.
  */
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -27,7 +25,7 @@ function findTab(viewType: string): vscode.Tab | undefined {
     .find((t) => t.input instanceof vscode.TabInputWebview && t.input.viewType.includes(viewType));
 }
 
-suite('panel reopen - unverified behaviours from issue #7', () => {
+suite('panel reopen - unverified behaviours', () => {
   test('TabInputWebview.viewType as reported by a real tabGroups', async () => {
     const requested = 'claudeLimitBreakProbeViewType';
     const panel = vscode.window.createWebviewPanel(requested, 'CLB probe', vscode.ViewColumn.Active, {});
@@ -38,12 +36,9 @@ suite('panel reopen - unverified behaviours from issue #7', () => {
       assert.ok(tab.input instanceof vscode.TabInputWebview, 'its input must be a TabInputWebview');
       const observed = (tab.input as vscode.TabInputWebview).viewType;
 
-      // FINDING (VS Code 1.137.0, Extension Development Host): the runtime
-      // value came back as "mainThreadWebview-claudeLimitBreakProbeViewType"
-      // - prefixed with "mainThreadWebview-" ahead of exactly what was passed
-      // to createWebviewPanel. That confirms the issue's premise: the match
-      // against Claude Code's real viewType has to be `includes(...)`, not
-      // `===`. See src/panelTab.ts.
+      // FINDING: the runtime viewType is "mainThreadWebview-" plus what was
+      // passed to createWebviewPanel, so the match against Claude Code's
+      // viewType must use `includes(...)`, not `===`. See src/panelTab.ts.
       assert.ok(
         observed.includes(requested),
         `expected the observed viewType to contain what was requested; got ${observed}`,
@@ -76,9 +71,8 @@ suite('panel reopen - unverified behaviours from issue #7', () => {
       const tab = findTab(viewType);
       assert.ok(tab, 'the panel must be a tab before it can be closed');
 
-      // Close through tabGroups.close, the exact call src/extension.ts makes -
-      // not panel.dispose() - so this proves the real code path rather than a
-      // stand-in for it.
+      // Close through tabGroups.close, the call src/extension.ts makes, not
+      // panel.dispose().
       await vscode.window.tabGroups.close(tab!);
       await waitFor(() => findTab(viewType) === undefined);
 
@@ -87,16 +81,11 @@ suite('panel reopen - unverified behaviours from issue #7', () => {
       // beat before concluding it never ran.
       await sleep(500);
 
-      // FINDING (VS Code 1.137.0, Extension Development Host): the serializer
-      // was never invoked and the tab did not come back, with or without a
-      // second editor left open in the same group (checked both). Confirmed
-      // reproducible, not a one-off timing miss.
-      //
-      // This is why src/reopenOffer.ts does not use this command at all: it
-      // closes the user's real Claude Code tab, so calling a mechanism proven
-      // not to restore it would trade a stale tab for a missing one. Locked
-      // in here as a regression guard - if a future VS Code version starts
-      // restoring webviews this way, this assertion is what will say so.
+      // FINDING: the serializer is never invoked and the tab does not come
+      // back, with or without a second editor open in the group. This is why
+      // src/reopenOffer.ts avoids this command: it closes the user's real
+      // Claude Code tab. Kept as a regression guard in case a future VS Code
+      // restores webviews this way.
       assert.equal(deserializeCalls, 0, 'reopenClosedEditor is not expected to invoke the serializer');
       assert.equal(findTab(viewType), undefined, 'the tab is not expected to come back this way');
     } finally {

@@ -19,10 +19,8 @@ test('a live panel with a reopenable tab offers a button', () => {
 });
 
 test('the notification names the risk, not the stale view', () => {
-  // The experiment (docs/research/2026-09-20-panel-fork-experiment.md) found
-  // the cost is a dropped turn, not an out-of-date scrollback. A message that
-  // only says "this tab is out of date" invites the exact action that loses
-  // the turn.
+  // The cost of reopening is a dropped turn, not stale scrollback; a message
+  // that only says "out of date" invites the action that loses the turn.
   const offer = buildReopenOffer(SESSION, true, true, 'notify');
   assert.ok(offer);
   assert.match(offer.message, /before you type/i);
@@ -46,9 +44,8 @@ test('reopen mode acts instead of offering a button', () => {
 });
 
 test('reopen mode falls back to the warning when there is no way to reopen', () => {
-  // Same position as notify-without-a-command: there is a stale tab and no
-  // means to act on it, so the user has to be told rather than left to type
-  // into it.
+  // A stale tab with no means to act on it: the user is told rather than left
+  // to type into it.
   const offer = buildReopenOffer(SESSION, true, false, 'reopen');
   assert.ok(offer);
   assert.equal(offer.reopen, false);
@@ -68,8 +65,8 @@ test('chooseReopenCommand finds nothing when the Claude Code extension is not in
 });
 
 test('chooseReopenCommand never falls back to workbench.action.reopenClosedEditor', () => {
-  // test/integration/panelReopen.itest.ts proved that command does not
-  // restore a closed webview panel through its serializer, so it must never
-  // be treated as usable here even when it is (as it always is) present.
+  // That command does not restore a closed webview panel through its serializer
+  // (see panelReopen.itest.ts), so it is never usable here even though it is
+  // always present.
   assert.equal(chooseReopenCommand(['workbench.action.reopenClosedEditor']), undefined);
 });

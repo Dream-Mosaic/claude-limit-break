@@ -47,8 +47,8 @@ test('a session too expensive to resume is refused with the numbers', () => {
 });
 
 test('a refusal names the session and folder it refused, so a dismissal can be recorded against them', () => {
-  // Task 4b: a dismissed refusal puts that session into the gave-up state,
-  // which is per session - the refusal has to say which one.
+  // A dismissed refusal puts the session into the gave-up state, which is per
+  // session, so the refusal names it.
   const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings({ maxResumeTokens: 500_000 }), small, NOW, noJitter, BIG);
   assert.equal(p.kind, 'refuse');
   if (p.kind !== 'refuse') return;
@@ -105,7 +105,7 @@ test('a reset time already in the past still schedules rather than being ignored
   assert.equal(p.job.resumeAtMs, past.getTime() + 600_000);
 });
 
-test('an overload job carries the detection entry timestamp it was planned from (final review I3)', () => {
+test('an overload job carries the detection entry timestamp it was planned from', () => {
   const p = planResume(
     { detection: { text: 'API Error: 529 Overloaded' }, cwd: '/projects/example', file: FILE, entryTimestampMs: 1_234_567 },
     'overload',
@@ -126,7 +126,7 @@ test('a hit with no entry timestamp plans a job without one', () => {
   assert.equal(p.job.entryTimestampMs, undefined);
 });
 
-test('a planned job records the transcript size at detection, the baseline for the native-continue check (final review I6)', () => {
+test('a planned job records the transcript size at detection, the baseline for the native-continue check', () => {
   const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), () => 123_456, NOW, noJitter);
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
@@ -142,9 +142,8 @@ test('an unreadable transcript size is left off the job rather than recorded as 
   assert.equal(p.job.transcriptBytesAtDetection, undefined);
 });
 
-// Task 4c (R4): the limit type the detection names rides on the job, so
-// decideOnFire can tell a five-hour limit (native auto-continue covers it)
-// from every other.
+// The limit type rides on the job so decideOnFire can tell a five-hour limit
+// (covered by native auto-continue) from every other.
 test('a detection that names its limit type puts it on the job', () => {
   const at = new Date('2026-08-03T17:00:00Z');
   const typed = { ...hit(at), detection: { ...hit(at).detection, rateLimitType: 'seven_day' } };
@@ -161,12 +160,11 @@ test('a detection with no limit type leaves the key off the job, so a persisted 
   assert.equal(Object.hasOwn(p.job, 'rateLimitType'), false);
 });
 
-// Final fix wave A, A6 (the user's decision): an overload retry's backoff is
-// added to the deadline itself, before the usual random delay, so the claim
-// hold (A5) covers it. A limit neither counts nor backs off.
+// An overload backoff is added to the deadline itself, before the random delay,
+// so the claim hold covers it. A limit neither counts nor backs off.
 const overloadHit = { detection: { text: 'API Error: 529 Overloaded' }, cwd: '/projects/example', file: FILE };
 
-test('an overload backoff goes into the deadline, with the usual random delay on top (A6)', () => {
+test('an overload backoff goes into the deadline, with the usual random delay on top', () => {
   const p = planResume(overloadHit, 'overload', settings(), small, NOW, () => 7 * 60_000, undefined, 30 * 60_000);
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
@@ -176,7 +174,7 @@ test('an overload backoff goes into the deadline, with the usual random delay on
   assert.equal(p.job.backoffMs, 30 * 60_000);
 });
 
-test('the random delay under a backoff is drawn from the configured range (A6)', () => {
+test('the random delay under a backoff is drawn from the configured range', () => {
   const seen: [number, number][] = [];
   const jitter = (min: number, max: number) => {
     seen.push([min, max]);
@@ -186,7 +184,7 @@ test('the random delay under a backoff is drawn from the configured range (A6)',
   assert.deepEqual(seen, [[2, 9]]);
 });
 
-test('a limit ignores any overload backoff (A6)', () => {
+test('a limit ignores any overload backoff', () => {
   const at = new Date('2026-08-03T17:00:00Z');
   const p = planResume(hit(at), 'limit', settings(), small, NOW, noJitter, undefined, 60 * 60_000);
   assert.equal(p.kind, 'schedule');
@@ -195,7 +193,7 @@ test('a limit ignores any overload backoff (A6)', () => {
   assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
 });
 
-test('a first overload retry carries no backoff key (A6)', () => {
+test('a first overload retry carries no backoff key', () => {
   const p = planResume(overloadHit, 'overload', settings(), small, NOW, noJitter);
   assert.equal(p.kind, 'schedule');
   if (p.kind !== 'schedule') return;
@@ -203,9 +201,9 @@ test('a first overload retry carries no backoff key (A6)', () => {
   assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
 });
 
-// Wave D, D3 (policy B): a limit that resets beyond maxWaitHours is scheduled
-// as usual - the claim, the status bar and persistence all come with that -
-// but marked offer-only, so the fire offers Resume Now instead of launching.
+// A limit resetting beyond maxWaitHours is scheduled as usual (claim, status
+// bar, persistence) but marked offer-only, so the fire offers Resume Now
+// instead of launching.
 test('an offer-only detection puts offerOnly on the job', () => {
   const at = new Date('2026-08-07T06:00:00Z');
   const offer = { ...hit(at), detection: { ...hit(at).detection, offerOnly: true as const } };

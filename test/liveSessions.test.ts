@@ -31,8 +31,8 @@ test('parseAgentRows returns nothing rather than throwing on output that is not 
 });
 
 test('parseAgentRows drops a row with no pid', () => {
-  // A background agent record carries an id and no pid - #6 found an orphaned
-  // one of these that no command could remove. It cannot be a live process.
+  // A background agent record has an id and no pid; it cannot be a live
+  // process.
   const rows = parseAgentRows(
     rowsJson(
       { id: 'ffcb2ab0', kind: 'background', sessionId: SESSION, state: 'blocked' },
@@ -146,12 +146,8 @@ test('livePanelDetector says no when the listing cannot be run', () => {
   assert.equal(detect(SESSION, 222), false);
 });
 
-// ---------------------------------------------------------------------------
-// AgentRow carries cwd and status too (Task 2), for the busy-folder check.
-// The existing tests above assert exact-shape rows with deepEqual, so these
-// two fields must be omitted from a row entirely when the listing did not
-// report them - present as `undefined` would fail those deepEqual checks.
-// ---------------------------------------------------------------------------
+// AgentRow carries cwd and status only when the listing reported them: a field
+// present as `undefined` would fail the deepEqual checks above.
 
 test('parseAgentRows carries cwd and status when the listing reports them', () => {
   const rows = parseAgentRows(
@@ -177,10 +173,8 @@ test('parseAgentRows omits name rather than reporting it as undefined', () => {
   assert.equal('name' in rows[0]!, false);
 });
 
-// ---------------------------------------------------------------------------
 // classifyHolder: the pure classifier scheduler.onFire uses to decide whether
-// somebody already holds the session before spawning a second writer.
-// ---------------------------------------------------------------------------
+// somebody already holds the session.
 
 test('classifyHolder reports none when nothing else is live on the session', () => {
   const rows = parseAgentRows(rowsJson({ pid: 222, kind: 'interactive', sessionId: SESSION }));
@@ -222,9 +216,8 @@ test('classifyHolder carries status undefined when the listing did not report it
 });
 
 test('classifyHolder reads status off the matching row, not some other one in the listing', () => {
-  // Two other live pids on this session, with different statuses - proves the
-  // status attached to the result is actually looked up per pid, not, say,
-  // always the first row's or a constant.
+  // Two other live pids with different statuses: the status is looked up per
+  // pid, not taken from the first row or a constant.
   const rows = parseAgentRows(
     rowsJson(
       { pid: 111, kind: 'interactive', sessionId: SESSION, status: 'idle' },
@@ -261,11 +254,8 @@ test('classifyHolder ignores a live pid with no record to read', () => {
   assert.deepEqual(classifyHolder(rows, SESSION, 222, () => undefined), { kind: 'none' });
 });
 
-// ---------------------------------------------------------------------------
-// busyFolderPeers: every DIFFERENT session busy or waiting in the same
-// folder. Feeds holderPolicy.ts's buildResumePrompt, which tells the
-// resumed model to coordinate with each one by name.
-// ---------------------------------------------------------------------------
+// busyFolderPeers: every DIFFERENT session busy or waiting in the same folder;
+// feeds buildResumePrompt.
 
 test('busyFolderPeers finds a different session busy in the same folder', () => {
   const rows = parseAgentRows(
@@ -331,10 +321,8 @@ test('busyFolderPeers normalizes drive-letter casing and slash direction (win32)
   assert.deepEqual(found.map((r) => r.pid), [555]);
 });
 
-// ---------------------------------------------------------------------------
-// agentRowsDetector: the one impure listing fetch scheduler.onFire and a
-// manual resume both build their holder/peer checks on.
-// ---------------------------------------------------------------------------
+// agentRowsDetector: the impure listing fetch that the holder and peer checks
+// build on.
 
 test('agentRowsDetector parses the real listing', () => {
   const detect = agentRowsDetector(() => rowsJson({ pid: 111, kind: 'interactive', sessionId: SESSION }));
