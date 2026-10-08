@@ -22,17 +22,16 @@ final review fix wave, and the two field-report fix waves (A and B) landed on
 ## Known limitations
 
 **Two open windows resuming the same session twice — now mostly covered, not
-fully.** The original 2026-09-24 field incident (both windows detect an
-identical limit within ~1-2s and each fires its own `claude --resume`, see
-the Windows-lane ledger's "Root cause" note) is closed: a machine-wide
-filesystem claim (`src/claims.ts`, `fs.openSync(path, 'wx')`, first one wins)
-runs before every automatic fire and every manual bypass path (Resume Now in
-both `autoResume` states, "Resume Anyway", "Resume in Terminal Anyway") —
-Task 10, 3 review rounds, all four manual paths verified symmetric
-(git history: `d90f032:.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`,
-Task 10 re-review 3). The slower case Task 2's holder check already covered
-(one window sees the other's resume alive in `claude agents`, minutes later)
-is unaffected by any of this and still works as before.
+fully.** The original 2026-09-24 field incident (two windows detected the
+same limit within a second or two and each ran its own `claude --resume`) is
+closed: a machine-wide filesystem claim (`src/claims.ts`,
+`fs.openSync(path, 'wx')`, first one wins) runs before every automatic fire
+and every manual bypass path (Resume Now in both `autoResume` states, "Resume
+Anyway", "Resume in Terminal Anyway"), and all four manual paths take it the
+same way. In the 1.0 smoke test two windows fired for the same session in the
+same second and only one resumed. The slower case the holder check already
+covered (one window sees the other's resume alive in `claude agents`, minutes
+later) is unaffected by any of this and still works as before.
 
 What is not covered:
 - **The job lists themselves are shared across windows.** `globalState` is
@@ -54,11 +53,11 @@ What is not covered:
   (wave A, A8); a copy of the job in another window can still fire first, in
   which case the other window resumes it and this one drops on its claim, so
   there is still one resume per reset.
-- The claim's atomicity guarantee is `O_EXCL`, which is real, but Task 10's
-  own two-claimer test only exercises it sequentially in one process, not
-  with two real concurrent processes racing the syscall (Task 10 review 1
-  note, ledger). Nothing has actually broken this; it is simply unverified
-  the way the original bug could only be measured live.
+- The claim's atomicity guarantee is `O_EXCL`, which is real, but the unit
+  tests' two-claimer case only exercises it sequentially in one process. The
+  1.0 smoke test raced it across two VS Code instances firing in the same
+  second (about 150 ms apart) and it held; two processes hitting the syscall
+  at the same instant is guaranteed by `O_EXCL` but has not been observed.
 - A claim is scoped to `os.tmpdir()` for the current OS user
   (`src/claims.ts` module doc). Two different OS user accounts on the same
   machine, or two different machines, do not share a claims directory and so
@@ -244,9 +243,7 @@ Planned for the release after 1.0.
   empty `headlessPermissionMode` means "mirror the session"; a recorded
   `bypassPermissions` falls back to `default` rather than being mirrored; the
   `--permission-prompts none` gate at 2.1.259; and a warning on
-  `permission_denials` with a button to continue in a terminal. The options
-  table is section 7 of `research-headless-permissions.md` in the maintainer's
-  local, untracked SDD workspace, not in this repository.
+  `permission_denials` with a button to continue in a terminal.
 - **Following a headless run.** Today a headless resume runs in a shown VS Code
   terminal with `--output-format json`: silent until it finishes, no input, no
   done notice, and the panel tab for that session is stale meanwhile (typing
@@ -301,16 +298,14 @@ Planned for the release after 1.0.
 - **A Limit Break sidebar.** An activity-bar view container with a view
   listing pending, ready and gave-up sessions — the tooltip's
   `buildSessionLines` model already has the data shape for this
-  (`src/statusBar.ts`). Icon: `media/logo-mono.svg` (the user's "no square"
-  redraw — frame, "Limit", gauge in `currentColor` on transparent, without
-  the solid tile the square variant read as at 24px next to the codicons;
-  ruling and Chromium-mock validation in git history at
-  `d90f032:.superpowers/sdd/2026-09-25-limit-break-1.0-cloud/progress.md`,
-  Task 7 section). The activity bar takes an SVG directly as a CSS mask
-  (`paneCompositeBar.ts`), no icon font needed. Open question carried from
-  that ruling: legibility at 24px with ~2px margin — consider a gauge-only
-  crop if the full mark reads too busy that small; a redraw is a one-file
-  cost either way.
+  (`src/statusBar.ts`). Icon: `media/logo-mono.svg`, the "no square"
+  redraw: frame, "Limit" and gauge in `currentColor` on a transparent
+  background, without the solid tile that made the square variant read as a
+  block at 24px next to the codicons. It was checked in a Chromium mock of
+  the activity bar. The activity bar takes an SVG directly as a CSS mask
+  (`paneCompositeBar.ts`), no icon font needed. Open question: legibility at
+  24px with ~2px margin — consider a gauge-only crop if the full mark reads
+  too busy that small; a redraw is a one-file cost either way.
 
 ### Revisit from the 1.0 sign-off
 
