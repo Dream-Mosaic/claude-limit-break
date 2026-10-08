@@ -344,6 +344,11 @@ Behaviours 1.0 ships as they are, to be looked at again.
   offered jobs match within 15 minutes; two automatic jobs need an exact match.
   Widening it means updating the tests that treat resets 10 minutes apart as
   different.
+- **Name sessions the way the user knows them.** Notices, the tooltip and the
+  log identify a session only by its ID (or its first 8 characters), which says
+  nothing about which conversation it is. Show something recognisable instead,
+  such as the session's title or first prompt and its folder, keeping the ID
+  in the log.
 - **Gave-up handling.** The marker clears on the session's next finished turn
   or from "Dismiss gave-up notices"; a turn that did not fix the cause clears it
   too. Revisit.
