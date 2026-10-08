@@ -350,6 +350,22 @@ Behaviours 1.0 ships as they are, to be looked at again.
   such as the session's title or first prompt and its folder, keeping the ID
   in the log. The resume terminal's tab ("Limit Break: <id8>") should use the
   same name.
+- **Which window owns a session.** With `watchScope: machine` (the default)
+  every window detects every stop and the first timer to fire takes the claim,
+  so the resume terminal can open in a window for an unrelated project, and
+  closing the window a session ran in does not stop another window resuming
+  it. With `workspace`, a session whose folder is not inside an open folder is
+  never resumed. To look at:
+  - Let the window that owns the session go first and the others only after a
+    grace period, so the resume opens where the user was working.
+  - Recognise ownership beyond the open folder: a Claude terminal in this
+    window that was `cd`'d elsewhere (the terminal or process tree may tell),
+    and git worktrees of the open repository, including sibling folders such
+    as the one this project is developed in.
+  - Whether closing the owning window should stand the resume down instead of
+    another window taking it (the user's expectation: a closed session should
+    not come back on its own).
+  - Out of scope: sessions started outside VS Code.
 - **Cancel or resume one session.** "Cancel Pending Resume" cancels every
   pending job at once, and the Resume Now command takes whichever job is first
   in line; neither lets you pick a session. Offer both per session (a pick list
