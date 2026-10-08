@@ -348,7 +348,8 @@ Behaviours 1.0 ships as they are, to be looked at again.
   log identify a session only by its ID (or its first 8 characters), which says
   nothing about which conversation it is. Show something recognisable instead,
   such as the session's title or first prompt and its folder, keeping the ID
-  in the log.
+  in the log. The resume terminal's tab ("Limit Break: <id8>") should use the
+  same name.
 - **Cancel or resume one session.** "Cancel Pending Resume" cancels every
   pending job at once, and the Resume Now command takes whichever job is first
   in line; neither lets you pick a session. Offer both per session (a pick list
