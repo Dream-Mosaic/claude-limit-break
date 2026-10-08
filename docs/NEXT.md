@@ -366,6 +366,23 @@ Behaviours 1.0 ships as they are, to be looked at again.
     another window taking it (the user's expectation: a closed session should
     not come back on its own).
   - Out of scope: sessions started outside VS Code.
+- **One "resuming at" notice per stop, not one per window.** The offer-only
+  and upgrade notices are claimed so only one window shows them; the ordinary
+  "Limit Break: resuming at <time>" notice is not, so with two windows each
+  shows its own, with its own random-delay time, and the message names no
+  session. Goes with window ownership and session names above.
+- **`workspace` scope still tracks every transcript.** The watcher baselines
+  and tracks every file under the projects folder and filters each entry by
+  folder as it reads it. Fine at a few hundred files; with thousands, skip
+  out-of-scope project folders up front.
+- **README notes from the smoke test.** The "Open Claude to Trust" terminal
+  starts a full Claude session in that folder that keeps running until the
+  user exits it. A resumed session runs with the user's whole Claude setup
+  (MCP servers, skills, settings), as an interactive one would.
+- **Log wording.** The random delay is rounded to whole minutes (`+0m` for a
+  9-second delay); a window dropping an offer another window claimed logs
+  "Resume for ... claimed by another window"; logged error text shows its em
+  dash as " - ".
 - **Cancel or resume one session.** "Cancel Pending Resume" cancels every
   pending job at once, and the Resume Now command takes whichever job is first
   in line; neither lets you pick a session. Offer both per session (a pick list
