@@ -6,9 +6,8 @@ import * as path from 'node:path';
 import { continuedSince, MAX_CONTINUED_READ_BYTES } from '../src/continuedSince';
 
 /**
- * Final fix wave A, A3 (final review I1, M5, M7): has the session moved on
- * since its stop was detected? Real files in a throwaway directory, written
- * the way Claude Code writes a transcript: one JSON object per line.
+ * Has the session moved on since its stop was detected? Real files in a throwaway
+ * directory, written the way Claude Code writes a transcript: one JSON object per line.
  */
 
 const line = (o: Record<string, unknown>) => JSON.stringify(o) + '\n';
@@ -22,7 +21,7 @@ const LIMIT_ENTRY = line({
   message: { model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit · resets 2:10am" }] },
 });
 
-/** Every temp directory this file made, removed when it is done (review m5). */
+/** Every temp directory this file made, removed when it is done. */
 const dirs: string[] = [];
 after(() => {
   for (const dir of dirs) {
@@ -124,13 +123,9 @@ test('a transcript now shorter than its baseline (replaced) is not a continuatio
   assert.equal(continuedSince(file, baseline), false);
 });
 
-// ---------------------------------------------------------------------------
-// Wave A fix round 1 (review C1): the question is whether the session is PAST
-// its stop, not whether anything happened. The sequences below are the real
-// ones the review found in ~/.claude/projects: 43 "limit, prompt, the same
-// limit again" cases, and background-task notifications that start a turn
-// which hits the limit again. Each of those must still be resumed.
-// ---------------------------------------------------------------------------
+// The question is whether the session is PAST its stop, not whether anything
+// happened: "limit, prompt, the same limit again" and background-task notifications
+// that hit the limit again must still be resumed.
 
 /** A prompt from the panel or a Remote Control retry. */
 const SDK_PROMPT = line({ type: 'user', promptSource: 'sdk', message: { role: 'user', content: 'try again' } });
@@ -151,43 +146,43 @@ const REAL_TURN = line({
   message: { model: 'claude-opus-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Picking up where I stopped.' }] },
 });
 
-test('a hand retry that hit the same limit again is not past its stop (C1)', () => {
+test('a hand retry that hit the same limit again is not past its stop', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, SDK_PROMPT + LIMIT_ENTRY);
   assert.equal(continuedSince(file, baseline), false);
 });
 
-test('a task notification whose turn hit the limit again is not past its stop (C1)', () => {
+test('a task notification whose turn hit the limit again is not past its stop', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, TASK_NOTIFICATION + LIMIT_ENTRY);
   assert.equal(continuedSince(file, baseline), false);
 });
 
-test('a Remote Control continue answered by a real turn is past its stop (C1)', () => {
+test('a Remote Control continue answered by a real turn is past its stop', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, SDK_PROMPT + REAL_TURN);
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('the native "Continue from where you left off." answered by a real turn is past its stop (C1)', () => {
+test('the native "Continue from where you left off." answered by a real turn is past its stop', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, NATIVE_CONTINUE + REAL_TURN);
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('the native isMeta continue on its own, its turn still running, already counts (I1: isMeta is not skipped)', () => {
+test('the native isMeta continue on its own, its turn still running, already counts (isMeta is not skipped)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, NATIVE_CONTINUE);
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('stopped again, then continued for real after that, is past its stop (C1)', () => {
+test('stopped again, then continued for real after that, is past its stop', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, SDK_PROMPT + LIMIT_ENTRY + SDK_PROMPT + REAL_TURN);
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('the last entry decides, so the tail is read, not the head (C1)', () => {
+test('the last entry decides, so the tail is read, not the head', () => {
   // A real turn right after the stop, then more than the read cap of other
   // entries, then the session stopping again: only a tail read sees the stop.
   const { file, baseline } = transcriptAtDetection();
@@ -196,10 +191,9 @@ test('the last entry decides, so the tail is read, not the head (C1)', () => {
   assert.equal(continuedSince(file, baseline), false);
 });
 
-// Review I1: a local slash command after a limit (/usage, /status, /model -
-// the natural way to check when it resets) makes no API call and is not the
-// session moving on. The native auto-continue's isMeta prompt above still is.
-test('local slash-command entries after a limit are not a continuation (I1)', () => {
+// A local slash command after a limit (/usage, /status, /model) makes no API call
+// and is not the session moving on. The native auto-continue's isMeta prompt above still is.
+test('local slash-command entries after a limit are not a continuation', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(
     file,
@@ -217,13 +211,11 @@ test('local slash-command entries after a limit are not a continuation (I1)', ()
   assert.equal(continuedSince(file, baseline), false);
 });
 
-// Final fix wave B, B8 (wave A re-review, m-new-1): the read window is the last
-// 2 MB, so a LAST line longer than that leaves only a fragment in it. A real
-// prompt can be that long (the largest line on one dev machine is a 2.13 MB
-// user entry carrying three pasted images); a synthetic error entry never is,
-// it is a few hundred bytes. More than the cap of growth since the stop, and
-// nothing parseable in the window, is a session that moved on.
-test('a 2.1 MB real user line as the last line counts as continued (m-new-1)', () => {
+// The read window is the last 2 MB, so a LAST line longer than that leaves only a
+// fragment. A real prompt can be that long (pasted images); a synthetic error entry
+// never is. More than the cap of growth since the stop with nothing parseable in the
+// window is a session that moved on.
+test('a real user line longer than the read window as the last line counts as continued', () => {
   const { file, baseline } = transcriptAtDetection();
   const huge = line({
     type: 'user',
@@ -234,7 +226,7 @@ test('a 2.1 MB real user line as the last line counts as continued (m-new-1)', (
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('the same long line under the cap is read normally, and a flagged stop after it still wins (m-new-1 control)', () => {
+test('the same long line under the cap is read normally, and a flagged stop after it still wins (control)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(
     file,
@@ -243,20 +235,16 @@ test('the same long line under the cap is read normally, and a flagged stop afte
   assert.equal(continuedSince(file, baseline), false, 'a retry that hit the limit again is still stopped');
 });
 
-test('a window that starts at the baseline and holds no parseable line is not continued (m-new-1 control)', () => {
+test('a window that starts at the baseline and holds no parseable line is not continued (control)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, '{"type":"user","message":{"role":"us');
   assert.equal(continuedSince(file, baseline), false, 'a partial write, not news');
 });
 
-// ---------------------------------------------------------------------------
-// Wave C, C2 and C3.
-// ---------------------------------------------------------------------------
-
-// C2: a slash command that fails writes its output under <local-command-stderr>
-// (a failed /compact is the case that matters here). Like stdout it makes no
-// API call that got past the stop, so it is not the session moving on.
-test('a <local-command-stderr> user entry after the stop is not a continuation (C2)', () => {
+// A slash command that fails writes its output under <local-command-stderr> (a failed
+// /compact is the case that matters). Like stdout it makes no API call past the stop,
+// so it is not the session moving on.
+test('a <local-command-stderr> user entry after the stop is not a continuation', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(
     file,
@@ -271,7 +259,7 @@ test('a <local-command-stderr> user entry after the stop is not a continuation (
   assert.equal(continuedSince(file, baseline), false);
 });
 
-test('the same stderr text as the first block of a content array is not a continuation either (C2)', () => {
+test('the same stderr text as the first block of a content array is not a continuation either', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(
     file,
@@ -280,19 +268,17 @@ test('the same stderr text as the first block of a content array is not a contin
   assert.equal(continuedSince(file, baseline), false);
 });
 
-test('stderr text that is not at the start of a user message is a real prompt (C2 control)', () => {
+test('stderr text that is not at the start of a user message is a real prompt (control)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, line({ type: 'user', message: { role: 'user', content: 'what does <local-command-stderr> mean?' } }));
   assert.equal(continuedSince(file, baseline), true);
 });
 
-// C3: a SUCCESSFUL /compact after the reset means the session moved on. Claude
-// Code writes a `compact_boundary` system entry and then a `user` entry with
-// `isCompactSummary: true` (real shape, 05690955 lines 1504-1505; the wave A
-// re-review found 45 of these on this machine). The `system` entry is neither
-// a turn nor a stop; the summary is a real, unflagged user entry, so it counts.
-// The sample even follows a failed compaction: its logicalParentUuid is the
-// failed entry's uuid.
+// A SUCCESSFUL /compact after the reset means the session moved on: Claude Code
+// writes a `compact_boundary` system entry, then a `user` entry with
+// `isCompactSummary: true`. The `system` entry is neither a turn nor a stop; the summary
+// is a real, unflagged user entry, so it counts. The sample follows a failed compaction
+// (its logicalParentUuid is the failed entry's uuid).
 const COMPACT_BOUNDARY = line({
   parentUuid: null,
   logicalParentUuid: 'e7466dc8-f37f-4842-b810-4b8381491b9a',
@@ -326,19 +312,19 @@ const COMPACT_SUMMARY = line({
   version: '2.1.267',
 });
 
-test('a successful /compact after the stop counts as the session moving on (C3)', () => {
+test('a successful /compact after the stop counts as the session moving on', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, COMPACT_BOUNDARY + COMPACT_SUMMARY);
   assert.equal(continuedSince(file, baseline), true);
 });
 
-test('the compact_boundary entry on its own, before its summary is written, is not yet a continuation (C3)', () => {
+test('the compact_boundary entry on its own, before its summary is written, is not yet a continuation', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(file, COMPACT_BOUNDARY);
   assert.equal(continuedSince(file, baseline), false);
 });
 
-test('a compaction that failed on the limit again, then nothing, is still stopped (C3 control)', () => {
+test('a compaction that failed on the limit again, then nothing, is still stopped (control)', () => {
   const { file, baseline } = transcriptAtDetection();
   fs.appendFileSync(
     file,

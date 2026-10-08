@@ -14,7 +14,7 @@ test('defaults match the declared manifest defaults', () => {
   assert.equal(s.autoResume, true);
   assert.equal(s.resumeMode, 'interactive');
   assert.equal(s.headlessPermissionMode, '');
-  assert.equal(s.maxResumeTokens, 500_000);
+  assert.equal(s.maxResumeTokens, 0, 'the budget is off by default');
   assert.equal(s.maxWaitHours, 24);
 });
 
@@ -45,10 +45,8 @@ test('a non-string claudeCommand falls back to the default, a valid string passe
 });
 
 test('a non-string resumePrompt falls back to the default prompt', () => {
-  // str() has two fallback arguments for resumePrompt - one for c.get() itself
-  // and one for when a malformed settings.json hands back a non-string. Both
-  // must agree, so pin the second path explicitly rather than only the
-  // no-override case every other test exercises.
+  // Both str() fallbacks for resumePrompt must agree; pin the malformed
+  // non-string path.
   const fallback = readSettings(source({ resumePrompt: 42 })).resumePrompt;
   assert.equal(
     fallback,
@@ -57,10 +55,8 @@ test('a non-string resumePrompt falls back to the default prompt', () => {
 });
 
 test('every setting the code reads is declared in the manifest, and every declared setting is read', () => {
-  // Upstream read claudeTimeout.soundCommand without declaring it, which left
-  // it with no scope - so a workspace could set it. This test is that finding,
-  // frozen. The reverse direction catches a declared-but-dead setting: one
-  // that shows up in the settings UI but nothing in config.ts ever reads.
+  // Every setting config.ts reads is declared (so it has a scope), and every
+  // declared setting is read.
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
   );
@@ -86,10 +82,8 @@ test('every setting the code reads is declared in the manifest, and every declar
 });
 
 test('every enum setting describes each of its choices', () => {
-  // enumDescriptions is positional: one short line per enum value, in order.
-  // Add a value without a description and the settings UI silently mislabels
-  // the rest, which matters most for headlessPermissionMode, whose first
-  // choice is the empty string and is unreadable without one.
+  // enumDescriptions is positional; a missing description mislabels the rest in
+  // the settings UI.
   const manifest = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'),
   );
@@ -132,9 +126,8 @@ test('execution-adjacent settings are machine-scoped', () => {
 });
 
 test('a stale panel tab is reported, not acted on, by default', () => {
-  // The experiment in docs/research/2026-09-20-panel-fork-experiment.md is why
-  // this setting exists at all. Closing someone's editor tab is the one thing
-  // here that cannot be undone by ignoring a notification, so it is opt-in.
+  // Closing an editor tab cannot be undone by ignoring a notification, so it is
+  // opt-in.
   assert.equal(readSettings(source()).onStale, 'notify');
 });
 
@@ -158,8 +151,8 @@ test('statusBar accepts pending and never, and rejects anything else', () => {
 });
 
 test('the watcher stays machine-wide by default', () => {
-  // A session started in a plain terminal, in a folder no window has open, is
-  // still worth resuming - that is what the global root buys (#2).
+  // A session from a plain terminal in a folder no window has open is still
+  // worth resuming; that is what the global root buys.
   assert.equal(readSettings(source()).watchScope, 'machine');
 });
 
@@ -169,8 +162,8 @@ test('watchScope accepts workspace and rejects anything else', () => {
 });
 
 test('update checks are off until asked for', () => {
-  // An outbound request nobody asked for is a surprise; the first-run prompt
-  // is how this gets turned on (#1).
+  // An unrequested outbound request is a surprise; the first-run prompt turns
+  // it on.
   assert.equal(readSettings(source()).checkForUpdates, false);
 });
 

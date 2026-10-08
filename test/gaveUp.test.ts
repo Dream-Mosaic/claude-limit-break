@@ -26,7 +26,7 @@ test('recording a failure keeps it, with its folder, cause and time', () => {
 });
 
 test('the first failure of a cause for a session asks to warn; the same cause again does not', () => {
-  // Controller ruling 1: warn-once is keyed on (sessionId, cause).
+  // Warn-once is keyed on (sessionId, cause).
   const s = new GaveUpState();
   assert.equal(s.record(rec(A, 'stall')), true);
   assert.equal(s.record(rec(A, 'stall', 2000)), false, 'the same failure again must stay quiet');
@@ -69,7 +69,6 @@ test('list is oldest first', () => {
 });
 
 test('a detection for a session clears its record and its warn-once memory', () => {
-  // Controller ruling 2.
   const s = new GaveUpState();
   s.record(rec(A, 'stall'));
   s.record(rec(B, 'stall'));
@@ -80,9 +79,9 @@ test('a detection for a session clears its record and its warn-once memory', () 
 });
 
 test('a launched resume clears the record but not the warn-once memory', () => {
-  // Ruling 2: "a resume that LAUNCHES clears it too (a later stall can record
-  // it again)" - record it, but it has already been warned about since the
-  // last detection, so it stays quiet.
+  // A launching resume clears the record and a later stall can record it again,
+  // but it was already warned about since the last detection, so it stays
+  // quiet.
   const s = new GaveUpState();
   s.record(rec(A, 'stall'));
   s.launched(A);
@@ -92,7 +91,6 @@ test('a launched resume clears the record but not the warn-once memory', () => {
 });
 
 test('clearAll (Cancel) drops every record and every warn-once memory', () => {
-  // Ruling 3.
   const s = new GaveUpState();
   s.record(rec(A, 'stall'));
   s.record(rec(B, 'cwd'));
@@ -120,8 +118,8 @@ test('list returns copies, so a caller cannot edit the state behind it', () => {
 });
 
 test('the icon is circle-slash', () => {
-  // Pinned (controller ruling 4). See the comment on GAVE_UP_ICON for why
-  // this one and not $(warning) or $(error).
+  // See the comment on GAVE_UP_ICON for why this icon and not $(warning) or
+  // $(error).
   assert.equal(GAVE_UP_ICON, '$(circle-slash)');
 });
 
@@ -181,9 +179,8 @@ test('the budget refusal names the session, the numbers and both ways through', 
 });
 
 test('an explicit user action always warns, even for a cause already warned about', () => {
-  // Controller ruling on concern 1: warn-once silences AUTOMATIC repeats
-  // only. A click with no visible answer is the "looks idle" failure A8 is
-  // there to remove.
+  // Warn-once silences AUTOMATIC repeats only; a click with no visible answer
+  // would look idle.
   const s = new GaveUpState();
   assert.equal(s.record(rec(A, 'cwd')), true);
   assert.equal(s.record(rec(A, 'cwd', 2000), true), true, 'a manual retry must be answered');
@@ -198,8 +195,8 @@ test('a manual failure counts as warned, so an automatic repeat after it stays q
 });
 
 test('a finished turn clears that session record only, and keeps its warn-once memory', () => {
-  // Fix round 1, ruling 2a: a turn ending is evidence the session works
-  // again, so the record goes; it is not a new detection, so the memory stays.
+  // A turn ending shows the session works again, so the record goes; it is not
+  // a new detection, so the memory stays.
   const s = new GaveUpState();
   s.record(rec(A, 'stall'));
   s.record(rec(B, 'cwd'));
@@ -210,8 +207,8 @@ test('a finished turn clears that session record only, and keeps its warn-once m
 });
 
 test('dismissing clears every record but keeps the warn-once memory', () => {
-  // Fix round 1, ruling 2b: "Dismiss gave-up notices" is "I have seen these",
-  // not a new attempt - an automatic repeat afterwards is still not news.
+  // "Dismiss gave-up notices" means "I have seen these", not a new attempt: an
+  // automatic repeat afterwards is still not news.
   const s = new GaveUpState();
   s.record(rec(A, 'stall'));
   s.record(rec(B, 'cwd'));
@@ -221,9 +218,8 @@ test('dismissing clears every record but keeps the warn-once memory', () => {
   assert.equal(new GaveUpState().dismissRecords(), false, 'nothing recorded, nothing to re-render');
 });
 
-// Final fix wave A, A6 (the user's decision): a session that kept stopping on
-// server errors through five retries in a row gives up until a turn ends.
-test('the overloads notice names the session, the five retries and when it will try again (A6)', () => {
+// Five consecutive server-error retries give up until a turn ends.
+test('the overloads notice names the session, the five retries and when it will try again', () => {
   assert.equal(
     gaveUpNotice({ cause: 'overloads', sessionId: A }),
     `Limit Break: session ${A.slice(0, 8)} kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`,

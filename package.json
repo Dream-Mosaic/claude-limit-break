@@ -121,15 +121,15 @@
         },
         "claudeLimitBreak.maxResumeTokens": {
           "type": "number",
-          "default": 500000,
+          "default": 0,
           "scope": "window",
-          "markdownDescription": "Refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - and falls back to a byte count only when there is none. Set to `0` to never refuse."
+          "markdownDescription": "Off by default (0). When set, refuse to resume when the estimated cost exceeds this, and offer a \"Resume anyway\" button rather than dropping it. The estimate reads the transcript's newest `usage` record - the live context a cold resume has to rebuild - skipping the zero-usage error entry a limit leaves behind. A session with no such record is not checked. `500000` is a reasonable starting point; `0` never refuses."
         },
         "claudeLimitBreak.maxWaitHours": {
           "type": "number",
           "default": 24,
           "scope": "window",
-          "description": "Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered."
+          "description": "Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered. A reset more than 8 days out, or beyond maxWaitHours if that is higher, is rejected as a misread."
         },
         "claudeLimitBreak.transcriptPollSeconds": {
           "type": "number",

@@ -176,6 +176,11 @@ synchronous `claude agents` call has moved to 1.1 below.
 
 Planned for the release after 1.0.
 
+- **Read `usage.iterations[]` when the top-level usage sums to 0.** Some
+  2.1.25x-2.1.27x turns at compaction boundaries report 0 at the top level but
+  carry real numbers in `cache_creation.ephemeral_1h_input_tokens` and
+  `usage.iterations[]`. parseLastUsage skips them, so the budget measures one
+  turn earlier (an overestimate, never a silent pass).
 - **Act on the armed and fired auto-continue lines.** 1.0 only logs Claude
   Code's own armed, cancelled and fired status lines and uses the cancel lines
   to stand down (wave C). A confirmed armed line in the transcript is a better
@@ -288,9 +293,11 @@ Planned for the release after 1.0.
   reset time, so nothing is armed for it today (the same bucket's "You've hit
   your Fable limit · resets ..." form is). Needs a policy for a limit that
   gives no time to wait for.
-- **A folder picker for "Open Claude to Trust".** The command is hidden from
-  the palette because it needs a folder argument (it logs and ignores a call
-  without one); a picker would let it run from there.
+- **Make "Open Claude to Trust" a nag.** The command is hidden from the
+  palette because it needs a folder argument (it logs and ignores a call
+  without one), so a dismissed untrusted-folder notice leaves nothing to act
+  on until the next one. Keep reminding while a pending session's folder is
+  untrusted (status bar or a repeat notice), rather than adding a picker.
 - **A Limit Break sidebar.** An activity-bar view container with a view
   listing pending, ready and gave-up sessions — the tooltip's
   `buildSessionLines` model already has the data shape for this
@@ -304,6 +311,89 @@ Planned for the release after 1.0.
   that ruling: legibility at 24px with ~2px margin — consider a gauge-only
   crop if the full mark reads too busy that small; a redraw is a one-file
   cost either way.
+
+### Revisit from the 1.0 sign-off
+
+Behaviours 1.0 ships as they are, to be looked at again.
+
+- **Resume an idle terminal automatically.** An idle Claude Code terminal
+  holding the session gets "Resume in Terminal Anyway", never an automatic
+  resume, for an overload, a non-five-hour limit, or a five-hour limit with
+  Claude Code's auto-continue off; a second `claude --resume` would be a second
+  writer. Goes with terminal reuse above. Until then, the five-hour-or-untyped
+  stand-down (and its check about a minute after the fire) stays as it is.
+- **A waiting holder is dropped silently.** At fire time a busy or waiting
+  holder is only logged. Busy is right: a turn is running, so the session is
+  moving. Waiting means it is paused on a permission prompt or a question and
+  needs the user: show "session X is waiting for your input; the limit has
+  reset", with no resume.
+- **A window that decides not to resume keeps its claim.** Other windows skip
+  that reset for up to the reset plus the longest random delay plus 10 minutes.
+  Revisit whether that hold is right.
+- **Overload claim keys.** Session ID plus the error entry's timestamp. Revisit
+  and refine.
+- **Cancel in one window cancels in all.** Revisit.
+- **The overload count is in memory, per window.** A reload or a window opened
+  mid-streak restarts the 5-step backoff. Consider persisting it per session in
+  shared state.
+- **Checks on restored jobs.** A malformed saved job is dropped and a UUID
+  failure at launch is only logged; consider a notice for both.
+- **An unmeasured session skips the budget.** With `maxResumeTokens` on, a
+  session with no real turn in its last 8 MB is resumed unchecked.
+- **The 15-minute "same reset" window for automatic jobs.** Today only
+  offered jobs match within 15 minutes; two automatic jobs need an exact match.
+  Widening it means updating the tests that treat resets 10 minutes apart as
+  different.
+- **Name sessions the way the user knows them.** Notices, the tooltip and the
+  log identify a session only by its ID (or its first 8 characters), which says
+  nothing about which conversation it is. Show something recognisable instead,
+  such as the session's title or first prompt and its folder, keeping the ID
+  in the log. The resume terminal's tab ("Limit Break: <id8>") should use the
+  same name.
+- **Which window owns a session.** With `watchScope: machine` (the default)
+  every window detects every stop and the first timer to fire takes the claim,
+  so the resume terminal can open in a window for an unrelated project, and
+  closing the window a session ran in does not stop another window resuming
+  it. With `workspace`, a session whose folder is not inside an open folder is
+  never resumed. To look at:
+  - Let the window that owns the session go first and the others only after a
+    grace period, so the resume opens where the user was working.
+  - Recognise ownership beyond the open folder: a Claude terminal in this
+    window that was `cd`'d elsewhere (the terminal or process tree may tell),
+    and git worktrees of the open repository, including sibling folders such
+    as the one this project is developed in.
+  - Whether closing the owning window should stand the resume down instead of
+    another window taking it (the user's expectation: a closed session should
+    not come back on its own).
+  - Out of scope: sessions started outside VS Code.
+- **One "resuming at" notice per stop, not one per window.** The offer-only
+  and upgrade notices are claimed so only one window shows them; the ordinary
+  "Limit Break: resuming at <time>" notice is not, so with two windows each
+  shows its own, with its own random-delay time, and the message names no
+  session. Goes with window ownership and session names above.
+- **`workspace` scope still tracks every transcript.** The watcher baselines
+  and tracks every file under the projects folder and filters each entry by
+  folder as it reads it. Fine at a few hundred files; with thousands, skip
+  out-of-scope project folders up front.
+- **README notes from the smoke test.** The "Open Claude to Trust" terminal
+  starts a full Claude session in that folder that keeps running until the
+  user exits it. A resumed session runs with the user's whole Claude setup
+  (MCP servers, skills, settings), as an interactive one would.
+- **Log wording.** The random delay is rounded to whole minutes (`+0m` for a
+  9-second delay); a window dropping an offer another window claimed logs
+  "Resume for ... claimed by another window"; logged error text shows its em
+  dash as " - ".
+- **Cancel or resume one session.** "Cancel Pending Resume" cancels every
+  pending job at once, and the Resume Now command takes whichever job is first
+  in line; neither lets you pick a session. Offer both per session (a pick list
+  from the status-bar menu, say). A notice's own Resume Now button already acts
+  on its session.
+- **"more than 1 hours away".** The offer-only notice (`src/extension.ts`, the
+  "won't resume automatically" message) always pluralises `maxWaitHours`, so
+  it reads wrong at exactly 1.
+- **Gave-up handling.** The marker clears on the session's next finished turn
+  or from "Dismiss gave-up notices"; a turn that did not fix the cause clears it
+  too. Revisit.
 
 ### Unit-test refactor
 

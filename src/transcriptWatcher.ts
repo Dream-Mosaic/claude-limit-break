@@ -34,16 +34,13 @@ export interface OverloadHit {
     cwd?: string;
     file: string;
     /**
-     * The reporting entry's own `timestamp`, in ms, when it had a parseable
-     * one. An overload has no reset time, so this is what identifies the
-     * event: identical in every window (they all read the same line) and
-     * distinct for every separate failure. The cross-window claim keys on it
-     * (claims.ts claimKeyFor; final review, Important 3).
+     * The entry's own `timestamp` in ms, when parseable. An overload has no reset
+     * time, so this identifies the event across windows (claims.ts claimKeyFor).
      */
     entryTimestampMs?: number;
 }
 export interface InputHit { detection: InputDetection; cwd?: string; file: string }
-/** One of Claude Code's own auto-continue status lines (wave C, C4). Observed only. */
+/** One of Claude Code's own auto-continue status lines. Observed only. */
 export interface NativeStatusHit { status: NativeStatus; cwd?: string; file: string }
 export interface InspectResult { limit?: LimitHit; overload?: OverloadHit; inputNeeded?: InputHit; nativeStatus?: NativeStatusHit }
 
@@ -58,23 +55,13 @@ export interface WatchScope {
     folders: readonly string[];
 }
 
-/**
- * Today's behaviour, unconditionally: every session on the machine matters.
- * This is what a caller gets by not passing a scope at all (see the 4th
- * constructor argument below), so the default cannot regress by omission.
- */
+/** Every session on the machine matters; the default when no scope is passed. */
 export const DEFAULT_SCOPE: WatchScope = { mode: 'machine', folders: [] };
 
 /**
- * Whether a transcript entry's cwd is in scope, given an injected scope.
- *
- * Pure and filesystem-free, mirroring `isInsideWorkspace` in
- * src/extension.ts on purpose: same resolved-path, separator-boundary
- * comparison (so /work/app does not swallow /work/app-old) and the same case
- * fold, because a Windows path recorded by the CLI need not match the casing
- * VS Code reports for the same folder. Duplicated rather than imported, so
- * this module - which extension.ts wires up, not the other way round - has
- * no dependency in that direction.
+ * Whether a transcript entry's cwd is in scope. Pure; mirrors `isInsideWorkspace`
+ * in src/extension.ts (separator-boundary comparison, case-folded because Windows
+ * paths from the CLI may differ in casing). Duplicated to avoid depending on extension.ts.
  */
 export function isInScope(cwd: string | undefined, scope: WatchScope): boolean {
     if (scope.mode === 'machine') {
@@ -98,56 +85,24 @@ export interface OffsetEntry {
 }
 
 /**
- * How long an offset entry may go without its file growing before it is
- * evicted by {@link pruneOffsets}.
- *
- * Derived from this machine's own ~/.claude/projects, not guessed: of 184
- * transcripts present today, 156 (85%) live under a subagents/ directory and
- * are written once, during a single agent run, then never touched again -
- * the process that could grow them exits before the watcher would ever
- * consider pruning it. Only the 28 top-level session files are plausibly
- * resumed after a gap. The oldest file on disk is 46 days old at this
- * 184-file count (~4 new files/day), so 30 days comfortably clears the bulk
- * of the tree while leaving a resumed project a wide margin.
- *
- * A file that does resume after sitting idle this long is read from byte
- * zero rather than from where it left off - the same tradeoff `previous ===
- * undefined` in scanFile already accepts for a session that predates this
- * process - and MAX_READ_BYTES above bounds how much of that replay a single
- * pass actually looks at.
+ * How long an offset entry may go without its file growing before {@link pruneOffsets}
+ * evicts it. A file that resumes after this is re-read from byte zero, bounded by MAX_READ_BYTES.
  */
 export const MAX_OFFSET_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 
-/**
- * Hard ceiling on tracked files, independent of age: a backstop for a clock
- * that cannot advance (e.g. every file touched more often than
- * {@link MAX_OFFSET_IDLE_MS}), not the primary mechanism. This machine
- * reached 184 files after 46 days of continuous use (~4/day); 2000 is
- * roughly a year of that rate, far past what the idle bound alone is
- * expected to need.
- */
+/** Hard ceiling on tracked files, a backstop independent of age. */
 export const MAX_OFFSET_ENTRIES = 2000;
 
 /**
- * How stale a server-error entry's own timestamp may be before it is treated
- * as history rather than a live overload. A usage limit carries a reset time
- * to test staleness against; an overload has none, so age since the entry
- * was written is the only signal a replayed transcript - a fork, or a
- * session resumed after a long gap - gives for "this already happened and
- * does not need retrying now". An entry with no timestamp of its own is
- * treated as fresh, as it always has been.
+ * How stale a server-error entry's own timestamp may be before it counts as history.
+ * An overload has no reset time, so age is the only signal for a replayed transcript.
+ * An entry with no timestamp is treated as fresh.
  */
 export const MAX_OVERLOAD_AGE_MS = 10 * 60_000;
 
 /**
- * Decide which offset entries survive a prune pass.
- *
- * Pure and Map-free: `existing` is whatever the caller's own directory
- * listing turned up, `now` is the caller's own clock, so this is testable
- * without a filesystem or a real timer. Existence is checked before age - a
- * just-deleted file is dropped immediately regardless of how recently it was
- * active - and the count cap is a last-resort pass, applied only if the
- * first two were not enough.
+ * Decide which offset entries survive a prune pass. Pure: `existing` and `now` are
+ * injected. Existence is checked before age; the count cap is a last resort.
  */
 export function pruneOffsets(
     entries: ReadonlyMap<string, OffsetEntry>,
@@ -198,11 +153,7 @@ export class TranscriptWatcher {
     readonly onInputNeeded = this.onInputNeededEmitter.event;
 
     private readonly onNativeStatusEmitter = new vscode.EventEmitter<NativeStatusHit>();
-    /**
-     * Fires for each of Claude Code's own auto-continue status lines (armed,
-     * cancelled, fired). Observation only: nothing is armed from it, and the
-     * text is never parsed for a time (wave C, C4).
-     */
+    /** Fires for each of Claude Code's own auto-continue status lines. Observation only; never parsed for a time. */
     readonly onNativeStatus = this.onNativeStatusEmitter.event;
 
     private watcher?: fs.FSWatcher;
@@ -211,10 +162,8 @@ export class TranscriptWatcher {
     private scanning = false;
     private readonly offsets = new Map<string, OffsetEntry>();
     /**
-     * Files that have already had their one "reset already passed" warning
-     * (wave D, D4). A fork replays every line of its parent, each stale
-     * limit with it, and one line per file says all there is to say. Pruned
-     * with the offsets, so a file forgotten there and met again warns again.
+     * Files that already had their one "reset already passed" warning: a fork replays
+     * every stale limit of its parent. Pruned with the offsets.
      */
     private readonly warnedPast = new Set<string>();
 
@@ -222,9 +171,6 @@ export class TranscriptWatcher {
         private readonly getMaxWaitHours: () => number,
         private readonly getPollSeconds: () => number,
         private readonly log: Logger,
-        // Defaults to machine mode - today's behaviour - so every existing
-        // caller (extension.ts, and every test that constructs a watcher
-        // without a 4th argument) is unaffected by this parameter existing.
         private readonly getScope: () => WatchScope = () => DEFAULT_SCOPE,
     ) {}
 
@@ -282,9 +228,7 @@ export class TranscriptWatcher {
             if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
                 continue;
             }
-            // parentPath is set on recursive readdir results from Node 20.12;
-            // the old Dirent.path alias was removed in Node 24, which is what
-            // VS Code 1.138 (Electron 42) runs.
+            // parentPath needs Node 20.12+; Dirent.path was removed in Node 24.
             const parent = entry.parentPath ?? root;
             out.push(path.join(parent, entry.name));
         }
@@ -301,9 +245,7 @@ export class TranscriptWatcher {
             for (const file of files) {
                 await this.scanFile(file);
             }
-            // Bound offsets here rather than in scanFile: this is the one place
-            // that already knows the full current listing, which pruneOffsets
-            // needs to tell "gone" from "just quiet".
+            // Bound offsets here: this is the one place that knows the full listing, which pruneOffsets needs.
             this.prune(files);
         }
         catch (err) {
@@ -349,9 +291,7 @@ export class TranscriptWatcher {
             this.offsets.set(file, { offset: 0, lastActivity: now });
         }
         else if (size === previous.offset) {
-            // Nothing new. lastActivity is deliberately left untouched here -
-            // it tracks real growth, not "we looked" - which is what makes it
-            // usable as an idle signal for pruneOffsets.
+            // lastActivity tracks real growth, not "we looked"; pruneOffsets uses it as an idle signal.
             return;
         }
         let from = this.offsets.get(file)?.offset ?? 0;
@@ -391,9 +331,7 @@ export class TranscriptWatcher {
             if (!trimmed) {
                 continue;
             }
-            // One bad line must not take a limit already recorded in this
-            // batch with it: the offset above is already consumed, so nothing
-            // would read the batch again.
+            // One bad line must not drop a limit already recorded in this batch; the offset is already consumed.
             let scan: InspectResult;
             try {
                 scan = this.inspectLine(trimmed, file);
@@ -403,17 +341,11 @@ export class TranscriptWatcher {
                 continue;
             }
             if (scan.nativeStatus) {
-                // Every such line is logged (C4), including one that follows a
-                // limit in the same batch. The C5 stand-down scan starts at
-                // the size recorded at detection, which is at or past the end
-                // of this batch, so it cannot see such a line (NEXT.md 1.1).
+                // Logged even after a limit in the same batch: the stand-down scan starts past this batch's end.
                 this.onNativeStatusEmitter.fire(scan.nativeStatus);
             }
             if (scan.limit) {
-                // The first limit in the batch wins. The loop keeps reading
-                // (wave C, C4) only so that the status lines after it - an
-                // armed line, a cancel line - are still reported; nothing
-                // else in the batch can act once a limit is found.
+                // The first limit wins; keep reading only so later status lines are still reported.
                 limit ??= scan.limit;
                 continue;
             }
@@ -457,13 +389,7 @@ export class TranscriptWatcher {
             return {};
         }
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
-        // Scope is checked as early as it can be: cwd only exists once the line
-        // is parsed, but nothing past this point - candidate collection, the
-        // limit/overload regex work, or a dispatched event - runs for an entry
-        // outside scope. In machine mode (the default) isInScope is always
-        // true, so this is a no-op today; the earlier version of this comment
-        // is what issue #2 called "read, parsed and dispatched before being
-        // thrown away" in the consumer instead of here.
+        // Checked as early as possible: nothing past this runs for an out-of-scope entry.
         if (!isInScope(cwd, this.getScope())) {
             return {};
         }
@@ -476,82 +402,42 @@ export class TranscriptWatcher {
                 file,
             }
             : undefined;
-        // Wave C, C4: Claude Code's own auto-continue status lines. Recognised
-        // by type, subtype and prefix alone (nativeContinue.ts) and reported
-        // for the log; they carry no limit and no overload, so nothing below
-        // applies to them.
+        // Claude Code's own auto-continue status lines: logged only; they carry no limit or overload.
         const nativeStatus = classifyNativeStatus(entry);
         if (nativeStatus) {
             return { nativeStatus: { status: nativeStatus, cwd, file }, inputNeeded };
         }
+        // A subagent's failure is reported to its parent, which records its own stop; arming
+        // here would be redundant or wrong, and this file never grows again to show a resume worked.
+        if (isSubagentFile(file)) {
+            return { inputNeeded };
+        }
         const candidates: Candidate[] = [];
         collectStrings(entry, candidates, 0);
-        // The one admission gate for a resume, limit and overload alike (final
-        // fix wave A, A1 and A2): the entry must be one Claude Code itself
-        // flagged as an API error. Every limit and error message the 2.1.282
-        // binary writes is built by one constructor that sets
-        // `isApiErrorMessage: true` (research-api-errors-binary.md Q1: every
-        // branch of INn returns $o(...)), GitHub #64030 shows the same flag on
-        // 2.1.145, and all 138 limit entries on this machine carry it
-        // (task-4c-report.md). What an unflagged entry holds is someone
-        // TALKING about a limit or an error - the model's prose about a GitHub
-        // or npm rate limit, a thinking block, a Bash description, a user's
-        // paste, a grep hit in a tool_result - and every one of those used to
-        // be able to arm a resume of a session that never stopped (final
-        // review C1). Checked as the literal `true`: a bare `error:
-        // "rate_limit"` string, a 429 or a 5xx status without the flag, no
-        // longer admits an entry (final review M1). Cost if an old build wrote
-        // a limit without the flag: that build's limits are not detected; the
-        // local scan found no such entry.
+        // The one admission gate for a limit or overload: Claude Code itself flagged the entry as an
+        // API error (`isApiErrorMessage` literally `true`). Unflagged entries are someone talking
+        // about a limit (model prose, tool_result, user paste) and must never arm a resume.
         const flagged = entry.isApiErrorMessage === true;
         const maxWait = this.getMaxWaitHours();
-        // The first limit notice in a flagged entry that could not be
-        // scheduled, and why: warned about at the end, once no overload
-        // claims the entry (wave C fix round 1, M3; wave D, D4).
+        // The first limit notice in a flagged entry that could not be scheduled, and why; warned
+        // about at the end, once no overload claims the entry.
         let textRejection: { verdict: LimitRejection; text: string } | undefined;
         // The real current time: staleness and the grace window are always
         // decided against this, never against the entry's own timestamp.
         const now = new Date();
-        // What a relative notice ("in 5 hours", "resets 1am") is resolved
-        // against: the entry's own timestamp when it has a parseable one, so
-        // a forked transcript's copied lines are read as of when they were
-        // originally written. A fork replays every line with its original
-        // timestamp intact - that is how last night's "resets 1am" re-armed
-        // an 18-hour timer when this watcher met the file fresh and resolved
-        // it against the time of reading instead. Missing or unparseable
-        // falls back to now, exactly as it behaved before entries carried a
-        // timestamp into this calculation at all.
+        // What a relative notice ("in 5 hours") is resolved against: the entry's own timestamp when
+        // parseable, so a fork's copied lines are read as of when they were written; otherwise now.
         const rawTimestamp = typeof entry.timestamp === 'string' ? new Date(entry.timestamp) : undefined;
         const writtenAt = rawTimestamp && !Number.isNaN(rawTimestamp.getTime()) ? rawTimestamp : undefined;
         const basis = writtenAt ?? now;
 
-        // Limits only from a flagged entry (see `flagged` above). The entry's
-        // type is not consulted: Claude Code writes its own notices as
-        // synthetic entries that can carry type "user". A flagged entry in a
-        // subagents/ file still arms (Task 3 fix round 1): a subagent that
-        // genuinely hits the limit writes Claude Code's own marker into its own
-        // file too. Turn-end detection above is unaffected by this gate.
+        // Limits only from a flagged entry. Entry type is not consulted: Claude Code writes its
+        // notices as synthetic entries that can carry type "user".
         if (flagged) {
-            // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes
-            // on the flagged entry itself - immune to every way the text can be
-            // misread (zone, DST, calendar rollover) - so it wins over the text
-            // outright when present. Only trusted on a flagged entry: the field
-            // turning up on an ordinary turn is not itself a limit event.
-            // The two transient-429 renders disclaim being a usage limit in
-            // their own text ("not your usage limit", "a temporary capacity
-            // issue"). Claude Code attaches quotaLimits only to a REJECTED
-            // usage-limit 429 - the branch that writes the "You've hit your ...
-            // limit" text - and never to a transient one (2.1.282 binary,
-            // research-api-errors-binary.md Q2: the transient branch never calls
-            // the quotaLimits builder), so this skip cannot fire on anything
-            // Claude Code writes today. It stays as belt and braces (an earlier
-            // reading of the evidence said every rate_limit entry carried the
-            // field, and a build that did would turn a transient 429 into a
-            // usage-limit timer): it asks the overload parser itself (not a
-            // duplicated regex) whether any of the entry's own candidate text is
-            // one of those renders; if so the quotaLimits branch is skipped
-            // outright, whatever its status, and the entry falls through to the
-            // ordinary text/overload path below and is routed to overload.
+            // quotaLimits.resetsAt is an absolute epoch instant Claude Code writes on the flagged
+            // entry; it wins over the text when present.
+            // Skipped when the entry's own text is a transient-429 render ("not your usage limit"):
+            // belt and braces, such an entry falls through and routes to overload.
             const isTransientRateLimit = candidates.some((c) => {
                 const rule = detectOverload(c.text)?.rule;
                 return rule === 'transient-429' || rule === 'rejected-429';
@@ -562,29 +448,21 @@ export class TranscriptWatcher {
                     quotaLimits && typeof quotaLimits === 'object'
                         ? (quotaLimits as Record<string, unknown>).resetsAt
                         : undefined;
-                // Which limit tripped (Task 4c, R4): the same object names it, in
-                // the vocabulary the binary uses everywhere (five_hour, seven_day,
-                // ...). Taken only when it is a string, and left off the detection
-                // otherwise, so the fire decision can tell the one limit Claude
-                // Code's native auto-continue covers from every other.
+                // Which limit tripped, from the same object (five_hour, seven_day, ...); left off when not
+                // a string, so the fire decision can tell the one limit native auto-continue covers.
                 const fieldType =
                     quotaLimits && typeof quotaLimits === 'object'
                         ? (quotaLimits as Record<string, unknown>).rateLimitType
                         : undefined;
-                // An empty string is no type. With no usable field the entry's own
-                // text may still name it ("You've hit your weekly limit"), the same
-                // label the text path reads; the field wins when it is there.
+                // An empty string is no type; fall back to the entry's own text, as the text path does.
                 const limitType =
                     typeof fieldType === 'string' && fieldType !== ''
                         ? fieldType
                         : candidates.map((c) => rateLimitTypeFromText(normalize(c.text))).find((t) => t !== undefined);
                 if (typeof resetsAt === 'number' && Number.isFinite(resetsAt)) {
                     const verdict = resolveStructuredReset(resetsAt, now, maxWait);
-                    // Decisive either way: this is the authoritative field, so a
-                    // value that fails the grace/8-day check is not a cue to
-                    // fall back to the text - it is history (or absurd), and the
-                    // text does not get a second opinion on that. It is logged,
-                    // though (wave D, D4): nothing detected goes unsaid.
+                    // Decisive: a value failing the grace/bound check is history, not a cue to fall back to
+                    // the text. Still logged.
                     if (verdict.kind === 'rejected') {
                         this.warnUnscheduled('Usage limit', file, verdict, `quotaLimits.resetsAt ${resetsAt}`);
                         return { inputNeeded };
@@ -596,7 +474,7 @@ export class TranscriptWatcher {
                                 rule: 'quota-limits',
                                 text: 'quotaLimits.resetsAt',
                                 ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
-                                // Wave D, D1 (policy B): beyond maxWaitHours, offered at the reset, never resumed on its own.
+                                // Beyond maxWaitHours: offered at the reset, never resumed on its own.
                                 ...(verdict.kind === 'offerOnly' ? { offerOnly: true as const } : {}),
                             },
                             cwd,
@@ -612,10 +490,8 @@ export class TranscriptWatcher {
                 if (candidate.text.length > MAX_NOTICE_LENGTH) {
                     continue;
                 }
-                // Every entry read here is flagged, so its text is trusted: it
-                // skips the source-code and quotation guards inside classifyLimit,
-                // which exist for text nobody vouched for. The tool_result veto
-                // that used to sit here went with the unflagged path (A1).
+                // Every entry here is flagged, so its text is trusted and skips classifyLimit's
+                // source-code and quotation guards.
                 const verdict = classifyLimit(candidate.text, basis, maxWait, { trusted: true, readAt: now });
                 if (verdict?.kind === 'detected') {
                     return { limit: { detection: verdict.detection, cwd, file } };
@@ -627,39 +503,24 @@ export class TranscriptWatcher {
                 }
             }
         }
-        // Wave C, C1: the one unflagged shape admitted - a usage limit hit
-        // during `/compact`, which Claude Code writes as a `system` /
-        // `local_command` entry (see compactionLimitText for every condition
-        // and why model prose can never be one). Read as trusted text from
-        // here on, exactly like a flagged entry's own: the same parser, the
-        // same grace window and horizon, so a fork's copy of an old failure is
-        // history and everything after detection (continuedSince, the holder
-        // policy, claims, backoff) is unchanged.
+        // The one unflagged shape admitted: a usage limit during `/compact`, a `system` /
+        // `local_command` entry (see compactionLimitText). Read as trusted text, same parser and
+        // grace window.
         const compactionText = flagged ? undefined : compactionLimitText(entry);
         if (compactionText !== undefined) {
-            // Wave D: a weekly limit during compaction is read like any other
-            // (the dated form, offer-only), which C1 could not.
+            // A weekly limit during compaction is read like any other (the dated form, offer-only).
             const verdict = classifyLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
             if (verdict?.kind === 'detected') {
                 return { limit: { detection: verdict.detection, cwd, file } };
             }
-            // Say why nothing armed (wave D, D4): unparseable, absurd, or
-            // history - the last once per file, since a fork repeats it.
+            // Say why nothing armed: unparseable, absurd, or history (once per file, since a fork repeats it).
             if (verdict) {
                 this.warnUnscheduled('Usage limit during compaction', file, verdict, compactionText);
             }
             return { inputNeeded };
         }
-        // No limit here. A transient server error is worth reporting instead,
-        // from the same flagged entries only (Task 4c R3, tightened to the
-        // literal flag by A2 / final review M1). A scan of the 168
-        // `<synthetic>` assistant entries in this machine's ~/.claude/projects
-        // found 138 flagged (all rate_limit / 429) and 30 unflagged (all "No
-        // response requested."), none an error render; the unflagged side is
-        // the model or the user talking ABOUT an error. An overload carries no
-        // reset time of its own, so a replayed one is judged on age alone:
-        // written longer ago than MAX_OVERLOAD_AGE_MS, it is history rather
-        // than something to retry now.
+        // No limit here. A transient server error from flagged entries is reported instead. An
+        // overload has no reset time, so a replayed one is judged on age alone (MAX_OVERLOAD_AGE_MS).
         const overloadTooOld = writtenAt !== undefined && now.getTime() - writtenAt.getTime() > MAX_OVERLOAD_AGE_MS;
         if (!overloadTooOld && flagged) {
             for (const candidate of candidates) {
@@ -672,17 +533,9 @@ export class TranscriptWatcher {
                 }
             }
         }
-        // Wave C fix round 1 (M3): a FLAGGED entry that reads as a usage limit
-        // but yielded no limit and is no overload is a missed resume the user
-        // would otherwise never hear about - the log is their only clue - so it
-        // gets the same warning the compaction path does. An overload render
-        // (even one too old to act on, such as the transient 429 that
-        // disclaims being a usage limit) is not a limit and never warns.
-        //
-        // Wave D, D4 widens it to every reason a limit goes unscheduled: a
-        // reset more than MAX_RESET_DAYS out (absurd) and one already past
-        // (history - a fork's copy - warned once per file) as well as an
-        // unreadable one.
+        // A flagged entry that reads as a usage limit but yielded no limit and is no overload is a
+        // missed resume the user would not otherwise hear about: warn (unparseable, absurd, or
+        // already past). An overload render, even a stale one, never warns.
         if (textRejection && !candidates.some((c) => c.text.length <= MAX_NOTICE_LENGTH && detectOverload(c.text))) {
             this.warnUnscheduled('Usage limit', file, textRejection.verdict, textRejection.text);
         }
@@ -690,10 +543,8 @@ export class TranscriptWatcher {
     }
 
     /**
-     * The one warning for a limit that was detected but not scheduled (wave
-     * D, D4: never silent), naming the session and the reason. A reset that
-     * already passed - history, which a fork's copy of its parent is full of
-     * - warns at most once per file; the other reasons warn each time.
+     * The one warning for a limit that was detected but not scheduled, naming the session and
+     * the reason. A past reset (a fork's copy) warns at most once per file.
      */
     private warnUnscheduled(what: string, file: string, rejection: LimitRejection, text: string): void {
         const session = path.basename(file, '.jsonl');
@@ -711,8 +562,9 @@ export class TranscriptWatcher {
             return;
         }
         if (rejection.reason === 'absurd') {
+            const boundDays = Number(Math.max(MAX_RESET_DAYS, this.getMaxWaitHours() / 24).toFixed(1));
             this.log.warn(
-                `${what} in session ${session} resets at ${at}, more than ${MAX_RESET_DAYS} days out, longer than any ` +
+                `${what} in session ${session} resets at ${at}, more than ${boundDays} days out, longer than any ` +
                     `Claude usage limit; not picking it up as a likely misread: ${shown}`,
             );
             return;
@@ -744,21 +596,14 @@ export class TranscriptWatcher {
 }
 
 /**
- * Whether a transcript file lives under a `subagents/` directory (synthesis
- * A3). A subagent's turn ending says nothing about its parent session, so
- * extension.ts never lets one clear a gave-up record - see the doc comment on
- * {@link MAX_OFFSET_IDLE_MS} for how common these files are (~85% of
- * everything on disk for a typical project).
+ * Whether a transcript file lives under a `subagents/` directory. A subagent's turn ending
+ * says nothing about its parent session, so extension.ts never lets one clear a gave-up record.
  */
 export function isSubagentFile(file: string): boolean {
     return /[\\/]subagents[\\/]/i.test(file);
 }
 
-/**
- * One string pulled out of a transcript entry. Only a flagged entry's strings
- * are ever read (A1), so where inside the entry a string sat no longer
- * matters: the tool_result tag the unflagged path needed went with it.
- */
+/** One string pulled out of a transcript entry. */
 interface Candidate {
     text: string;
 }

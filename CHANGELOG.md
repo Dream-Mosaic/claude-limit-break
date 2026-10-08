@@ -39,7 +39,9 @@ The first release.
   writes, a tool returns, a subagent quotes or you paste never arms a timer: a
   `grep` quoting a banner, a checkpoint note, a percentage-usage warning, even a
   limit notice or an error render quoted word for word. A flagged entry is
-  believed wherever its text appears. The one other shape believed is a usage
+  believed wherever its text appears, except in a subagent's own transcript:
+  a limit or error inside a subagent is left to the parent session, which
+  records its own stop. The one other shape believed is a usage
   limit hit during a manual `/compact` (next entry).
 - Picks up a usage limit hit during compaction. A `/compact` that fails on a
   usage limit is written unflagged, as a `system` / `local_command` entry
@@ -90,7 +92,8 @@ The first release.
   `maxWaitHours` description says so: "Each new limit hit is judged again, so
   a hit within this window resumes automatically even if an earlier one was
   only offered."
-  A reset more than 8 days out (longer than any Claude limit, so a misread),
+  A reset more than 8 days out, or beyond `maxWaitHours` if that is higher
+  (longer than any Claude limit, so a misread),
   one that already passed (a fork's copy, say) and one with no readable time
   are not picked up, and every one of them is logged with the session and the
   reason - a passed one once per transcript.
@@ -113,11 +116,12 @@ The first release.
 - Resolves the session from the transcript that produced the detection, so a
   resume can never pair one project's session with another project's prompt.
 - Estimates the token cost of a resume before scheduling it and refuses when it
-  exceeds `claudeLimitBreak.maxResumeTokens`, which defaults to 500,000. The
-  estimate reads the transcript's newest `usage` record - the live context a
-  cold resume actually has to rebuild - falling back to a byte count only when
-  there is none. A limit wait guarantees a cold cache, so a resume reprocesses
-  the whole session.
+  exceeds `claudeLimitBreak.maxResumeTokens`. The cap is off by default (`0`);
+  500,000 is a reasonable starting point. The
+  estimate reads the transcript's newest real `usage` record - the live context
+  a cold resume actually has to rebuild. A session with no real usage record is
+  unmeasured and is not refused (the output channel logs it). A limit wait
+  guarantees a cold cache, so a resume reprocesses the whole session.
 - Keeps a separate countdown for every session that hits a limit. The limit
   belongs to the account, so the sessions working when it lands hit it
   together, and each of them is resumed.
@@ -286,6 +290,14 @@ The first release.
 - Repository hardening: SHA-pinned GitHub Actions, branch and tag protection
   rulesets, a SECURITY.md, Dependabot.
 
+### Fixed
+
+- The resume budget measured a limit's own zero-usage error entry, so it
+  estimated 0 tokens and never refused. It now reads the last real turn,
+  skipping Claude Code's synthetic error entries, and the byte-count estimate
+  is gone: a session with no real usage record is unmeasured and is not
+  refused.
+
 ### Known limitations
 
 - A usage-limit message with no parseable reset time is not picked up; the
@@ -293,7 +305,8 @@ The first release.
   (`resets Mon 12:00am`), which is never read in this machine's zone.
 - A limit that resets more than `maxWaitHours` out is offered at the reset,
   never resumed automatically unless a later hit of the same limit falls
-  within `maxWaitHours`, and one more than 8 days out is not picked up
+  within `maxWaitHours`, and one more than 8 days out (or beyond `maxWaitHours`
+  if that is higher) is not picked up
   at all (see Added).
 - The cancel lines that stand the resume down are matched by wording that was
   read from the Claude Code 2.1.285 binary. A release that rewords them falls

@@ -6,31 +6,18 @@ import { GAVE_UP_ICON, REASON, type GaveUpCause, type GaveUpRecord } from './gav
 /** What the item shows when no resume is counting down. */
 export type StatusBarMode = 'always' | 'pending' | 'never';
 
-/** The Task 5a command the trust hotlink points at. */
+/** The command the trust hotlink points at. */
 const TRUST_COMMAND = 'claudeLimitBreak.openClaudeToTrust';
 
 /**
- * Escape Markdown special characters in text this extension does not
- * control (a folder name, taken from a transcript or the filesystem).
- *
- * Without this, a folder literally named `*x*` renders as italic text, and
- * one named `[a](b)` renders as a link - or, worse, a folder name crafted to
- * look like a command link could pose as this tooltip's own trust hotlink.
- * The set covers every ASCII character CommonMark treats specially, per
- * Task 5b ruling 2.
+ * Escape Markdown special characters in text this extension does not control (a folder name from a transcript or the filesystem). Otherwise a folder named `*x*` renders italic, and one crafted to look like a command link could pose as this tooltip's own trust hotlink. Covers every ASCII character CommonMark treats specially.
  */
 export function escapeMarkdown(text: string): string {
   return text.replace(/[\\`*_{}[\]()#+\-.!<>|]/g, '\\$&');
 }
 
 /**
- * The last path segment of `cwd`, split on both separators.
- *
- * Not `path.basename`: this extension's tooltip can describe a session
- * recorded on a different OS than the one it is currently rendering on (a
- * synced settings/state profile, or a transcript copied between machines),
- * and POSIX `basename` does not split on `\`. Mirrors the same reasoning as
- * `resolveSession`'s filename split in sessionResolver.ts.
+ * The last path segment of `cwd`, split on both separators. Not `path.basename`: a session may have been recorded on a different OS than the one rendering (synced state, a copied transcript), and POSIX `basename` does not split on `\`.
  */
 function folderBasename(cwd: string): string {
   const segments = cwd.split(/[\\/]+/).filter((s) => s.length > 0);
@@ -38,25 +25,12 @@ function folderBasename(cwd: string): string {
 }
 
 /**
- * `encodeURIComponent` leaves `( ) ! ' *` raw - RFC 3986 calls them
- * "unreserved", which is exactly wrong here: the query sits inside a
- * Markdown inline link's `(...)` target, and a renderer reads that target
- * only up to the first UNESCAPED ")". A cwd containing any of these -
- * an unbalanced ")" is enough (`/home/me/foo)`, or an ordinary
- * "(copy)" folder) - closed the link target early: `openClaudeToTrust` ran
- * with no arguments and silently no-opped (review 1, Important 1). Percent-
- * encoded by hand, after `encodeURIComponent`, since that is the only gap
- * it leaves for a Markdown link target specifically.
+ * `encodeURIComponent` leaves `( ) ! ' *` raw, but the query sits inside a Markdown inline link's `(...)` target, which a renderer reads only up to the first unescaped ")". A cwd containing one (an unbalanced ")" is enough, e.g. a "(copy)" folder) closed the target early and the trust command silently no-opped. So these are percent-encoded by hand afterwards.
  */
 const LEFT_RAW_BY_ENCODE_URI_COMPONENT = /[()!'*]/g;
 
 /**
- * The command-URI for the trust hotlink (Task 5a's `openClaudeToTrust`),
- * the VS Code command-URI convention: `command:<id>?<args>`, args being
- * `encodeURIComponent(JSON.stringify([cwd]))` - a one-element argument
- * array, since that command takes the cwd as its sole parameter - with the
- * characters above additionally escaped so the result is safe as a Markdown
- * link target, not just as a URI.
+ * The command-URI for the trust hotlink (`openClaudeToTrust`): `command:<id>?<args>`, args being `encodeURIComponent(JSON.stringify([cwd]))`, with the characters above additionally escaped so the result is safe as a Markdown link target, not just as a URI.
  */
 export function trustCommandUri(cwd: string): string {
   const args = encodeURIComponent(JSON.stringify([cwd])).replace(
@@ -73,12 +47,7 @@ interface SessionLine {
 }
 
 /**
- * One Markdown line (no leading bullet) for a session: short id, escaped
- * folder basename, its state (a formatted resume time, "ready", or neither
- * for a gave-up-only session), its gave-up cause if it has one, and an
- * untrusted-folder marker with the trust link if its folder is known
- * untrusted. `state` is `undefined` for a gave-up-only session - see the
- * "gave-up-only" handling in `buildSessionLines` below.
+ * One Markdown line (no leading bullet) for a session: short id, escaped folder basename, its state (a formatted resume time, "ready", or neither for a gave-up-only session), its gave-up cause if any, and an untrusted-folder marker with the trust link if its folder is known untrusted.
  */
 function buildSessionLine(entry: {
   sessionId: string;
@@ -93,8 +62,7 @@ function buildSessionLine(entry: {
   const folder = entry.cwd ? escapeMarkdown(folderBasename(entry.cwd)) : '_no folder recorded_';
   const bits = [`${id} in ${folder}`];
   if (entry.state === 'counting' && entry.resumeAtMs !== undefined && entry.offerOnly) {
-    // Wave D, D3: a reset beyond maxWaitHours. Still waiting, but nothing
-    // launches at the deadline - Resume Now is offered then.
+    // A reset beyond maxWaitHours: still waiting, but nothing launches at the deadline; Resume Now is offered then.
     bits.push(`**manual**: Resume Now offered at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
   } else if (entry.state === 'counting' && entry.resumeAtMs !== undefined) {
     bits.push(`resuming at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
@@ -113,25 +81,11 @@ function buildSessionLine(entry: {
 }
 
 /**
- * Build the tooltip's unified session list (controller ruling: "T5 tooltip
- * lists gave-up sessions with their reason - one status-bar model, not
- * two"): every counting-down job, every job waiting for "Resume Now", and
- * every gave-up session, folded into one line each.
+ * Build the tooltip's unified session list: every counting-down job, every job waiting for "Resume Now", and every gave-up session, folded into one line each.
  *
- * A session present in more than one input (a launcher/cwd failure leaves
- * the job in `ready` so it can be retried, and a failed manual retry on a
- * counting-down job leaves it counting down - Task 4b implementer concern
- * 4) gets exactly one line, carrying whichever pending state it has plus its
- * gave-up cause. `ready` is only consulted for a session `jobs` does not
- * already cover: a session can genuinely hold both a counting-down job and
- * an unrelated stale ready job at once (Task 4b fix round 1, finding 1), and
- * the countdown is what is actually going to happen next, so that is what
- * the one line shows.
+ * A session present in more than one input (a launcher/cwd failure leaves the job in `ready` for retry; a failed manual retry leaves a counting-down job counting down) gets exactly one line, carrying its pending state plus its gave-up cause. `ready` is only consulted for a session `jobs` does not already cover: a session can hold both a counting-down job and an unrelated stale ready job, and the countdown is what happens next.
  *
- * Order: pending/ready lines first, soonest first (a ready job's own
- * deadline already elapsed, so it sorts ahead of anything still counting
- * down); gave-up-only lines after, oldest first (GaveUpState.list()'s own
- * order).
+ * Order: pending/ready lines first, soonest first (a ready job's deadline already elapsed, so it sorts ahead of anything counting down); gave-up-only lines after, oldest first (GaveUpState.list()'s order).
  */
 export function buildSessionLines(
   jobs: readonly PendingJob[],
@@ -192,34 +146,19 @@ export function buildSessionLines(
 }
 
 /**
- * Countdown pill in the status bar, and — when nothing is counting down — a
- * bare marker saying the extension is running.
- *
- * It used to hide entirely when idle, on the reasoning that an extension
- * should be invisible until it has something to say. That reads differently
- * from the user's side: this extension is installed from a VSIX to wait for an
- * event that may be hours away, and a window showing nothing at all is
- * indistinguishable from one where the install silently failed. `pending`
- * restores the old behaviour for anyone who prefers it.
+ * Countdown pill in the status bar, and - when nothing is counting down - a bare marker saying the extension is running. A window showing nothing at all is indistinguishable from a failed install, since this extension is installed from a VSIX to wait for an event hours away. The `pending` setting hides it when idle.
  */
 export class CountdownStatusBar {
   private readonly item: vscode.StatusBarItem;
 
   constructor() {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    // A menu, not the cancel command. A single click used to destroy the
-    // pending resume with no confirmation and no undo, while the only warning
-    // sat at the bottom of a six-line tooltip (#3).
+    // A menu, not the cancel command: a single click must not destroy the pending resume with no confirmation or undo.
     this.item.command = 'claudeLimitBreak.statusBarMenu';
     this.item.name = 'Limit Break';
   }
 
-  /**
-   * `jobs` are counting down, soonest first; `ready` are waiting for
-   * "Resume Now" (their own countdowns already elapsed); `gaveUp` are
-   * sessions this window has stopped retrying (Task 4b). Task 5b folds all
-   * three into the one tooltip list built by `buildSessionLines`.
-   */
+  /** `jobs` are counting down, soonest first; `ready` are waiting for "Resume Now" (their own countdowns already elapsed); `gaveUp` are sessions this window has stopped retrying. All three feed the one tooltip list built by `buildSessionLines`. */
   update(
     jobs: readonly PendingJob[],
     ready: readonly PendingJob[] = [],
@@ -250,10 +189,7 @@ export class CountdownStatusBar {
         this.item.show();
         return;
       }
-      // Something to show even with nothing counting down: a gave-up
-      // session, a ready one, or (per buildSessionLines) both on one line.
-      // The gave-up icon wins when anything has given up - that is the more
-      // urgent signal - even if other sessions are merely ready.
+      // Something to show even with nothing counting down: a gave-up session, a ready one, or both on one line. The gave-up icon wins, the more urgent signal.
       if (gaveUpCount > 0) {
         const count = gaveUpCount > 1 ? ` (${gaveUpCount} sessions)` : '';
         this.item.text = `${GAVE_UP_ICON} Resume gave up${count}`;
@@ -269,8 +205,7 @@ export class CountdownStatusBar {
 
     const remaining = soonest.resumeAtMs - Date.now();
     const others = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
-    // Wave D, D3: an offer-only job (a reset beyond maxWaitHours) is counting
-    // down to an offer, not to a resume, and the pill must not promise one.
+    // An offer-only job (a reset beyond maxWaitHours) counts down to an offer, not a resume, and the pill must not promise one.
     this.item.text = soonest.offerOnly
       ? `$(clock) Claude limit resets in ${formatDuration(remaining)}${others} (manual)`
       : `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
@@ -283,12 +218,7 @@ export class CountdownStatusBar {
   }
 
   /**
-   * The shared tooltip body for every non-idle state: header, one bullet per
-   * `buildSessionLines` line, a reminder of how to clear a gave-up notice
-   * when one is present, and the click-for-actions footer. `isTrusted` is
-   * set only when a line actually carries the trust command link (ruling 3)
-   * - an unconditional `true` would trust every link a folder name could be
-   * crafted to look like, not just this one command.
+   * The shared tooltip body for every non-idle state: header, one bullet per `buildSessionLines` line, a reminder of how to clear a gave-up notice when present, and the click-for-actions footer. `isTrusted` is set only when a line actually carries the trust command link; an unconditional `true` would trust every link a folder name could be crafted to look like.
    */
   private renderTooltip(lines: readonly string[], hasTrustLink: boolean, hasGaveUp: boolean): void {
     const tooltip = new vscode.MarkdownString(undefined, true);
@@ -300,9 +230,7 @@ export class CountdownStatusBar {
       tooltip.appendMarkdown(`\n`);
     }
     if (hasGaveUp) {
-      // Every way a gave-up record clears (gaveUp.ts), not just two of them:
-      // a new detection for the session, the session finishing a turn, a
-      // resume of it launching, the menu's dismiss item, and Cancel.
+      // Every way a gave-up record clears (gaveUp.ts), not just two: a new detection, the session finishing a turn, a resume launching, the menu's dismiss item, and Cancel.
       tooltip.appendMarkdown(
         `This clears on a new detection for the session, when the session finishes a turn or is resumed, ` +
           `or with "Dismiss gave-up notices" or "Cancel Pending Resume" from the menu.\n\n`,

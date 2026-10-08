@@ -6,8 +6,8 @@ const A = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 const B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
 const MIN = 60_000;
 
-// Final fix wave A, A6: the user's decision - resume 1 keeps the usual
-// random delay, resumes 2-5 add +15/+30/+60/+120 minutes, a 6th gives up.
+// Resume 1 keeps the usual random delay, resumes 2-5 add +15/+30/+60/+120
+// minutes, a 6th gives up.
 
 test('the backoff for consecutive overload resumes 1 to 5 is 0, 15, 30, 60 and 120 minutes', () => {
   assert.deepEqual(OVERLOAD_BACKOFF_MINUTES, [0, 15, 30, 60, 120]);

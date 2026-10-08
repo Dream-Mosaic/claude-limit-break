@@ -21,12 +21,7 @@ installVscodeStub();
 const SESSION = '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234';
 const SESSION_B = '7f2a9c41-8b3d-4e5f-9a01-6c7d8e9f0a1b';
 
-/**
- * Stands in for the real transcript watcher, which would otherwise walk
- * ~/.claude/projects and leave an fs.watch and a poll timer running for the
- * length of the suite. The extension only ever consumes its events, so a fake
- * that lets the test fire them by hand exercises the same handlers.
- */
+/** Fake transcript watcher: the real one would leave an fs.watch and a poll timer running. Tests fire its events by hand. */
 class FakeWatcher {
   static latest: FakeWatcher | undefined;
 
@@ -46,7 +41,7 @@ class FakeWatcher {
     readonly getMaxWaitHours: () => number,
     readonly getPollSeconds: () => number,
     readonly log: unknown,
-    /** What the real watcher filters on (#2). Recorded so a test can read it back. */
+    /** What the real watcher filters on, recorded so a test can read it back. */
     readonly getScope?: () => { mode: string; folders: readonly string[] },
   ) {
     FakeWatcher.latest = this;
@@ -54,8 +49,8 @@ class FakeWatcher {
 
   /**
    * Pretend an overload was detected for `sessionId` from a transcript entry
-   * stamped `entryTimestampMs` - the entry identity the overload claim keys
-   * on (final review I3). Runs through the real policy and scheduler.
+   * stamped `entryTimestampMs` (the identity the overload claim keys on).
+   * Runs through the real policy and scheduler.
    */
   overloadFor(sessionId: string, entryTimestampMs: number | undefined, cwd: string = REAL_CWD): void {
     this.overloadEmitter.fire({
@@ -66,7 +61,7 @@ class FakeWatcher {
     });
   }
 
-  /** Pretend Claude Code wrote one of its auto-continue status lines (wave C, C4). */
+  /** Pretend Claude Code wrote one of its auto-continue status lines. */
   nativeStatusFor(sessionId: string, kind: 'armed' | 'cancelled' | 'fired', text: string, cwd: string = REAL_CWD): void {
     this.nativeEmitter.fire({ status: { kind, text }, cwd, file: `/h/.claude/projects/p/${sessionId}.jsonl` });
   }
@@ -83,13 +78,9 @@ class FakeWatcher {
 
   /**
    * Pretend a usage limit was detected for `sessionId`, resetting at
-   * `resumeAt`. This runs through the real policy and the real scheduler; the
-   * transcript path does not exist, which resolveSession treats as an unknown
-   * size, so the budget check passes.
-   *
-   * `cwd` defaults to a directory that genuinely exists on disk (REAL_CWD):
-   * resume() now stats it for real, via node:fs, so a test that expects a
-   * resume to actually launch needs a real path, not a placeholder string.
+   * `resumeAt`, through the real policy and scheduler. The transcript path does
+   * not exist (unknown size, so the budget check passes). `cwd` defaults to
+   * REAL_CWD because resume() stats it, so a launching test needs a real path.
    */
   limitFor(
     sessionId: string,
@@ -105,7 +96,7 @@ class FakeWatcher {
         text: 'Claude AI usage limit reached. Try again in 5 hours',
         // Only when the test names one, as the real watcher only sets it when it knows.
         ...(rateLimitType !== undefined ? { rateLimitType } : {}),
-        // Wave D, D3: a reset beyond maxWaitHours, as the real watcher marks it.
+        // A reset beyond maxWaitHours, as the real watcher marks it.
         ...(offerOnly ? { offerOnly } : {}),
       },
       cwd,
@@ -131,15 +122,9 @@ class FakeWatcher {
 const sounds: { file?: string }[] = [];
 
 /**
- * Which folders count as trusted for the CLI, for the duration of one test.
- * 'all' is the default so that every existing test - none of which exercises
- * trust - sees the same behaviour it always has. A test that cares sets this
- * to a Set (only members are trusted) and restores 'all' in its `finally`.
- *
- * A stub, not the real module, for the same reason ./sound and
- * ./transcriptWatcher are stubbed: extension.ts would otherwise read the
- * *real* ~/.claude.json through the real fs.readFileSync it composes with
- * these functions, which must never happen from a test.
+ * Which folders count as trusted for the CLI during one test. 'all' is the
+ * default; a test that cares sets a Set and restores 'all' in its `finally`.
+ * Stubbed so a test never reads the real ~/.claude.json.
  */
 let trustedCwds: Set<string> | 'all' = 'all';
 
@@ -150,16 +135,12 @@ stubModule('./transcriptWatcher', {
   TranscriptWatcher: FakeWatcher,
 });
 stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.push(o) });
-// The real 60s grace would make every stall test take a minute. The verdict
-// logic itself is the real one - only the wait is shortened.
+// The real 60s grace would make every stall test take a minute; only the wait is shortened.
 stubModule('./stallWatch', { GRACE_MS: 300, stallVerdict: realStallVerdict });
 
 /**
- * Which sessions a panel is holding open, for the duration of one test, and a
- * record of what the extension asked about. The real detector shells out to
- * `claude agents --json` and reads ~/.claude/sessions, so letting it run for
- * real here would make the suite depend on whichever Claude Code processes
- * happen to be running on the machine at the time - including this one.
+ * Which sessions a panel holds open during one test, and what the extension
+ * asked about. The real detector shells out to `claude agents --json`.
  */
 let livePanelSessions = new Set<string>();
 const detectorCalls: { sessionId: string; ourPid: number | undefined }[] = [];
@@ -176,24 +157,12 @@ stubModule('./updateCheck', {
   },
 });
 
-/**
- * What `claude agents --json` reports for the duration of one test, consumed
- * by `agentRowsDetector`'s fake below - Task 2's onFire holder check and its
- * busy-folder-peers coordination check, and a manual resume's live-holder
- * check, all read this. Default: no other processes, so every existing test
- * that never sets this (nearly all of them) sees the same "nobody else is
- * running" world it always has - classifyHolder/busyFolderPeers on an empty
- * list is 'none' / no peers either way.
- */
+/** What `claude agents --json` reports during one test, read by the fake agentRowsDetector. Default: no other processes. */
 let fakeAgentRows: AgentRow[] | 'unknown' = [];
 
 /**
- * What `readSessionRecord` reports for a pid, for the duration of one test -
- * the entrypoint/bridge label half of classifyHolder's liveness/label split
- * (see liveSessions.ts). Keyed by pid. classifyHolder only ever asks for a
- * pid `fakeAgentRows` already vouched for as live, so an unset pid (the
- * default) correctly reads as "no record", same as a real machine with no
- * file for that pid.
+ * What `readSessionRecord` reports per pid during one test (the
+ * entrypoint/bridge label half of classifyHolder). An unset pid reads as no record.
  */
 const sessionRecordFor = new Map<number, HolderRecord>();
 
@@ -211,7 +180,7 @@ stubModule('./sessionRegistry', {
   readSessionRecord: (_dir: string, pid: number) => sessionRecordFor.get(pid),
 });
 
-/** Whether Claude Code's own auto-continue is on, for the duration of one test. Default true, matching the real default (see autoContinue.ts). */
+/** Whether Claude Code's own auto-continue is on during one test. Default true. */
 let autoContinueOn = true;
 
 stubModule('./autoContinue', {
@@ -220,9 +189,7 @@ stubModule('./autoContinue', {
 
 /**
  * Where the fake trust module says the CLI's config lives, and how many times
- * it has actually been read. A test that cares about the mtime cache points
- * this at a real temp file: the re-check is skipped on an unchanged mtime, and
- * the only way to see that skip is to count the reads.
+ * it was read. The mtime-cache test points this at a real temp file and counts reads.
  */
 let trustConfigPath = '/fake/.claude.json';
 /** Which spelling the fake trust module reports as the one on record, per cwd. */
@@ -230,11 +197,8 @@ const trustedSpellingFor = new Map<string, string>();
 const trustReads = { count: 0 };
 
 stubModule('./trust', {
-  // Spread first so the real (pure) normalizeProjectPath is available too -
-  // liveSessions.ts's busyFolderPeers imports it from this same './trust'
-  // specifier, and a fully-replaced stub would leave it undefined. Every
-  // property below is still faked exactly as before, since object spread
-  // order means these overrides win.
+  // Spread first so the real normalizeProjectPath stays available:
+  // liveSessions.ts imports it from this same './trust' specifier.
   ...(require('../src/trust') as Record<string, unknown>),
   isFolderTrusted: (cwd: string) => trustedCwds === 'all' || trustedCwds.has(cwd),
   readClaudeUserConfig: () => {
@@ -246,30 +210,11 @@ stubModule('./trust', {
 });
 
 /**
- * The cross-window claim (Task 10). `claimResume`/`releaseClaim` are faked so
- * no test here ever touches the real machine-wide claims directory
- * (os.tmpdir()/claude-limit-break/claims, from claimsDir()) - the real
- * filesystem behaviour is covered end to end in claims.test.ts. Defaults to
- * 'claimed', so every existing test above this section - none of which cares
- * about cross-window dedupe - sees exactly the behaviour it always had:
- * nothing is ever "taken".
- *
- * Fix round 1: `fakeClaimResult = 'real'` switches claimResume/releaseClaim
- * to delegate to the REAL src/claims.ts implementation against
- * `realClaimsDir` (a throwaway temp directory a test creates), instead of
- * returning the canned `fakeClaimResult`. This is what lets one test drive
- * `realClaims.claimResume` directly to stand in for a SECOND window - real
- * `openSync('wx')` collision behaviour, not a scripted answer - while this
- * window's own onFire runs through the real extension wiring.
- *
- * Fix round 2: `claimResultQueue` lets a test give SUCCESSIVE claimResume
- * calls different answers - needed for the "releasing a claim you don't
- * own" fix, where a test must make onFire's OWN top-of-function claim
- * succeed ('claimed', so the job actually reaches a manual bypass button)
- * while a LATER call from that button returns 'taken' (simulating another
- * window having taken it in between). Popped first, in order; falls back to
- * `fakeClaimResult` once empty, so every test that does not set it sees
- * exactly the single-answer behaviour it always had.
+ * The cross-window claim, faked so no test touches the real claims directory
+ * (claims.test.ts covers that). Defaults to 'claimed'. `fakeClaimResult =
+ * 'real'` delegates to src/claims.ts against `realClaimsDir`, a temp directory
+ * the test creates. `claimResultQueue` gives successive claimResume calls
+ * different answers; it is popped first, then falls back to `fakeClaimResult`.
  */
 const realClaims = require('../src/claims') as typeof import('../src/claims');
 let fakeClaimResult: 'claimed' | 'taken' | 'real' = 'claimed';
@@ -280,11 +225,9 @@ const claimResultQueue: ('claimed' | 'taken')[] = [];
 const heldClaims: { key: string; untilMs: number; owner?: string }[] = [];
 
 /**
- * The fake claimResume, shared by the fake holdClaim below: the real
- * holdClaim IS claimResume plus an mtime push, so a claim taken through it
- * (onFire's own since final fix wave A5, the counting Resume Now since M5,
- * Cancel's) answers from the same `claimResultQueue` / `fakeClaimResult` and
- * shows up in `claimCalls` exactly as a plain claim does.
+ * The fake claimResume, shared by the fake holdClaim: the real holdClaim is
+ * claimResume plus an mtime push, so both answer from the same queue and
+ * record in `claimCalls`.
  */
 const fakeClaimResume = (dir: string, key: string, nowMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
   claimCalls.push({ dir, key, owner });
@@ -307,9 +250,7 @@ stubModule('./claims', {
       realClaims.releaseClaim(dir, key, fsArg as never, log as never);
     }
   },
-  // Final review I7: Cancel's claims. Faked like claimResume, so a test
-  // never writes into the real machine-wide claims directory; delegates to
-  // the real implementation only in 'real' mode.
+  // Cancel's claims: faked like claimResume; delegates to the real implementation only in 'real' mode.
   holdClaim: (dir: string, key: string, nowMs: number, untilMs: number, fsArg: unknown, log?: unknown, owner?: string) => {
     heldClaims.push({ key, untilMs, owner });
     if (fakeClaimResult === 'real') {
@@ -335,10 +276,8 @@ const TERMINAL_PID = 4242;
 const PROMPT =
   '[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.';
 
-// resume() now checks the cwd on the real filesystem before launching, so
-// fixtures that expect a launch need a directory that is actually there.
-// os.tmpdir() always exists; the "missing" one is a path under it that is
-// never created.
+// resume() checks the cwd on the real filesystem, so launch fixtures need a
+// real directory. The "missing" one is a never-created path under os.tmpdir().
 const REAL_CWD = os.tmpdir();
 const MISSING_CWD = path.join(os.tmpdir(), 'clb-does-not-exist', SESSION);
 
@@ -412,9 +351,8 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
   const ctx = contextOver(store);
   start(ctx);
   try {
-    // The scheduler's first tick sees an elapsed deadline and consumes it,
-    // clearing its own state before firing. That ordering is deliberate, so
-    // the job only survives if extension.ts holds on to it.
+    // The scheduler's first tick consumes the elapsed job before firing, so it
+    // only survives if extension.ts holds on to it.
     await oneTick();
     assert.equal(store.get('claudeLimitBreak.pending'), undefined, 'the scheduler must have consumed it');
     assert.equal(vscodeFake.terminals.length, 0, 'autoResume is off; nothing may launch on its own');
@@ -436,7 +374,6 @@ test('with autoResume off, a fired job stays recoverable instead of vanishing', 
     assert.equal(opts.shellPath, LAUNCHER, 'never a shell');
     assert.deepEqual(opts.shellArgs, ['--resume', SESSION, PROMPT]);
 
-    // And it is consumed exactly once.
     await resumeNow();
     assert.equal(vscodeFake.terminals.length, 1, 'a consumed job must not resume twice');
     assert.ok(
@@ -473,7 +410,6 @@ test('a notification resumes the session it names, not whichever came ready last
     assert.equal(offers().length, 2, 'both sessions must have been offered');
     assert.equal(vscodeFake.terminals.length, 0, 'neither may have launched on its own');
 
-    // Accept the FIRST offer.
     first.answer('Resume Now');
     await flush();
     assert.equal(vscodeFake.terminals.length, 1, 'accepting one offer resumes one session');
@@ -483,7 +419,6 @@ test('a notification resumes the session it names, not whichever came ready last
       'the first offer must resume the session it named, not the one that fired last',
     );
 
-    // The second is untouched, and still reachable from the command.
     const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
     assert.ok(resumeNow, 'resumeNow must be registered');
     await resumeNow();
@@ -670,8 +605,7 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
       0,
       'a resume that never launched must not make the job disappear',
     );
-    // A manual retry is always answered (Task 4b, controller ruling on
-    // concern 1): warn-once silences automatic repeats only.
+    // A manual retry is always answered; warn-once silences only automatic repeats.
     assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
     assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(vscodeFake.terminals.length, 0, 'still no terminal');
@@ -680,12 +614,10 @@ test('an autoResume that lands on a deleted folder is refused, blames the right 
   }
 });
 
-test('an autoResume whose cwd is a file, not a directory, is refused rather than handed to createTerminal (#8)', async () => {
-  // fs.existsSync (the old predicate) is true for a regular file, so this
-  // used to reach vscode.window.createTerminal, which does not throw on a
-  // bad cwd - it fails asynchronously, inside the terminal process, in
-  // exactly the way this whole check exists to avoid (#4). statSync(...).
-  // isDirectory() is the only check that actually distinguishes the two.
+test('an autoResume whose cwd is a file, not a directory, is refused rather than handed to createTerminal', async () => {
+  // fs.existsSync is true for a regular file, and createTerminal does not throw
+  // on a bad cwd (it fails asynchronously in the terminal), so only
+  // statSync(...).isDirectory() tells them apart.
   resetVscodeFake();
   vscodeFake.config = {
     autoResume: true,
@@ -750,8 +682,7 @@ test('accepting a Resume Now offer into a deleted folder puts the job back rathe
       0,
       'the offer failing must not have discarded the job it claimed',
     );
-    // A manual retry is always answered (Task 4b, controller ruling on
-    // concern 1): warn-once silences automatic repeats only.
+    // A manual retry is always answered; warn-once silences only automatic repeats.
     assert.equal(vscodeFake.errors.length, 2, 'the retry must fail the same way, not silently do nothing');
     assert.equal(cwdFailureLogs(SESSION), 2);
   } finally {
@@ -768,9 +699,7 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     const watcher = FakeWatcher.latest;
     assert.ok(watcher, 'activate must have constructed a watcher');
 
-    // Still counting down: resumeNow must reach it via scheduler.current, the
-    // same branch that used to call scheduler.cancel() before knowing whether
-    // resume() would even start.
+    // Still counting down: resumeNow must reach it via scheduler.current.
     watcher.limitFor(SESSION, new Date(Date.now() + 600_000), MISSING_CWD);
 
     const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow');
@@ -783,8 +712,7 @@ test('resumeNow does not cancel the counting-down job until a resume has actuall
     // If cancel() had already run, the job would be gone and this second call
     // would report "nothing pending" instead of failing the same way again.
     await resumeNow();
-    // A manual retry is always answered (Task 4b, controller ruling on
-    // concern 1): warn-once silences automatic repeats only.
+    // A manual retry is always answered; warn-once silences only automatic repeats.
     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
     assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(
@@ -808,9 +736,8 @@ test('an untrusted folder is called out while the countdown is still running, no
     const watcher = FakeWatcher.latest;
     assert.ok(watcher, 'activate must have constructed a watcher');
 
-    // A deadline well in the future: this is the schedule-time notice, fired
-    // the moment the limit is detected, long before any cooldown elapses -
-    // the user is still here to trust the folder, unlike at fire time (#5).
+    // A deadline well in the future: the schedule-time notice fires at detection,
+    // while the user is still here to trust the folder.
     watcher.limitFor(SESSION, new Date(Date.now() + 600_000));
 
     const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
@@ -844,9 +771,7 @@ test('an untrusted folder is called out while the countdown is still running, no
 test('a trusted folder gets the ordinary schedule notice, with no trust warning anywhere', () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
-  // REAL_CWD is what limitFor() defaults to. This test was written against a
-  // '/projects/example' placeholder that issue #4 replaced, because resume()
-  // now stats the cwd and needs one that genuinely exists.
+  // REAL_CWD is what limitFor() defaults to; resume() stats the cwd, so it must exist.
   trustedCwds = new Set([REAL_CWD]);
   const ctx = contextOver(new Map());
   start(ctx);
@@ -925,9 +850,8 @@ test('a resume whose transcript grows is confirmed, and warns about nothing', as
 
     watcher.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
 
-    // Wait for the launch itself rather than a fixed delay: the grace
-    // period starts when the terminal is created, so the growth has to
-    // land inside it.
+    // Wait for the launch itself: the grace period starts at terminal creation,
+    // so the growth has to land inside it.
     const deadline = Date.now() + 4000;
     while (vscodeFake.terminals.length === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
@@ -1006,10 +930,8 @@ test('resumeNow on one counting-down session leaves the other one counting down'
 });
 
 test('Resume Now from the palette into a deleted folder keeps a job that was waiting to be started by hand', async () => {
-  // The fourth resume() call site. The other three - autoResume, the offer
-  // button, and a job still counting down - already keep their job when the
-  // launch fails. This one takes the job from the ready list, and nothing
-  // pinned that it only lets go once a terminal has actually launched.
+  // The fourth resume() call site: it takes the job from the ready list, so it
+  // must only let go once a terminal has actually launched.
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const ctx = contextOver(new Map());
@@ -1030,8 +952,7 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
     assert.equal(vscodeFake.errors.length, 1);
 
     await resumeNow();
-    // A manual retry is always answered (Task 4b, controller ruling on
-    // concern 1): warn-once silences automatic repeats only.
+    // A manual retry is always answered; warn-once silences only automatic repeats.
     assert.equal(vscodeFake.errors.length, 2, 'the job must still be there to fail on again');
     assert.equal(cwdFailureLogs(SESSION), 2);
     assert.equal(
@@ -1045,10 +966,8 @@ test('Resume Now from the palette into a deleted folder keeps a job that was wai
 });
 
 // ---------------------------------------------------------------------------
-// Issue #7: a resumed session whose panel tab is still open on its pre-resume
-// state. Typing into that tab forks the transcript and abandons the resumed
-// turn (docs/research/2026-09-20-panel-fork-experiment.md), so the tab has to
-// be reopened - or the user warned - before that keystroke.
+// A resumed session whose panel tab is still on its pre-resume state: typing
+// into it forks the transcript, so the tab must be reopened or the user warned.
 // ---------------------------------------------------------------------------
 
 const REOPEN_COMMAND = 'claude-vscode.reopenClosedSession';
@@ -1216,9 +1135,8 @@ test('warns without a button when the tab is not in this window', async () => {
 });
 
 test('does not act on a guess when several Claude tabs are open', async () => {
-  // Nothing ties a tab to a session id - #7 - so with two candidates the
-  // right one cannot be identified, and closing the wrong one would lose a
-  // different conversation's tab.
+  // Nothing ties a tab to a session id, so with two candidates the right one
+  // cannot be identified, and closing the wrong one would lose another tab.
   staleSetup({ onStale: 'reopen', tabs: [claudeTab('Claude Code'), claudeTab('Claude Code 2')] });
   const ctx = contextOver(new Map());
   start(ctx);
@@ -1249,11 +1167,8 @@ test('the chime being off does not silence the warning', async () => {
 });
 
 test('logs the webview tabs it saw when none of them is a Claude panel', async () => {
-  // The viewType match is `includes('claudeVSCodePanel')` and was verified
-  // against a synthetic webview, not the real panel (#7). If Claude Code ever
-  // changes that string, the feature quietly degrades to a text-only warning -
-  // so the tabs it looked at have to be visible somewhere, or diagnosing that
-  // means guessing.
+  // If Claude Code changes the 'claudeVSCodePanel' viewType, the feature degrades
+  // to a text-only warning, so the tabs it looked at must be logged.
   staleSetup({ tabs: [{ input: new FakeTabInputWebview('mainThreadWebview-someOtherPanel'), label: 'Other' }] });
   const ctx = contextOver(new Map());
   start(ctx);
@@ -1271,10 +1186,8 @@ test('logs the webview tabs it saw when none of them is a Claude panel', async (
 });
 
 // ---------------------------------------------------------------------------
-// Issue #11: a job waiting for Resume Now must survive a window reload. This
-// matters more since #7: reopening the window is the remedy recommended for a
-// stale panel tab, so the advice would otherwise destroy the very job it is
-// given alongside.
+// A job waiting for Resume Now must survive a window reload (reopening the
+// window is the remedy for a stale panel tab).
 // ---------------------------------------------------------------------------
 
 const READY_KEY = 'claudeLimitBreak.ready';
@@ -1367,12 +1280,11 @@ test('cancelling clears the waiting jobs from storage too', async () => {
   }
 });
 
-// Final review, Important 7: with watchScope machine every window holds its
-// own copy of the same pending job, so Cancel in one window used to leave
-// every other window to fire it. Cancel now claims each cancelled job's key,
-// held fresh until that job's own fire time.
+// With watchScope machine every window holds its own copy of a pending job,
+// so Cancel claims each cancelled job's key, held fresh until that job's fire
+// time, to stop other windows firing it.
 
-test('cancel claims every cancelled job, so another window firing the same reset drops it (final review I7)', async () => {
+test('cancel claims every cancelled job, so another window firing the same reset drops it', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-i7-'));
@@ -1394,9 +1306,8 @@ test('cancel claims every cancelled job, so another window firing the same reset
       [realClaims.claimKeyFor(counting), realClaims.claimKeyFor(ready)].sort(),
       'every cancelled job - counting down and ready alike - must be claimed',
     );
-    // Changed by wave A fix round 1 (review m2): held to the same deadline as
-    // the automatic fire's claim (A5) - the reset plus the longest jitter
-    // (0 here) plus ten minutes - not just this window's own fire time.
+    // Held to the same deadline as the automatic fire's claim: the reset plus the
+    // longest jitter (0 here) plus ten minutes.
     assert.equal(
       heldClaims.find((h) => h.key === realClaims.claimKeyFor(counting))?.untilMs,
       counting.baseResumeAtMs + 10 * 60_000,
@@ -1431,7 +1342,7 @@ test('cancel claims every cancelled job, so another window firing the same reset
   }
 });
 
-test('Cancel from the status bar menu claims the cancelled job too (final review I7)', async () => {
+test('Cancel from the status bar menu claims the cancelled job too', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER };
   heldClaims.length = 0;
@@ -1463,10 +1374,8 @@ test('Cancel with nothing waiting claims nothing', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 5b: readyJobs reaching the tooltip. rememberReady/forgetReady must
-// re-render on every change, not rely on some other event to happen to
-// follow them - otherwise the tooltip is stale until the next unrelated
-// render.
+// readyJobs reaching the tooltip: rememberReady/forgetReady must re-render on
+// every change.
 // ---------------------------------------------------------------------------
 
 test('a session becoming ready is reflected in the tooltip immediately, without any other event', async () => {
@@ -1502,7 +1411,6 @@ test('a session resumed by hand from the ready list drops off the tooltip immedi
 });
 
 test('the status bar menu offers the three commands and runs the one picked', async () => {
-  // Issue #3: the click used to be a bare destructive action.
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const ctx = contextOver(new Map());
@@ -1544,10 +1452,8 @@ test('the menu can cancel, and only when that is what was picked', async () => {
 });
 
 test('the trust warning clears once the folder is trusted mid-countdown', async () => {
-  // Issue #8, finding 2: folderTrusted is computed once at schedule time and
-  // rendered for the life of the countdown. The warning exists to make the
-  // user trust the folder DURING the countdown - so the one state change the
-  // feature is designed to cause was the one it could not see.
+  // folderTrusted is computed at schedule time and rendered for the whole
+  // countdown, so a trust change during the countdown has to be re-checked.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   trustedCwds = new Set<string>();
@@ -1569,7 +1475,7 @@ test('the trust warning clears once the folder is trusted mid-countdown', async 
 });
 
 // ---------------------------------------------------------------------------
-// Task 5a: Trust hotlink - claudeLimitBreak.openClaudeToTrust
+// Trust hotlink: claudeLimitBreak.openClaudeToTrust
 // ---------------------------------------------------------------------------
 
 const TRUST_BUTTON = 'Open Claude to Trust';
@@ -1634,9 +1540,8 @@ test('invoked with no cwd (e.g. the Command Palette), the command opens nothing 
 
 test('the command shows an error and opens nothing when claude cannot be found', async () => {
   resetVscodeFake();
-  // No separator: resolveClaudeLauncher looks this up on PATH via `which`,
-  // and a name this implausible is not on any machine's PATH - the same
-  // failure mode resume() itself hits when claudeCommand is misconfigured.
+  // No separator: resolveClaudeLauncher looks it up on PATH, where this
+  // implausible name is not found, as when claudeCommand is misconfigured.
   vscodeFake.config = { claudeCommand: 'clb-test-definitely-not-a-real-claude-binary' };
   const ctx = contextOver(new Map());
   start(ctx);
@@ -1753,16 +1658,10 @@ test('closing the trust terminal re-reads trust immediately, without waiting for
 });
 
 test('closing the trust terminal re-reads trust for every pending job, not just the current one', async () => {
-  // Fix round 1: the status-bar tooltip only ever shows `scheduler.current`
-  // (the soonest job), so a test that only asserts the tooltip cannot tell
-  // `refreshTrust` for every job apart from `refreshTrust(scheduler.current)`
-  // alone - a mutation the reviewer ran and found SURVIVED against the
-  // single-job close-hook test above. This asserts the SECOND job's own
-  // `folderTrusted` directly, read back from the scheduler's persisted state
-  // (the memento the fake globalState wraps): `scheduler.jobs` and the
-  // objects `persist()` writes into it are the same references `refreshTrust`
-  // mutates in place, so this reflects exactly what the close hook did to a
-  // job that was never `current` and never rendered anywhere.
+  // The tooltip only shows `scheduler.current`, so it cannot tell `refreshTrust`
+  // for every job from `refreshTrust(scheduler.current)`. This asserts the second
+  // job's own `folderTrusted`, read from the persisted state, whose objects are
+  // the same references refreshTrust mutates.
   resetVscodeFake();
   vscodeFake.config = {
     autoResume: false,
@@ -1776,11 +1675,9 @@ test('closing the trust terminal re-reads trust for every pending job, not just 
   const ctx = contextOver(store);
   start(ctx);
   try {
-    // SESSION is scheduled with the sooner deadline, so it - not SESSION_B -
-    // stays `scheduler.current` (and the only one the tooltip ever shows) for
-    // the whole test. SESSION_B's folder is deliberately never trusted for
-    // SESSION's sake - only SESSION_B's own folder is - so nothing here can
-    // pass by accident via SESSION's own tooltip clearing.
+    // SESSION has the sooner deadline, so it stays `scheduler.current` throughout.
+    // Only SESSION_B's folder is trusted, so nothing can pass by SESSION's own
+    // tooltip clearing.
     FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 600_000), REAL_CWD);
     FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_200_000), dirB);
     await flush();
@@ -1811,11 +1708,9 @@ test('closing the trust terminal re-reads trust for every pending job, not just 
 });
 
 // ---------------------------------------------------------------------------
-// Review 1, Important 2. Now that EVERY listed session shows the untrusted
-// marker (Task 5b), a marker that never re-checks for a ready job - or for
-// a counting-down job that was never `scheduler.current` - stays wrong
-// forever, including across a reload (a ready job's folderTrusted is
-// persisted).
+// Every listed session shows the untrusted marker, so it must be re-checked for
+// a ready job and for a counting-down job that was never `scheduler.current`,
+// including across a reload (a ready job's folderTrusted is persisted).
 // ---------------------------------------------------------------------------
 
 test('closing the trust terminal re-reads trust for a ready job too, and persists the flip', async () => {
@@ -1834,13 +1729,10 @@ test('closing the trust terminal re-reads trust for a ready job too, and persist
     const tooltip = () => (vscodeFake.statusBarItems[0]?.tooltip as { value: string } | undefined)?.value ?? '';
     assert.match(tooltip(), /not trusted/i, 'setup: the tooltip warns about the ready session too');
 
-    // The fake globalState never serialises - a stored array's ELEMENTS are
-    // the exact same live objects refreshTrust mutates in place, so they
-    // would read as trusted here even if the flip were never written back.
-    // The array reference itself is the only thing that tells the two apart:
-    // persistReady() always stores a fresh `[...readyJobs]` array, so a
-    // second persistReady() call after the flip is the only way this
-    // reference can change.
+    // The fake globalState never serialises, so stored elements are the live
+    // objects refreshTrust mutates. Only the array reference tells the cases apart:
+    // persistReady() stores a fresh `[...readyJobs]`, so a second call after the
+    // flip is the only way it changes.
     const storedBeforeClose = store.get(READY_KEY);
 
     await trustCommand()!(REAL_CWD);
@@ -1867,11 +1759,9 @@ test('closing the trust terminal re-reads trust for a ready job too, and persist
 });
 
 test('a non-soonest counting job trusted externally clears on the next scheduler change, not just the soonest', async () => {
-  // "Externally" here means without ever using this extension's own trust
-  // hotlink or closing a terminal it opened - e.g. trusted from an ordinary
-  // terminal, or the CLI's own trust prompt answered directly. Nothing here
-  // fires onDidCloseTerminal at all: only an ordinary scheduler tick, which
-  // fires scheduler.onChange with `current` still SESSION, never SESSION_B.
+  // "Externally": trusted without this extension's hotlink or a terminal it
+  // opened. Nothing fires onDidCloseTerminal; only an ordinary tick fires
+  // scheduler.onChange, with `current` still SESSION.
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   trustedCwds = new Set(); // nothing trusted yet
@@ -1917,9 +1807,8 @@ test('closing an unrelated terminal does not re-read trust', async () => {
     assert.match(tooltip(), /not trusted/i, 'setup: must warn while untrusted');
 
     trustedCwds = 'all';
-    // A terminal this extension never opened via openClaudeToTrust - the
-    // close hook must ignore it, not treat every closing terminal as a cue
-    // to re-check trust.
+    // A terminal this extension never opened via openClaudeToTrust: the close
+    // hook must ignore it.
     fireTerminalClose({ options: {}, shown: 0, processId: Promise.resolve(undefined), show() {}, dispose() {} });
     await flush();
 
@@ -1936,8 +1825,7 @@ test('closing an unrelated terminal does not re-read trust', async () => {
 
 test('resumeMode headless actually launches headless', async () => {
   // A declared headless mode must launch headless, not log "not yet
-  // implemented" and resume interactively anyway. A setting that quietly does
-  // something other than what it says is worse than one that does not exist.
+  // implemented" and resume interactively.
   resetVscodeFake();
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
@@ -1982,14 +1870,30 @@ test('the default resume stays interactive', async () => {
   }
 });
 
+/**
+ * A transcript the way a limit leaves it: a real turn, then Claude Code's
+ * flagged synthetic error entry with all-zero usage. The budget must measure
+ * the first, not the second.
+ */
+const OVER_BUDGET_CONTENT =
+  [
+    JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-opus-4', usage: { input_tokens: 2, cache_read_input_tokens: 24_591, cache_creation_input_tokens: 407_570 } },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      message: { model: '<synthetic>', usage: { input_tokens: 0, output_tokens: 0 }, content: [{ type: 'text', text: 'API Error: 529 Overloaded' }] },
+    }),
+  ].join('\n') + '\n';
+
 test('a refused resume offers to go ahead anyway, and honours the answer', async () => {
-  // The budget guard refused a real 11.2 MB session at ~2,007,179 estimated
-  // tokens - a number the session's own usage records put nearer 432,163. A
-  // guard that can only say no, on an estimate that can be this wrong, takes
-  // the decision away from the person whose session it is.
+  // The guard measures live context from the usage record, not an estimate that
+  // can be far too high.
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
     maxResumeTokens: 1,
@@ -2018,7 +1922,7 @@ test('a refused resume offers to go ahead anyway, and honours the answer', async
 test('a refusal that is dismissed resumes nothing', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = { claudeCommand: LAUNCHER, maxResumeTokens: 1, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const ctx = contextOver(new Map());
   start(ctx);
@@ -2039,10 +1943,9 @@ test('a refusal that is dismissed resumes nothing', async () => {
 });
 
 test('an unchanged config is not re-parsed on every tick', async () => {
-  // The skip exists because ~/.claude.json grows with every project opened and
-  // this runs once a second. With the config path pointed at a file that never
-  // exists - as it was - fs.statSync throws every time, the skip never runs,
-  // and no test could tell whether it worked.
+  // The skip exists because ~/.claude.json grows with every project and this
+  // runs once a second. The config path must point at a file that exists, or
+  // fs.statSync throws every time and the skip never runs.
   resetVscodeFake();
   const configFile = path.join(os.tmpdir(), `clb-trust-${Date.now()}.json`);
   fs.writeFileSync(configFile, '{}');
@@ -2086,11 +1989,9 @@ test('each session gets its own trust re-check, not one cache for the window', a
   try {
     FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() + 3_600_000));
     await oneTick();
-    // A second session, sooner than the first, so it becomes the one the
-    // status bar shows. Scheduling it costs exactly two reads: the check
-    // scheduling does itself, and this session's first re-check. A cache
-    // shared across sessions makes the second one disappear, because the
-    // mtime has not moved since the first session's check.
+    // A second, sooner session becomes the one the status bar shows. Scheduling it
+    // costs two reads: the check scheduling does itself, and this session's first
+    // re-check. A cache shared across sessions would lose the second.
     const before = trustReads.count;
     FakeWatcher.latest?.limitFor(SESSION_B, new Date(Date.now() + 1_800_000));
     await flush();
@@ -2107,8 +2008,8 @@ test('each session gets its own trust re-check, not one cache for the window', a
 });
 
 test('a small live context beats a huge byte count', async () => {
-  // The whole point of reading the transcript's usage record: an 11.2 MB file
-  // whose live context is 432,163 tokens must not be refused on 2,007,179.
+  // The budget reads the transcript's usage record, so a large file with a small
+  // live context must not be refused.
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
   const usage = JSON.stringify({
@@ -2139,8 +2040,116 @@ test('a small live context beats a huge byte count', async () => {
   }
 });
 
+test('a limit entry with zero usage does not hide the last real turn: the budget refuses and nothing resumes', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 100_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    const offer = vscodeFake.warningOffers.find((w) => w.message.includes('estimated'));
+    assert.ok(offer, `expected the budget refusal; saw ${JSON.stringify(vscodeFake.warnings)}`);
+    assert.match(offer.message, /432,163/, 'it is the real turn that was measured');
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a refused resume launches nothing');
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('the budget finds the last real turn behind a ~3 MB image entry and the limit entry', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  const [real, limit] = OVER_BUDGET_CONTENT.trimEnd().split('\n');
+  const image = JSON.stringify({ type: 'user', message: { content: [{ type: 'image', source: { data: 'A'.repeat(3_000_000) } }] } });
+  fs.writeFileSync(transcript, [real, image, limit].join('\n') + '\n');
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 100_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await flush();
+    assert.ok(vscodeFake.warningOffers.find((w) => w.message.includes('estimated')), 'the real turn behind the image is measured');
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('with default settings an over-500k session ending in a flagged limit resumes; capped at 500000 it is refused', async () => {
+  const run = async (config: Record<string, unknown>) => {
+    resetVscodeFake();
+    const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+    const [real, limit] = OVER_BUDGET_CONTENT.trimEnd().split('\n');
+    const big = real!.replace('407570', '507570');
+    fs.writeFileSync(transcript, [big, limit].join('\n') + '\n');
+    vscodeFake.config = { ...autoConfig(), ...config };
+    const ctx = contextOver(new Map());
+    start(ctx);
+    try {
+      FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+      await oneTick();
+      return {
+        refused: vscodeFake.warningOffers.some((w) => w.message.includes('estimated')),
+        terminals: vscodeFake.terminals.length,
+        logged: vscodeFake.outputLines.some((l) => l.includes('Resume budget:')),
+      };
+    } finally {
+      teardown(ctx);
+      fs.rmSync(transcript, { force: true });
+    }
+  };
+  assert.deepEqual(await run({}), { refused: false, terminals: 1, logged: false }, 'default: no cap, no log line');
+  const capped = await run({ maxResumeTokens: 500_000 });
+  assert.equal(capped.refused, true);
+  assert.equal(capped.terminals, 0);
+});
+
+test('a session under the cap still resumes when the last line is a zero-usage limit entry', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 500_000 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await oneTick();
+    assert.deepEqual(vscodeFake.warningOffers.filter((w) => w.message.includes('estimated')), []);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
+test('a transcript with no real usage record is unmeasured: no refusal, one log line, it resumes', async () => {
+  resetVscodeFake();
+  const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT.split('\n').slice(1).join('\n'));
+  vscodeFake.config = { ...autoConfig(), maxResumeTokens: 1 };
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    FakeWatcher.latest?.limitFor(SESSION, new Date(Date.now() - 1000), REAL_CWD, transcript);
+    await oneTick();
+    assert.deepEqual(vscodeFake.warningOffers.filter((w) => w.message.includes('estimated')), []);
+    assert.equal(vscodeFake.terminals.length, 1);
+    const expected = `Resume budget: no usage record for session ${SESSION.slice(0, 8)}; not checked.`;
+    assert.equal(vscodeFake.outputLines.filter((l) => l.includes(expected)).length, 1, JSON.stringify(vscodeFake.outputLines));
+  } finally {
+    teardown(ctx);
+    fs.rmSync(transcript, { force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
-// Wiring for #1 (update check) and #2 (watch scope).
+// Update check and watch scope wiring.
 // ---------------------------------------------------------------------------
 
 test('the watcher is given this window folders and the configured scope', async () => {
@@ -2254,11 +2263,10 @@ test('nothing is fetched while the setting is off', async () => {
 });
 
 test('the resume launches from the spelling of the folder the CLI has trusted', async () => {
-  // The CLI looks its trust record up by exact key. A panel session records
-  // its cwd with the drive letter VS Code reports; trusting the folder from a
-  // terminal records another spelling. Launching with the trusted spelling is
-  // what makes the CLI find the record the user created - both are the same
-  // directory, so this chooses a name, never a different folder.
+  // The CLI looks its trust record up by exact key. A panel session records its
+  // cwd with VS Code's drive letter; trusting from a terminal records another
+  // spelling. Launching with the trusted spelling finds the record; both name the
+  // same directory.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const recorded = REAL_CWD + path.sep; // a distinct string naming the same directory
@@ -2290,12 +2298,9 @@ test('with no trusted spelling on record, the recorded cwd is used as it was', a
 });
 
 // ---------------------------------------------------------------------------
-// Task 2: never start a second writer on a live session.
-//
-// `fakeAgentRows` stands in for `claude agents --json`; `sessionRecordFor`
-// stands in for the per-pid `~/.claude/sessions/<pid>.json` record. Both
-// default to "nobody else is running anything", so every test above this
-// section runs exactly as it did before this task existed.
+// Never start a second writer on a live session. `fakeAgentRows` stands in for
+// `claude agents --json`, `sessionRecordFor` for the per-pid session record;
+// both default to no other processes.
 // ---------------------------------------------------------------------------
 
 /** SESSION's row, live via the fake listing, holding the session with the given entrypoint and status. */
@@ -2400,7 +2405,7 @@ test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-conti
   }
 });
 
-test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVERLOAD in an IDLE terminal, even with auto-continue on (final review C1)', async () => {
+test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVERLOAD in an IDLE terminal, even with auto-continue on', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2434,11 +2439,10 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVE
   }
 });
 
-// Final review, Important 6: whether Claude Code's own auto-continue is
-// really on for this account is unverified (the key's absence reads as on,
-// but the feature is not offered to every account). Standing down for it
-// now arms a check after the stall-watch grace: no transcript growth since
-// detection means nothing continued it, and the job is offered back.
+// Whether Claude Code's own auto-continue is on is unverified (a missing key
+// reads as on, but not every account has it), so standing down for it arms a
+// check after the stall-watch grace: no transcript growth since detection
+// means the job is offered back.
 
 /** A real transcript this test controls, `bytes` long. */
 const transcriptOf = (bytes: number): { dir: string; file: string } => {
@@ -2474,7 +2478,7 @@ const untilStoodDown = async (): Promise<void> => {
   throw new Error(`onFire never stood down for native auto-continue; saw ${JSON.stringify(vscodeFake.outputLines)}`);
 };
 
-test('standing down for native auto-continue, then no transcript growth since detection: remembered and offered (final review I6)', async () => {
+test('standing down for native auto-continue, then no transcript growth since detection: remembered and offered', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2508,7 +2512,7 @@ test('standing down for native auto-continue, then no transcript growth since de
   }
 });
 
-test('the native-continue check leaves the job remembered for the palette Resume Now too (final review I6)', async () => {
+test('the native-continue check leaves the job remembered for the palette Resume Now too', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2543,11 +2547,7 @@ const SYNTHETIC_LIMIT = jsonl({
   message: { model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit · resets 2:10am" }] },
 });
 
-// Changed by final fix wave A (A3): the fixture used to be 400 more bytes of
-// 'x', and "the file grew" was the test. A real turn appended since detection
-// is the test now (M7), and the fire itself sees it first (I1), so the job
-// never reaches the native-continue check at all.
-test('a turn since detection - native auto-continue already ran before this window fired - means nothing is offered (final review I6, A3)', async () => {
+test('a turn since detection - native auto-continue already ran before this window fired - means nothing is offered', async () => {
   // The common case: randomDelay pads the fire 5-30 minutes past the reset,
   // so Claude Code has usually continued (and may have finished) by then.
   resetVscodeFake();
@@ -2576,9 +2576,7 @@ test('a turn since detection - native auto-continue already ran before this wind
   }
 });
 
-// Changed by final fix wave A (A3, M7): the growth appended was the bare
-// bytes 'more'; it is a real turn now, which is what counts as continuing.
-test('with no detection baseline (an older job), a turn during the grace counts (final review I6)', async () => {
+test('with no detection baseline (an older job), a turn during the grace counts', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2599,7 +2597,7 @@ test('with no detection baseline (an older job), a turn during the grace counts 
   }
 });
 
-test('with no detection baseline and no growth, the job is offered back (final review I6)', async () => {
+test('with no detection baseline and no growth, the job is offered back', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2619,7 +2617,7 @@ test('with no detection baseline and no growth, the job is offered back (final r
   }
 });
 
-test('Cancel during the grace drops the native-continue check, so a discarded job is not offered back (final review I6)', async () => {
+test('Cancel during the grace drops the native-continue check, so a discarded job is not offered back', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2640,7 +2638,7 @@ test('Cancel during the grace drops the native-continue check, so a discarded jo
   }
 });
 
-test('the native-continue check keeps the claim throughout (final review I6, consistent with I2)', async () => {
+test('the native-continue check keeps the claim throughout', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2663,7 +2661,7 @@ test('the native-continue check keeps the claim throughout (final review I6, con
   }
 });
 
-test('a real turn during the native-continue grace means nothing is offered (A3, M7)', async () => {
+test('a real turn during the native-continue grace means nothing is offered', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2685,9 +2683,8 @@ test('a real turn during the native-continue grace means nothing is offered (A3,
   }
 });
 
-test('only a synthetic error entry appended during the grace is not native auto-continue: still offered (A3, M7)', async () => {
-  // Before A3 any growth read as "Claude Code continued it" and the offer
-  // was dropped silently - a second limit notice from a hand retry did that.
+test('only a synthetic error entry appended during the grace is not native auto-continue: still offered', async () => {
+  // A second limit notice from a hand retry is not the session continuing.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -2709,9 +2706,9 @@ test('only a synthetic error entry appended during the grace is not native auto-
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A3 (final review I1): a resume never lands on a session
-// that has moved on since its stop was detected. The automatic fire drops it
-// silently (keeping its claim); every manual path asks first.
+// A resume never lands on a session that has moved on since its stop was
+// detected: the automatic fire drops it silently (keeping its claim); every
+// manual path asks first.
 // ---------------------------------------------------------------------------
 
 const CONTINUED_LOG = `Session ${SESSION.slice(0, 8)} has continued since it stopped; not resuming.`;
@@ -2719,7 +2716,7 @@ const CONTINUED_MODAL =
   `Limit Break: session ${SESSION.slice(0, 8)} has continued since it stopped. ` +
   'Resuming now will fork the conversation.';
 
-test('an automatic fire on a session continued since detection resumes nothing, remembers nothing, notifies nothing and keeps its claim (A3, I1)', async () => {
+test('an automatic fire on a session continued since detection resumes nothing, remembers nothing, notifies nothing and keeps its claim', async () => {
   // The idle-panel race: the user came back at 2:12, typed, the turn ended,
   // and the fire padded to 2:25 finds an idle panel.
   resetVscodeFake();
@@ -2753,7 +2750,7 @@ test('an automatic fire on a session continued since detection resumes nothing, 
   }
 });
 
-test('with autoResume off, a session continued since detection is not offered either (A3)', async () => {
+test('with autoResume off, a session continued since detection is not offered either', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const { dir, file } = transcriptOf(500);
@@ -2772,7 +2769,7 @@ test('with autoResume off, a session continued since detection is not offered ei
   }
 });
 
-test('only Claude Code\'s own synthetic entries since detection still resume as usual (A3 positive control)', async () => {
+test('only Claude Code\'s own synthetic entries since detection still resume as usual (positive control)', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const { dir, file } = transcriptOf(500);
@@ -2788,7 +2785,7 @@ test('only Claude Code\'s own synthetic entries since detection still resume as 
   }
 });
 
-test('resumeNow on a session that continued after it came ready warns modally, and resumes only on Resume Anyway (A3)', async () => {
+test('resumeNow on a session that continued after it came ready warns modally, and resumes only on Resume Anyway', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const { dir, file } = transcriptOf(500);
@@ -2823,7 +2820,7 @@ test('resumeNow on a session that continued after it came ready warns modally, a
   }
 });
 
-test('the Resume Now notification button also warns modally on a continued session (A3)', async () => {
+test('the Resume Now notification button also warns modally on a continued session', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const { dir, file } = transcriptOf(500);
@@ -2846,10 +2843,7 @@ test('the Resume Now notification button also warns modally on a continued sessi
   }
 });
 
-// Changed by wave A fix round 1 (review m2): the M5 hold now runs to the same
-// deadline as the automatic fire's claim (A5), not this window's resumeAtMs:
-// another window's copy can fire anywhere up to the longest jitter.
-test('resumeNow on a counting job holds its claim to the reset plus the longest jitter plus ten minutes, as the fire and Cancel do (A3, M5, m2)', async () => {
+test('resumeNow on a counting job holds its claim to the reset plus the longest jitter plus ten minutes, as the fire and Cancel do', async () => {
   resetVscodeFake();
   vscodeFake.config = { ...manualConfig(), autoResume: true, randomDelayMaxMinutes: 90 };
   fakeClaimResult = 'claimed';
@@ -2892,9 +2886,8 @@ test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDL
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A4 (final review I2): "Resume in Terminal Anyway" looks
-// again at click time. The notification does not auto-dismiss, so the
-// holder snapshot it was offered on can be hours old.
+// "Resume in Terminal Anyway" looks again at click time: the notification does
+// not auto-dismiss, so the holder snapshot can be hours old.
 // ---------------------------------------------------------------------------
 
 /** Fire an idle-terminal limit job with auto-continue off, and return its "Resume in Terminal Anyway" offer. */
@@ -2906,7 +2899,7 @@ const terminalOffer = async () => {
 };
 
 for (const status of ['busy', 'waiting']) {
-  test(`"Resume in Terminal Anyway" does not resume when the terminal is now ${status} (A4, I2)`, async () => {
+  test(`"Resume in Terminal Anyway" does not resume when the terminal is now ${status}`, async () => {
     resetVscodeFake();
     vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     autoContinueOn = false;
@@ -2945,7 +2938,7 @@ for (const [label, set] of [
     fakeAgentRows = 'unknown';
   }],
 ] as const) {
-  test(`"Resume in Terminal Anyway" resumes when the terminal is ${label} at click time (A4)`, async () => {
+  test(`"Resume in Terminal Anyway" resumes when the terminal is ${label} at click time`, async () => {
     resetVscodeFake();
     vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     autoContinueOn = false;
@@ -2967,7 +2960,7 @@ for (const [label, set] of [
   });
 }
 
-test('"Resume in Terminal Anyway" on a session that continued since detection asks first (A4 after A3)', async () => {
+test('"Resume in Terminal Anyway" on a session that continued since detection asks first', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
@@ -3040,11 +3033,9 @@ test('scheduler.onFire does not touch the prompt when the folder is quiet', asyn
   }
 });
 
-test('scheduler.onFire also adds the coordination sentence when resuming an IDLE panel, not only "none" (fix round 1 scope ruling)', async () => {
-  // The controller's scope ruling: the busy-folder-peers coordination
-  // applies on EVERY resume this extension launches, with no condition on
-  // which holder made it happen - 'none' and an idle panel (which also
-  // resumes, per the first correction) both qualify.
+test('scheduler.onFire also adds the coordination sentence when resuming an IDLE panel, not only "none"', async () => {
+  // The busy-folder-peers coordination applies on every resume this extension
+  // launches, whichever holder made it happen: 'none' and an idle panel both qualify.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeAgentRows = [
@@ -3183,10 +3174,8 @@ test('the off-autoResume "Resume Now" notification button also warns modally for
 });
 
 // ---------------------------------------------------------------------------
-// Task 10: cross-window claim. `fakeClaimResult`/`claimCalls`/`releasedKeys`
-// stand in for the real src/claims.ts, stubbed above so nothing here touches
-// the real machine-wide claims directory. Defaults to 'claimed', so every
-// test above this section sees exactly the behaviour it always had.
+// Cross-window claim: `fakeClaimResult`/`claimCalls`/`releasedKeys` stand in
+// for the real src/claims.ts.
 // ---------------------------------------------------------------------------
 
 test('scheduler.onFire drops a job whose claim is already taken by another window', async () => {
@@ -3276,13 +3265,11 @@ test('a failed automatic launch releases its claim, so a later attempt is not bl
   }
 });
 
-// Final review, Important 2: a declining holder decision used to release the
-// claim, so with watchScope machine every other window fired later, found
-// the key free, and showed the same "Resume in Terminal Anyway" offer - two
-// clicks in two windows were two writers on a session a terminal holds. The
-// claim is now kept whenever the decision remembers/notifies or drops.
+// A declining holder decision keeps the claim: releasing it would let every
+// other window (watchScope machine) fire later and show the same "Resume in
+// Terminal Anyway" offer, giving two writers on a session a terminal holds.
 
-test('the Task 2 holder decision dropping a resume for a busy holder keeps the claim (final review I2)', async () => {
+test('the holder decision dropping a resume for a busy holder keeps the claim', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -3300,7 +3287,7 @@ test('the Task 2 holder decision dropping a resume for a busy holder keeps the c
   }
 });
 
-test('an idle-terminal offer keeps its claim, and a second window firing the same reset drops it as taken (final review I2)', async () => {
+test('an idle-terminal offer keeps its claim, and a second window firing the same reset drops it as taken', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
@@ -3459,8 +3446,6 @@ test('a failed manual launch on a ready (already-fired) job releases the claim i
   }
 });
 
-// --- Fix round 1 -------------------------------------------------------------
-
 test('the off-autoResume "Resume Now" notification button writes/refreshes its own claim and releases it when the launch fails', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
@@ -3472,10 +3457,9 @@ test('the off-autoResume "Resume Now" notification button writes/refreshes its o
     await oneTick();
     const offer = offers()[0];
     assert.ok(offer, 'setup: the off-autoResume notification must have been shown');
-    // Fix round 3: the button now writes/refreshes its own claim at click
-    // time (autoResume off means this notification can sit unanswered long
-    // enough for the original one, from onFire's top-of-function check, to
-    // go stale) - isolate to the click's own claimResume/releaseClaim calls.
+    // The button writes/refreshes its own claim at click time (the notification
+    // can sit unanswered until the original goes stale); isolate to the click's own
+    // claimResume/releaseClaim calls.
     const callsBeforeClick = claimCalls.length;
     releasedKeys.length = 0;
     offer.answer('Resume Now');
@@ -3534,9 +3518,8 @@ test('"Resume in Terminal Anyway" releases its own claim if the launch fails', a
     await oneTick();
     const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
     assert.ok(offer, `setup: the offer must have been shown; saw ${JSON.stringify(vscodeFake.info)}`);
-    // decideOnFire's decision.resume is false here (idle terminal,
-    // auto-continue off); onFire keeps its claim (final review I2), so
-    // isolate to the button click's own write+release.
+    // decideOnFire's decision.resume is false here (idle terminal, auto-continue
+    // off) and onFire keeps its claim, so isolate to the click's own write+release.
     releasedKeys.length = 0;
     offer.answer('Resume in Terminal Anyway');
     await flush();
@@ -3553,12 +3536,9 @@ test('"Resume in Terminal Anyway" releases its own claim if the launch fails', a
 });
 
 test('scheduler.onFire on an overload job collides across two windows sharing one claims dir, despite very different jitter', async () => {
-  // End-to-end proof of the claimKeyFor fix: this uses the REAL claims.ts
-  // implementation (fakeClaimResult = 'real'), not the scripted
-  // 'claimed'/'taken' answer every other test in this file uses, so the
-  // collision comes from actual fs.openSync('wx') behaviour against one
-  // shared temp directory - exactly like two real VS Code windows would
-  // share the real machine-wide claims directory.
+  // End to end with the REAL claims.ts (fakeClaimResult = 'real'): the collision
+  // comes from fs.openSync('wx') on one shared temp directory, as with two real
+  // windows.
   resetVscodeFake();
   vscodeFake.config = {
     autoResume: true,
@@ -3572,10 +3552,9 @@ test('scheduler.onFire on an overload job collides across two windows sharing on
   claimCalls.length = 0;
   releasedKeys.length = 0;
 
-  // Both "windows" detected the identical overload at the same instant
-  // (baseResumeAtMs) but rolled very different backoffs - window A's own
-  // resumeAtMs is 2 minutes out, window B's is 25 minutes out - landing in
-  // DIFFERENT 10-minute buckets under the pre-fix (resumeAtMs-keyed) logic.
+  // Both windows detected the same overload at the same instant but rolled
+  // different backoffs (2 vs 25 minutes), which would land in different 10-minute
+  // buckets if the key used resumeAtMs.
   const base = Date.now() - 120_000; // "detected" 2 minutes ago
   const jobA = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: Date.now() - 1000, reason: 'overload' as const };
   const jobB = { ...pastJob(), baseResumeAtMs: base, resumeAtMs: base + 25 * 60_000, reason: 'overload' as const };
@@ -3610,14 +3589,12 @@ test('scheduler.onFire on an overload job collides across two windows sharing on
   } finally {
     fakeClaimResult = 'claimed';
     teardown(ctx);
-    // Fix round 2: this test's own claims dir, unlike every other test here,
-    // is a REAL directory (fakeClaimResult = 'real') that real claim files
-    // were actually written into - it must not be left behind.
+    // This test's claims dir is a real directory holding real claim files; remove it.
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// --- Final review, Important 3: overload claims keyed on the entry ----------
+// --- Overload claims keyed on the transcript entry ---------------------------
 
 /** autoResume on, no jitter, real claims in a throwaway directory; returns that directory. */
 const realClaimsSetup = (): string => {
@@ -3629,7 +3606,7 @@ const realClaimsSetup = (): string => {
   return dir;
 };
 
-test('two distinct overload events in the same 10 minutes are both claimed and both resumed (final review I3)', async () => {
+test('two distinct overload events in the same 10 minutes are both claimed and both resumed', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = realClaimsSetup();
@@ -3641,10 +3618,9 @@ test('two distinct overload events in the same 10 minutes are both claimed and b
     watcher.overloadFor(SESSION, first);
     await oneTick();
     assert.equal(vscodeFake.terminals.length, 1, 'setup: the first overload must have resumed');
-    // Changed by final fix wave A (A6, the user's decision): a second
-    // overload in a row now waits an extra 15 minutes, so the resumed turn
-    // finishes first here - which resets the streak - and the second
-    // failure is a first retry again. What this test is about is unchanged.
+    // A second overload in a row waits an extra 15 minutes, so the resumed turn
+    // finishes first and resets the streak; the second failure is then a first
+    // retry again.
     watcher.endTurnFor(`/h/.claude/projects/p/${SESSION}.jsonl`, REAL_CWD);
     // A second, separate failure two minutes later - the same 10-minute
     // bucket, and this window's own claim for the first is still fresh.
@@ -3662,7 +3638,7 @@ test('two distinct overload events in the same 10 minutes are both claimed and b
   }
 });
 
-test('every claim this window writes records its window identity (final review I3)', async () => {
+test('every claim this window writes records its window identity', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   vscodeFake.envSessionId = 'window-A';
@@ -3680,7 +3656,7 @@ test('every claim this window writes records its window identity (final review I
   }
 });
 
-test('a fire whose claim this same window already holds is logged as such, not as another window (final review I3)', async () => {
+test('a fire whose claim this same window already holds is logged as such, not as another window', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = realClaimsSetup();
@@ -3703,7 +3679,7 @@ test('a fire whose claim this same window already holds is logged as such, not a
   }
 });
 
-test('a fire whose claim a different window holds is still logged as another window (final review I3)', async () => {
+test('a fire whose claim a different window holds is still logged as another window', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: true, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = realClaimsSetup();
@@ -3723,28 +3699,22 @@ test('a fire whose claim a different window holds is still logged as another win
   }
 });
 
-// --- Fix round 2: releasing a claim you don't own ---------------------------
+// --- Releasing a claim you don't own ----------------------------------------
 //
-// Every manual bypass path (the "Resume in Terminal Anyway" button and both
-// resumeNow branches) ignores claimResume's own result to decide WHETHER to
-// launch - that is the bypass, the user's explicit intent - but round 1
-// wrongly also ignored it when deciding whether to RELEASE on a failed
-// launch, unconditionally deleting whatever claim file was at that key. If
-// another window held it ('taken'), that unconditional release deleted the
-// OTHER window's live claim, defeating the whole point of Task 10. Each test
-// below uses `claimResultQueue` to make the path's OWN claimResume call
-// report 'taken' - simulating another window having taken this exact reset
-// in between - and asserts the failed launch leaves `releasedKeys` empty.
+// Manual bypass paths ignore claimResume's result to decide whether to launch
+// (the user's explicit intent), but on a failed launch must release only a
+// claim they own: releasing a 'taken' one would delete another window's live
+// claim. Each test makes the path's own claimResume report 'taken' through
+// `claimResultQueue` and asserts `releasedKeys` stays empty.
 
 test('"Resume in Terminal Anyway" does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
-  // First call is onFire's own top-of-function claim (must succeed, or the
-  // job never reaches decideOnFire and the notice is never shown). The
-  // SECOND call is the button's own bypass write - 'taken' here stands in
-  // for another window having taken this reset in the meantime.
+  // The first call is onFire's own claim (must succeed, or the notice is never
+  // shown); the second is the button's bypass write, 'taken' standing in for
+  // another window.
   claimResultQueue.length = 0;
   claimResultQueue.push('claimed', 'taken');
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
@@ -3798,8 +3768,8 @@ test('resumeNow (counting-down branch) does not release a claim it does not own 
 test('resumeNow (ready-list branch) does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
   resetVscodeFake();
   vscodeFake.config = manualConfig();
-  // First call is onFire's own top-of-function claim when the job fires into
-  // the ready list; the SECOND is resumeNow's own bypass write.
+  // The first call is onFire's own claim when the job fires into the ready list;
+  // the second is resumeNow's bypass write.
   claimResultQueue.length = 0;
   claimResultQueue.push('claimed', 'taken');
   const ctx = contextOver(new Map());
@@ -3825,26 +3795,18 @@ test('resumeNow (ready-list branch) does not release a claim it does not own (it
   }
 });
 
-// --- Fix round 3 -------------------------------------------------------------
+// --- The off-autoResume "Resume Now" button ---------------------------------
 //
-// The off-autoResume "Resume Now" notification button was the one manual
-// bypass path round 2 deliberately left as release-only (it never called
-// claimResume itself, so its release was always of this window's own claim
-// from onFire's top-of-function check - see the round-1/round-2 comments
-// above it). But that reasoning assumed the click happens soon after the
-// notification appears. autoResume being off means this notification can sit
-// unanswered indefinitely; if the original claim goes stale (>1h) and
-// another window takes it over before the click, the unconditional release
-// at click time deleted THAT window's claim - the same bug class round 2
-// fixed on the other three manual paths, on the one site round 2 missed.
+// With autoResume off the notification can sit unanswered until the original
+// claim goes stale and another window takes it; the click must not release
+// that window's claim.
 
 test('the off-autoResume "Resume Now" notification button does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER };
-  // First call is onFire's own top-of-function claim (must succeed, or the
-  // job never reaches the off-autoResume notification at all). The SECOND
-  // call is the button's own bypass write - 'taken' stands in for another
-  // window having taken this reset in the meantime.
+  // The first call is onFire's own claim (must succeed, or the notification is
+  // never shown); the second is the button's bypass write, 'taken' standing in
+  // for another window.
   claimResultQueue.length = 0;
   claimResultQueue.push('claimed', 'taken');
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
@@ -3869,12 +3831,11 @@ test('the off-autoResume "Resume Now" notification button does not release a cla
 });
 
 // ---------------------------------------------------------------------------
-// Task 4b: the gave-up state. A resume that fails in a way this extension
-// stops retrying on must leave the status bar saying so - its own icon, and a
-// tooltip naming the session and cause - instead of going back to looking
-// idle. Four causes: stall, launcher missing, cwd missing, budget refusal
-// dismissed. Warned once per session per cause (ruling 1); cleared by a new
-// detection or a resume that launches (ruling 2), or by Cancel (ruling 3).
+// The gave-up state: a resume that fails in a way this extension stops retrying
+// on leaves the status bar saying so (its own icon, a tooltip naming session
+// and cause). Causes: stall, launcher missing, cwd missing, budget refusal
+// dismissed. Warned once per session per cause; cleared by a new detection, a
+// resume that launches, or Cancel.
 // ---------------------------------------------------------------------------
 
 const { GAVE_UP_ICON } = require('../src/gaveUp') as typeof import('../src/gaveUp');
@@ -3894,7 +3855,7 @@ const autoConfig = () => ({
 /** Budget-refusal fixture: a real transcript over a 1-token cap. */
 const overBudgetTranscript = (sessionId: string = SESSION) => {
   const transcript = path.join(os.tmpdir(), `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   return transcript;
 };
 
@@ -3909,10 +3870,8 @@ test('gave up: a missing folder shows the gave-up icon and names the session, fo
     assert.equal(vscodeFake.terminals.length, 0, 'setup: the launch must have been refused');
     assert.ok(showsGaveUp(), `expected the gave-up icon; got ${JSON.stringify(bar()?.text)}`);
     assert.ok(barTooltip().includes(SESSION.slice(0, 8)), barTooltip());
-    // Task 5b: the unified session line shows the folder BASENAME, escaped
-    // (ruling 1/2) - not the full path. MISSING_CWD's own basename here
-    // happens to be SESSION itself (see its definition), so it is escaped
-    // too (a UUID is full of hyphens, one of the escaped characters).
+    // The session line shows the escaped folder BASENAME, not the full path.
+    // MISSING_CWD's basename is SESSION itself, so it is escaped too (hyphens).
     assert.ok(barTooltip().includes(escapeMarkdown(path.basename(MISSING_CWD))), barTooltip());
     assert.match(barTooltip(), /no longer exists/);
     assert.equal(vscodeFake.errors.length, 1, 'warned once');
@@ -4163,7 +4122,7 @@ test('gave up: the menu offers Cancel as the way to clear it, and picking it doe
   }
 });
 
-test('gave up: the untrusted-folder notice is not a failure notice (Task 5a), so dismissing it records nothing', async () => {
+test('gave up: the untrusted-folder notice is not a failure notice, so dismissing it records nothing', async () => {
   resetVscodeFake();
   vscodeFake.config = { ...autoConfig(), notify: true };
   trustedCwds = new Set();
@@ -4303,15 +4262,10 @@ test('gave up: "Resume in Terminal Anyway" is answered even when the same failur
   }
 });
 
-// ---------------------------------------------------------------------------
-// Task 4b fix round 1.
-// ---------------------------------------------------------------------------
-
 test('gave up: two manual launches of the same session that both stall are both answered', async () => {
-  // Review finding 1: one session can hold a ready job AND a counting-down
-  // job. Resume Now takes the counting one (it stalls: warned), then the
-  // ready one - a second manual launch, no detection in between - which
-  // stalls too. That click must still get its notice (ruling on concern 1).
+  // One session can hold a ready job and a counting-down job. Resume Now takes
+  // the counting one (it stalls: warned), then the ready one, which stalls too;
+  // that click must still get its notice.
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
@@ -4455,11 +4409,10 @@ test('gave up: "Dismiss gave-up notices" clears the records and leaves every wai
 });
 
 // ---------------------------------------------------------------------------
-// Task 4c (R4): the limit type flows detection -> job -> decideOnFire, and
-// survives the persist-and-restore round trip. Claude Code's native
-// auto-continue arms for the five-hour limit only (research-api-errors-
-// binary.md Q4), so a weekly limit in an idle terminal is offered, never
-// stood down for.
+// The limit type flows detection -> job -> decideOnFire and survives the
+// persist-and-restore round trip. Native auto-continue arms for the five-hour
+// limit only, so a weekly limit in an idle terminal is offered, never stood
+// down for.
 // ---------------------------------------------------------------------------
 
 const storedJobs = (store: Map<string, unknown>): Record<string, unknown>[] =>
@@ -4508,7 +4461,7 @@ for (const [type, offered] of [
   ['five_hour', false],
   [undefined, false],
 ] as const) {
-  test(`a persisted ${type} limit job fired into an IDLE terminal with auto-continue on is ${offered ? 'offered, not stood down for' : 'stood down for'} (Task 4c R4)`, async () => {
+  test(`a persisted ${type} limit job fired into an IDLE terminal with auto-continue on is ${offered ? 'offered, not stood down for' : 'stood down for'}`, async () => {
     resetVscodeFake();
     vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     autoContinueOn = true;
@@ -4551,12 +4504,11 @@ for (const [type, offered] of [
 }
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A5 (final review M4): the automatic fire's claim lasts as
-// long as the jitter can, so a window whose copy rolled a long delay still
-// finds it taken.
+// The automatic fire's claim lasts as long as the jitter can, so a window whose
+// copy rolled a long delay still finds it taken.
 // ---------------------------------------------------------------------------
 
-test('with randomDelayMaxMinutes 90, a second window firing 80 minutes after the first finds the claim taken (A5, M4)', async () => {
+test('with randomDelayMaxMinutes 90, a second window firing 80 minutes after the first finds the claim taken', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 90 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a5-'));
@@ -4585,7 +4537,7 @@ test('with randomDelayMaxMinutes 90, a second window firing 80 minutes after the
   }
 });
 
-test('a fire long past its reset still holds its claim at least as long as an ordinary one (A5)', async () => {
+test('a fire long past its reset still holds its claim at least as long as an ordinary one', async () => {
   // An overdue job restored after VS Code was closed for hours: reset + jitter
   // + ten minutes is already in the past, and must not make the claim shorter.
   resetVscodeFake();
@@ -4611,11 +4563,11 @@ test('a fire long past its reset still holds its claim at least as long as an or
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A7 (final review M11): disabled means disabled, even for
-// a job scheduled before the setting was turned off.
+// Disabled means disabled, even for a job scheduled before the setting was
+// turned off.
 // ---------------------------------------------------------------------------
 
-test('a job that fires while Limit Break is disabled resumes nothing and is kept for Resume Now (A7, M11)', async () => {
+test('a job that fires while Limit Break is disabled resumes nothing and is kept for Resume Now', async () => {
   resetVscodeFake();
   vscodeFake.config = { enabled: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -4642,12 +4594,11 @@ test('a job that fires while Limit Break is disabled resumes nothing and is kept
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A8 (cloud parked #33): Cancel holds each job's claim so
-// other windows drop their copies - but a fresh plan in the SAME window for
-// the same reset must not be blocked by that window's own claim.
+// Cancel holds each job's claim so other windows drop their copies, but a fresh
+// plan in the SAME window for the same reset must not be blocked by its own claim.
 // ---------------------------------------------------------------------------
 
-test('cancel, then the same reset detected again in this window: it fires, and another window still drops its copy (A8)', async () => {
+test('cancel, then the same reset detected again in this window: it fires, and another window still drops its copy', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a8-'));
@@ -4681,7 +4632,7 @@ test('cancel, then the same reset detected again in this window: it fires, and a
   }
 });
 
-test('a fresh plan leaves a claim another window holds alone, and that window\'s claim still drops the fire (A8)', async () => {
+test('a fresh plan leaves a claim another window holds alone, and that window\'s claim still drops the fire', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-a8b-'));
@@ -4708,11 +4659,10 @@ test('a fresh plan leaves a claim another window holds alone, and that window\'s
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave A, A6 (final review M8, Goal 4) - the USER'S DECISION: a
-// session's 1st consecutive automatic overload resume keeps the usual random
-// delay, the 2nd-5th add +15/+30/+60/+120 minutes on top of it, a 6th is not
-// scheduled (gave up until it finishes a turn). A turn end resets the count;
-// limit jobs neither count nor back off.
+// A session's 1st consecutive automatic overload resume keeps the usual random
+// delay, the 2nd-5th add +15/+30/+60/+120 minutes, a 6th is not scheduled (gave
+// up until it finishes a turn). A turn end resets the count; limit jobs neither
+// count nor back off.
 // ---------------------------------------------------------------------------
 
 const MINUTE = 60_000;
@@ -4765,7 +4715,7 @@ for (const [label, config, jitter] of [
   ['the default random delay', {}, [5, 30]],
   ['a custom random delay', { randomDelayMinMinutes: 1, randomDelayMaxMinutes: 3 }, [1, 3]],
 ] as const) {
-  test(`overload resumes 1-5 of a session wait the usual delay plus 0, 15, 30, 60 and 120 minutes, with ${label} (A6)`, async () => {
+  test(`overload resumes 1-5 of a session wait the usual delay plus 0, 15, 30, 60 and 120 minutes, with ${label}`, async () => {
     resetVscodeFake();
     vscodeFake.config = { claudeCommand: LAUNCHER, ...config };
     const store = new Map<string, unknown>();
@@ -4781,7 +4731,7 @@ for (const [label, config, jitter] of [
   });
 }
 
-test('a 6th consecutive overload of a session is not scheduled: it gives up until the session finishes a turn (A6)', async () => {
+test('a 6th consecutive overload of a session is not scheduled: it gives up until the session finishes a turn', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER };
   const store = new Map<string, unknown>();
@@ -4811,7 +4761,7 @@ test('a 6th consecutive overload of a session is not scheduled: it gives up unti
   }
 });
 
-test('a turn end resets the overload count (A6)', async () => {
+test('a turn end resets the overload count', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER };
   const store = new Map<string, unknown>();
@@ -4829,7 +4779,7 @@ test('a turn end resets the overload count (A6)', async () => {
   }
 });
 
-test('a limit job in between neither resets the overload count nor is delayed by it (A6)', async () => {
+test('a limit job in between neither resets the overload count nor is delayed by it', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER };
   const store = new Map<string, unknown>();
@@ -4852,10 +4802,10 @@ test('a limit job in between neither resets the overload count nor is delayed by
   }
 });
 
-test('the budget "Resume anyway" override keeps the overload backoff (A6)', async () => {
+test('the budget "Resume anyway" override keeps the overload backoff', async () => {
   resetVscodeFake();
   const transcript = path.join(os.tmpdir(), `${SESSION}.jsonl`);
-  fs.writeFileSync(transcript, 'x'.repeat(100_000));
+  fs.writeFileSync(transcript, OVER_BUDGET_CONTENT);
   vscodeFake.config = { claudeCommand: LAUNCHER };
   const store = new Map<string, unknown>();
   const ctx = contextOver(store);
@@ -4879,6 +4829,7 @@ test('the budget "Resume anyway" override keeps the overload backoff (A6)', asyn
     await flush();
     const refusal = vscodeFake.warningOffers.find((w) => w.items.includes('Resume anyway'));
     assert.ok(refusal, 'setup: the second retry is refused on budget');
+    assert.match(refusal.message, /432,163/, 'the refusal measures the real turn, not the zero-usage entry');
     refusal.answer('Resume anyway');
     await flush();
     assertBackoff({ job: pendingIn(store)[0], before, after: Date.now() }, 15, [5, 30], 'the override');
@@ -4889,15 +4840,14 @@ test('the budget "Resume anyway" override keeps the overload backoff (A6)', asyn
 });
 
 // ---------------------------------------------------------------------------
-// Wave A fix round 1 (review C1): a session that took a retry and ran into
-// the same limit again is still stopped, and is still resumed. These are the
-// real sequences the review found on this machine.
+// A session that took a retry and ran into the same limit again is still
+// stopped, and is still resumed.
 // ---------------------------------------------------------------------------
 
 /** A prompt from the panel or a Remote Control retry (promptSource sdk). */
 const SDK_RETRY = jsonl({ type: 'user', promptSource: 'sdk', message: { role: 'user', content: 'try again' } });
 
-test('a hand retry that hit the same limit again is still resumed by the automatic fire (C1)', async () => {
+test('a hand retry that hit the same limit again is still resumed by the automatic fire', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const { dir, file } = transcriptOf(500);
@@ -4921,12 +4871,11 @@ test('a hand retry that hit the same limit again is still resumed by the automat
   }
 });
 
-test('the A8 race across two windows ends with exactly one resume (C1, review concern 1)', async () => {
-  // Window A cancels, the user retries and hits the same reset, and A
-  // re-plans (releasing its own Cancel claim). Window B still holds its
-  // original copy, with the first detection's baseline, and its jitter lands
-  // first. Before C1, B's copy read the retry as "continued", dropped and
-  // KEPT the claim, and A's fresh plan then found it taken: nobody resumed.
+test('the cancel-then-retry race across two windows ends with exactly one resume', async () => {
+  // Window A cancels, the user retries into the same reset, and A re-plans
+  // (releasing its own Cancel claim). Window B still holds its original copy with
+  // the first baseline, and its jitter lands first. B must not read the retry as
+  // "continued" and keep the claim, or A's plan finds it taken and nobody resumes.
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const claims = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-race-'));
@@ -4982,12 +4931,12 @@ test('the A8 race across two windows ends with exactly one resume (C1, review co
 });
 
 // ---------------------------------------------------------------------------
-// Final fix wave B, B2 (final review M2): jobs restored from globalState are
-// validated, and resume() asserts the session id once more before it builds
-// the argv (constraint 4: `claude --resume` only ever receives a UUID).
+// Jobs restored from globalState are validated, and resume() asserts the
+// session id again before building the argv (`claude --resume` only ever
+// receives a UUID).
 // ---------------------------------------------------------------------------
 
-test('restored ready jobs that fail validation are dropped, one log line each, and only the valid one is resumable (B2)', async () => {
+test('restored ready jobs that fail validation are dropped, one log line each, and only the valid one is resumable', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const store = new Map<string, unknown>([
@@ -5019,7 +4968,7 @@ test('restored ready jobs that fail validation are dropped, one log line each, a
   }
 });
 
-test('a restored pending job that fails validation never fires, and is logged as dropped (B2)', async () => {
+test('a restored pending job that fails validation never fires, and is logged as dropped', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const store = new Map<string, unknown>([
@@ -5036,7 +4985,7 @@ test('a restored pending job that fails validation never fires, and is logged as
   }
 });
 
-test('resume() re-checks the session id before building the argv: a non-UUID launches nothing (B2, defence in depth)', async () => {
+test('resume() re-checks the session id before building the argv: a non-UUID launches nothing (defence in depth)', async () => {
   resetVscodeFake();
   vscodeFake.config = { autoResume: false, claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const ready = pastJob();
@@ -5059,7 +5008,7 @@ test('resume() re-checks the session id before building the argv: a non-UUID lau
   }
 });
 
-test('an unusable claims directory does not stop a resume: the fire still launches (B3, final review M3)', async () => {
+test('an unusable claims directory does not stop a resume: the fire still launches', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   // A "directory" under a regular file: mkdirSync throws, whatever the OS.
@@ -5082,9 +5031,9 @@ test('an unusable claims directory does not stop a resume: the fire still launch
   }
 });
 
-test('an overload job gets the same neutral wording, in the log and in the modal (B5)', async () => {
-  // The A3 strings used to say "since the limit was detected", which is wrong
-  // for a server-error job. They are shared, so they say "since it stopped".
+test('an overload job gets the same neutral wording, in the log and in the modal', async () => {
+  // The strings are shared, so they say "since it stopped", not "since the limit
+  // was detected".
   resetVscodeFake();
   vscodeFake.config = manualConfig();
   const { dir, file } = transcriptOf(500);
@@ -5109,7 +5058,7 @@ test('an overload job gets the same neutral wording, in the log and in the modal
   }
 });
 
-test('an automatic fire on a continued overload job logs the neutral line (B5)', async () => {
+test('an automatic fire on a continued overload job logs the neutral line', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   holderRow('claude-vscode', 'idle');
@@ -5132,11 +5081,11 @@ test('an automatic fire on a continued overload job logs the neutral line (B5)',
 });
 
 // ---------------------------------------------------------------------------
-// Wave C, C4: Claude Code's auto-continue status lines are logged with the
-// session id and the text, and nothing else happens.
+// Claude Code's auto-continue status lines are logged with the session id and
+// text, and nothing else happens.
 // ---------------------------------------------------------------------------
 
-test('C4: armed, cancelled and fired status lines are logged with the session id and text, and start nothing', async () => {
+test('armed, cancelled and fired status lines are logged with the session id and text, and start nothing', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const ctx = contextOver(new Map());
@@ -5167,12 +5116,10 @@ test('C4: armed, cancelled and fired status lines are logged with the session id
 });
 
 // ---------------------------------------------------------------------------
-// Wave C, C5: stand down when Claude Code's auto-continue was cancelled
-// because the session moved to Claude Desktop, to the cloud or to the
-// background, or because the user pressed Esc / chose to wait. The cancel
-// lines are real transcript entries in a file this test controls; the strings
-// are the 2.1.285 binary's (research-autocontinue-compaction.md), except the
-// process_exit line, which is byte-exact from a real v2.1.278 transcript.
+// Stand down when Claude Code's auto-continue was cancelled because the
+// session moved to Claude Desktop, the cloud or the background, or the user
+// pressed Esc / chose to wait. The cancel lines are real transcript entries in a
+// file this test controls.
 // ---------------------------------------------------------------------------
 
 const CANCEL_PREFIX_DOT = 'Automatic continue cancelled · ';
@@ -5220,7 +5167,7 @@ const standDownCases: [string, string, string][] = [
 ];
 
 for (const [name, appended, label] of standDownCases) {
-  test(`C5: a cancel for ${name} stands the fire down: no resume, remembered, Resume Now offered`, async () => {
+  test(`a cancel for ${name} stands the fire down: no resume, remembered, Resume Now offered`, async () => {
     const released = releasedKeys.length;
     const { dir, store, ctx } = await fireWithCancel(appended);
     try {
@@ -5242,7 +5189,7 @@ for (const [name, appended, label] of standDownCases) {
   });
 }
 
-test('C5: the stand-down notice\'s Resume Now button is a manual resume and launches (the user chose)', async () => {
+test('the stand-down notice\'s Resume Now button is a manual resume and launches (the user chose)', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop));
   try {
     const notice = standDownNoticeOf();
@@ -5257,7 +5204,7 @@ test('C5: the stand-down notice\'s Resume Now button is a manual resume and laun
   }
 });
 
-test('C5: the palette Resume Now command is unaffected by the cancel line', async () => {
+test('the palette Resume Now command is unaffected by the cancel line', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.cloud));
   try {
     assert.equal(vscodeFake.terminals.length, 0);
@@ -5271,7 +5218,7 @@ test('C5: the palette Resume Now command is unaffected by the cancel line', asyn
   }
 });
 
-test('C5: with autoResume off the stand-down notice replaces the plain cooldown notice', async () => {
+test('with autoResume off the stand-down notice replaces the plain cooldown notice', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop), () => {
     vscodeFake.config = { ...manualConfig() };
   });
@@ -5285,7 +5232,7 @@ test('C5: with autoResume off the stand-down notice replaces the plain cooldown 
   }
 });
 
-test('C5: a cancel for a reason not on the list (Claude Code exited or relaunched) resumes exactly as before', async () => {
+test('a cancel for a reason not on the list (Claude Code exited or relaunched) resumes exactly as before', async () => {
   for (const text of [CANCEL_TEXT.exited, CANCEL_TEXT.relaunch]) {
     const { dir, ctx } = await fireWithCancel(informationalLine(text));
     try {
@@ -5298,7 +5245,7 @@ test('C5: a cancel for a reason not on the list (Claude Code exited or relaunche
   }
 });
 
-test('C5: no cancel line at all resumes exactly as before', async () => {
+test('no cancel line at all resumes exactly as before', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine('Usage limit reached · continuing automatically at 11:10am · esc or type to cancel', 'notice'));
   try {
     assert.equal(standDownNoticeOf(), undefined);
@@ -5309,7 +5256,7 @@ test('C5: no cancel line at all resumes exactly as before', async () => {
   }
 });
 
-test('C5: a string mismatch (reworded cancel line) falls back to today\'s behaviour: it resumes', async () => {
+test('a string mismatch (reworded cancel line) falls back to today\'s behaviour: it resumes', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(`${CANCEL_PREFIX_DOT}handed off to Claude Desktop`));
   try {
     assert.equal(standDownNoticeOf(), undefined);
@@ -5320,7 +5267,7 @@ test('C5: a string mismatch (reworded cancel line) falls back to today\'s behavi
   }
 });
 
-test('C5: the LAST cancel line decides: Desktop then "exited" resumes; "exited" then Desktop stands down', async () => {
+test('the LAST cancel line decides: Desktop then "exited" resumes; "exited" then Desktop stands down', async () => {
   const first = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop) + informationalLine(CANCEL_TEXT.exited));
   try {
     assert.equal(standDownNoticeOf(), undefined);
@@ -5339,7 +5286,7 @@ test('C5: the LAST cancel line decides: Desktop then "exited" resumes; "exited" 
   }
 });
 
-test('C5: a cancel line from BEFORE the detection baseline is history and does not stand down', async () => {
+test('a cancel line from BEFORE the detection baseline is history and does not stand down', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-'));
@@ -5359,7 +5306,7 @@ test('C5: a cancel line from BEFORE the detection baseline is history and does n
   }
 });
 
-test('C5: a job with no baseline (an older build\'s) never stands down', async () => {
+test('a job with no baseline (an older build\'s) never stands down', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const { dir, file } = transcriptOf(500);
@@ -5376,7 +5323,7 @@ test('C5: a job with no baseline (an older build\'s) never stands down', async (
   }
 });
 
-test('C5: a quoted cancel line in a prompt, a reply or a tool result is not a cancel', async () => {
+test('a quoted cancel line in a prompt, a reply or a tool result is not a cancel', async () => {
   const quoted = jsonl({ type: 'user', message: { role: 'user', content: CANCEL_TEXT.desktop } }) +
     jsonl({ type: 'assistant', message: { content: [{ type: 'text', text: CANCEL_TEXT.desktop }] } });
   // These are real turns, so continuedSince reads the session as moved on and
@@ -5391,7 +5338,7 @@ test('C5: a quoted cancel line in a prompt, a reply or a tool result is not a ca
   }
 });
 
-test('C5: a session that moved on after the cancel is silent, not a stand-down notice', async () => {
+test('a session that moved on after the cancel is silent, not a stand-down notice', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop) + USER_TURN);
   try {
     assert.equal(standDownNoticeOf(), undefined, 'continuedSince answers first');
@@ -5403,7 +5350,7 @@ test('C5: a session that moved on after the cancel is silent, not a stand-down n
   }
 });
 
-test('C5: at fire, with the native holder row idle, a cancel stands down before the native-continue wait is armed', async () => {
+test('at fire, with the native holder row idle, a cancel stands down before the native-continue wait is armed', async () => {
   const { dir, ctx } = await fireWithCancel(informationalLine(CANCEL_TEXT.desktop), () => {
     autoContinueOn = true;
     holderRow('cli', 'idle');
@@ -5422,7 +5369,7 @@ test('C5: at fire, with the native holder row idle, a cancel stands down before 
   }
 });
 
-test('C5: a cancel written DURING the native-continue grace stands down instead of "did not continue"', async () => {
+test('a cancel written DURING the native-continue grace stands down instead of "did not continue"', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -5449,7 +5396,7 @@ test('C5: a cancel written DURING the native-continue grace stands down instead 
   }
 });
 
-test('C5: an unlisted cancel during the native-continue grace still offers the plain "did not continue" notice', async () => {
+test('an unlisted cancel during the native-continue grace still offers the plain "did not continue" notice', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
@@ -5473,11 +5420,9 @@ test('C5: an unlisted cancel during the native-continue grace still offers the p
 });
 
 // ---------------------------------------------------------------------------
-// Wave D, D3 (policy B, the user's decision): a limit that resets beyond
-// maxWaitHours is never resumed automatically. It is scheduled as usual (the
-// claim, the status bar, persistence), the user is told once at detection,
-// and at the reset Resume Now is offered exactly as the autoResume-off path
-// offers it.
+// A limit that resets beyond maxWaitHours is never resumed automatically: it is
+// scheduled as usual (claim, status bar, persistence), the user is told once at
+// detection, and Resume Now is offered at the reset as on the autoResume-off path.
 // ---------------------------------------------------------------------------
 
 const OFFER_NOTICE_SUFFIX = '-offer-notice';
@@ -5488,7 +5433,7 @@ const offerOnlyNotice = (label: string, resetsAt: Date, hours = 24) =>
 const limitNotices = () =>
   vscodeFake.info.map((m) => m.message).filter((m) => m.startsWith('Limit Break: session') || m.includes('resuming at'));
 
-test('D3: an offer-only limit is announced once at detection, in the exact words, and never as "resuming at"', () => {
+test('an offer-only limit is announced once at detection, in the exact words, and never as "resuming at"', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5512,11 +5457,11 @@ test('D3: an offer-only limit is announced once at detection, in the exact words
   }
 });
 
-test('D3: with real claims, two windows and a re-detection still show the offer-only notice exactly once', () => {
+test('with real claims, two windows and a re-detection still show the offer-only notice exactly once', () => {
   resetVscodeFake();
   // Zero jitter on purpose: an identical re-detection then re-schedules
-  // (scheduler.schedule only drops a DIFFERENT jitter roll of the same
-  // reset), so only the notice's own claim stands between it and a repeat.
+  // (scheduler.schedule only drops a DIFFERENT jitter roll of the same reset), so
+  // only the notice's own claim stands between it and a repeat.
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-d3-'));
   fakeClaimResult = 'real';
@@ -5543,7 +5488,7 @@ test('D3: with real claims, two windows and a re-detection still show the offer-
   }
 });
 
-test('D3: another window already announced it: no second notice, but the job is still scheduled', () => {
+test('another window already announced it: no second notice, but the job is still scheduled', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5564,7 +5509,7 @@ test('D3: another window already announced it: no second notice, but the job is 
   }
 });
 
-test('D3: an offer-only limit of unknown type is called a "usage" limit, and names the configured horizon', () => {
+test('an offer-only limit of unknown type is called a "usage" limit, and names the configured horizon', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, maxWaitHours: 30 };
   fakeClaimResult = 'claimed';
@@ -5580,7 +5525,7 @@ test('D3: an offer-only limit of unknown type is called a "usage" limit, and nam
   }
 });
 
-test('D3: with notify off, the offer-only notice is not shown but is logged', () => {
+test('with notify off, the offer-only notice is not shown but is logged', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, notify: false };
   fakeClaimResult = 'claimed';
@@ -5597,7 +5542,7 @@ test('D3: with notify off, the offer-only notice is not shown but is logged', ()
   }
 });
 
-test('D3: an offer-only job firing with autoResume ON launches nothing: it is remembered and Resume Now is offered', async () => {
+test('an offer-only job firing with autoResume ON launches nothing: it is remembered and Resume Now is offered', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5623,7 +5568,7 @@ test('D3: an offer-only job firing with autoResume ON launches nothing: it is re
   }
 });
 
-test('D3: an offer-only fire that lost the claim to another window offers nothing', async () => {
+test('an offer-only fire that lost the claim to another window offers nothing', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'taken';
@@ -5642,7 +5587,7 @@ test('D3: an offer-only fire that lost the claim to another window offers nothin
   }
 });
 
-test('D3: an offer-only job on a session that continued since is skipped silently, like any other fire', async () => {
+test('an offer-only job on a session that continued since is skipped silently, like any other fire', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, autoResume: true, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5663,8 +5608,7 @@ test('D3: an offer-only job on a session that continued since is skipped silentl
 });
 
 // ---------------------------------------------------------------------------
-// Wave D fix round 1: the latest detection decides (Important 1), and the
-// label and article in the notices (Minor 1).
+// The latest detection decides, and the label and article in the notices.
 // ---------------------------------------------------------------------------
 
 const upgradeNotice = (label: string, resumeAtMs: number, hours = 24) =>
@@ -5672,7 +5616,7 @@ const upgradeNotice = (label: string, resumeAtMs: number, hours = 24) =>
   `so it will now resume automatically at ${new Date(resumeAtMs).toLocaleTimeString()}.`;
 const upgradeNotices = () => vscodeFake.info.map((m) => m.message).filter((m) => m.includes('limit again.'));
 
-test('F1: an automatic re-detection upgrades an offer-only job, announced once across two windows', () => {
+test('an automatic re-detection upgrades an offer-only job, announced once across two windows', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-f1-'));
@@ -5710,7 +5654,7 @@ test('F1: an automatic re-detection upgrades an offer-only job, announced once a
   }
 });
 
-test('F1: with notify off the upgrade is logged, not shown', () => {
+test('with notify off the upgrade is logged, not shown', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0, notify: false };
   fakeClaimResult = 'claimed';
@@ -5728,7 +5672,7 @@ test('F1: with notify off the upgrade is logged, not shown', () => {
   }
 });
 
-test('F1 (Minor 1): "an Opus limit", and an inherited property name is no label at all', () => {
+test('"an Opus limit", and an inherited property name is no label at all', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5749,9 +5693,9 @@ test('F1 (Minor 1): "an Opus limit", and an inherited property name is no label 
   }
 });
 
-// Wave D fix round 2, N2: an upgraded job now resumes unattended, so an
-// untrusted folder gets the same trust note and button a fresh schedule does.
-test('F2: an upgrade in an untrusted folder carries the trust note and the "Open Claude to Trust" button', async () => {
+// An upgraded job resumes unattended, so an untrusted folder gets the same
+// trust note and button a fresh schedule does.
+test('an upgrade in an untrusted folder carries the trust note and the "Open Claude to Trust" button', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
@@ -5778,7 +5722,7 @@ test('F2: an upgrade in an untrusted folder carries the trust note and the "Open
   }
 });
 
-test('F2: an upgrade in a trusted folder has no trust note and no button', () => {
+test('an upgrade in a trusted folder has no trust note and no button', () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';

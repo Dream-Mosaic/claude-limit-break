@@ -77,9 +77,7 @@ test('an ordinary user question about limits does not arm a timer', () => {
   }
 });
 
-// Inverted by final fix wave A (A1, final review C1): this used to assert that
-// an UNFLAGGED assistant entry arms a timer. Only an entry Claude Code
-// flagged may; the same text flagged is the first test in this file.
+// Only an entry Claude Code flagged may arm a timer.
 test('an unflagged assistant entry describing a limit does not arm a timer', () => {
   const line = entry({
     type: 'assistant',
@@ -88,13 +86,7 @@ test('an unflagged assistant entry describing a limit does not arm a timer', () 
   assert.equal(make().inspectLine(line, FILE).limit, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Scope filtering (issue #2). The watcher's root stays the whole
-// ~/.claude/projects tree - that default is not up for debate here - but a
-// caller can now inject a narrower scope, and machine mode (what every
-// existing test above exercises via make(), which passes no scope at all)
-// must stay exactly as it is today.
-// ---------------------------------------------------------------------------
+// Scope filtering: with no scope injected the watcher covers the whole projects tree.
 
 test('machine mode is in scope no matter the cwd or folders', () => {
   assert.equal(isInScope(undefined, { mode: 'machine', folders: [] }), true);
@@ -151,12 +143,7 @@ test('a caller passing no scope gets machine mode, unchanged from today', () => 
   assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-// ---------------------------------------------------------------------------
-// Bounded offsets (issue #2). offsets holds one entry per file ever seen and
-// the projects tree only grows, so pruneOffsets decides what survives a pass.
-// It is pure and Map-free - see its doc comment in src/transcriptWatcher.ts
-// for where the bound numbers come from - so this needs no filesystem.
-// ---------------------------------------------------------------------------
+// pruneOffsets is pure and Map-free, so it needs no filesystem.
 
 test('pruneOffsets drops a file no longer on disk', () => {
   const now = 1_000_000;
@@ -193,18 +180,8 @@ test('the idle bound and the hard cap match what the comments in src claim', () 
   assert.equal(MAX_OFFSET_ENTRIES, 2000, 'the hard backstop');
 });
 
-// ---------------------------------------------------------------------------
-// Old notices replayed into a new file.
-//
-// Forking a conversation writes a new transcript that starts with a copy of
-// the old one, every line keeping its original timestamp - observed on
-// 2026-09-23 in ba15a9ef, a fork whose copied lines still carry dates from
-// 2026-09-10. The watcher meets that file for the first time and reads its
-// tail, so last night's "resets 1am" arrived as if it were new. Resolved
-// against the time of reading, 1am had already passed today, so it rolled to
-// tomorrow's 1am and armed an 18-hour countdown for a limit that had lifted
-// ten hours earlier.
-// ---------------------------------------------------------------------------
+// A fork's transcript starts with a copy of the old one, original timestamps
+// intact: notices from it must read as history, not as new limits.
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
 
@@ -253,8 +230,8 @@ test('a fresh notice behaves exactly as it always has', () => {
 });
 
 test('an entry with no timestamp is resolved against now, as before', () => {
-  // Synthetic notices have been seen without the usual bookkeeping fields;
-  // missing a timestamp must not make a live limit disappear.
+  // Synthetic notices can lack the usual bookkeeping fields;
+  // a missing timestamp must not make a live limit disappear.
   const line = entry({
     type: 'user',
     isApiErrorMessage: true,
@@ -292,10 +269,8 @@ test('an old server error replayed into a new file does not trigger a retry', ()
 });
 
 test('a reset that passed minutes ago still resumes, and resumes now', () => {
-  // The other side of the staleness rule. "resets 10am" read at 10:03 is a
-  // session sitting stopped at a limit that has just lifted - it needs
-  // resuming, not ignoring, and it certainly does not need to wait until
-  // 10am tomorrow, which is what rolling the clock time forward used to do.
+  // "resets 10am" read at 10:03 is a limit that has just lifted: resume now,
+  // do not roll the clock time forward to tomorrow.
   const line = entry({
     type: 'user',
     isApiErrorMessage: true,
@@ -308,16 +283,8 @@ test('a reset that passed minutes ago still resumes, and resumes now', () => {
   assert.ok(out.limit.detection.resumeAt.getTime() <= Date.now(), 'and it is due now, not tomorrow');
 });
 
-// ---------------------------------------------------------------------------
-// quotaLimits.resetsAt - the reset time, as a number.
-//
-// Every rate-limit entry in this project's transcripts carries it: 20 of 20
-// in 05690955, checked 2026-09-23. The newest has resetsAt 1790197800, which
-// is 4:10pm America/Chicago, beside text reading "resets 4:10pm
-// (America/Chicago)". Reading the number sidesteps every way the text can be
-// misread - zones, DST (#10), calendar dates, and the rollover past a time
-// that has just gone by.
-// ---------------------------------------------------------------------------
+// quotaLimits.resetsAt: the reset as an epoch number, which avoids misreading
+// the text (zones, DST, dates, rollover past a time that just went by).
 
 const quotaEntry = (resetsAtMs: number, text: string, written = new Date()) =>
   entry({
@@ -351,9 +318,8 @@ test('a structured reset hours in the past is history, not an event', () => {
 });
 
 test('a structured reset that fails its own check does not fall back to a text-parsed one', () => {
-  // The authoritative field is decisive, not merely a first guess: rejected,
-  // it must not hand the decision to the text, even when the text alone
-  // would have resolved to a perfectly valid, currently-due limit.
+  // The structured field is decisive: once rejected, the text must not decide
+  // instead, even if it would resolve to a valid, currently-due limit.
   const written = new Date(Date.now() - 20 * 3_600_000); // 20 hours ago
   const resetsAt = written.getTime() + 3_600_000; // structured: lifted 19 hours ago, history
   // Text, resolved against the same 20-hour-old basis, lands almost exactly
@@ -379,9 +345,8 @@ test('a structured reset time is only trusted on an entry Claude Code flagged', 
 });
 
 test('a flagged entry whose quotaLimits has no numeric resetsAt falls back to the text', () => {
-  // The authoritative field only decides anything when it is actually there
-  // as a number; otherwise a flagged entry is still a limit event and the
-  // text is exactly what today's (pre-quotaLimits) detection already reads.
+  // The structured field only decides when present as a number; otherwise the
+  // text is read.
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -397,7 +362,7 @@ test('a flagged entry whose quotaLimits has no numeric resetsAt falls back to th
   assert.ok(hoursOut > 1.9 && hoursOut < 2.1, `expected ~2h out, got ${hoursOut.toFixed(2)}h`);
 });
 
-test('a structured reset beyond maxWait is offer-only, the same as a parsed one (wave D, policy B)', () => {
+test('a structured reset beyond maxWait is offer-only, the same as a parsed one', () => {
   // A structured reset gets exactly the outcomes a parsed one does. make()
   // reports 24h, so 30 hours out is offered at the reset, never automatic.
   const resetsAt = Date.now() + 30 * 3_600_000;
@@ -405,17 +370,9 @@ test('a structured reset beyond maxWait is offer-only, the same as a parsed one 
   assert.equal(out.limit?.detection.offerOnly, true, 'a 30-hour-out structured reset must not arm a 24h-capped automatic resume');
 });
 
-// ---------------------------------------------------------------------------
-// RESET_GRACE_MS boundary, both sides. Exercised through quotaLimits.resetsAt
-// because it is a bare epoch comparison against the real clock, with no
-// zone/DST/rollover machinery in the way. The exact millisecond edge is
-// pinned separately, deterministically, against a fixed `now` in
-// resolveStructuredReset's own unit tests (test/parsers/limitParser.test.ts) -
-// resetsAt here is epoch *seconds* and the real clock is genuinely running
-// between this line and the moment inspectLine reads Date.now(), so this
-// integration-level pair uses a few seconds of headroom on each side rather
-// than the exact edge, to demonstrate the wiring without being racy.
-// ---------------------------------------------------------------------------
+// RESET_GRACE_MS boundary, both sides, via quotaLimits.resetsAt. The real clock
+// keeps running, so this uses seconds of headroom; the exact edge is pinned in
+// limitParser.test.ts.
 
 const GRACE_TEST_MARGIN_MS = 5_000;
 
@@ -431,11 +388,7 @@ test('RESET_GRACE_MS boundary: just past the grace window is history', () => {
   assert.equal(out.limit, undefined, 'a reset just past the grace window must not resume');
 });
 
-// ---------------------------------------------------------------------------
-// MAX_OVERLOAD_AGE_MS boundary, both sides. Same headroom rationale as above:
-// the entry's timestamp is fixed at construction, but the age comparison
-// itself happens against Date.now() inside inspectLine a moment later.
-// ---------------------------------------------------------------------------
+// MAX_OVERLOAD_AGE_MS boundary, both sides, with headroom for the running clock.
 
 const overloadLine = (age: number) =>
   entry({
@@ -456,9 +409,7 @@ test('MAX_OVERLOAD_AGE_MS boundary: just past the age limit does not retry', () 
   assert.equal(out.overload, undefined, 'an overload just past MAX_OVERLOAD_AGE_MS must not retry');
 });
 
-// The new sleep/stream-interruption render must obey the same age rule as
-// every other overload render (Task 4a constraint: "the new overload renders
-// obey it too").
+// The sleep/stream-interruption render obeys the same age rule as every other overload render.
 const sleepLine = (age: number) =>
   entry({
     type: 'assistant',
@@ -475,20 +426,13 @@ test('the sleep-interruption render also obeys MAX_OVERLOAD_AGE_MS', () => {
   assert.equal(stale.overload, undefined, 'an old sleep-interruption notice must not retry');
 });
 
-// ---------------------------------------------------------------------------
-// Task 3 (synthesis A3): untrusted text that merely LOOKS like a limit
-// banner must not arm a timer. Three real false positives from 2026-09-23:
-// a subagent note quoting a banner, a usage-percentage status line, and a
-// `grep` result quoting a banner. Each is used here verbatim (or, for the
-// grep case, a realistic reconstruction - the brief gives no exact text) as
-// a negative case, alongside a flagged real banner as a positive case.
-// ---------------------------------------------------------------------------
+// Untrusted text that merely looks like a limit banner must not arm a timer;
+// a flagged real banner does.
 
 const SUBAGENT_FILE =
   '/home/u/.claude/projects/c--projects-example/subagents/9f1e2d3c-4b1a-4c9e-8a1e-2a5d6e8c9999.jsonl';
 
 test('a subagent file never arms a limit timer, even quoting a real banner verbatim (real false positive)', () => {
-  // Captured verbatim, 2026-09-23, from a subagent checkpoint note.
   const line = entry({
     type: 'assistant',
     message: { content: '…You have used up your monthly limit. Try again in 3 hours' },
@@ -496,30 +440,16 @@ test('a subagent file never arms a limit timer, even quoting a real banner verba
   assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
 });
 
-test('a subagent file still reports turn-end and overload - only limit detection is skipped', () => {
-  // The veto is scoped to limits: a subagent that hits the limit stops its
-  // parent, whose own transcript records it, but a subagent's turn ending or
-  // failing over is still real information this watcher already reports.
+test('a subagent file still reports turn-end; a limit or overload there is left to the parent', () => {
   const turnEndLine = entry({ type: 'assistant', message: { stop_reason: 'end_turn', content: 'Done.' } });
   assert.ok(
     make().inspectLine(turnEndLine, SUBAGENT_FILE).inputNeeded,
     'turn-end must still be reported for a subagent file',
   );
-
-  const overloadLine2 = entry({
-    type: 'assistant',
-    isApiErrorMessage: true,
-    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
-  });
-  assert.ok(
-    make().inspectLine(overloadLine2, SUBAGENT_FILE).overload,
-    'overload must still be reported for a subagent file',
-  );
 });
 
 test('a percentage-usage status line does not arm a timer (real false positive)', () => {
-  // Captured verbatim, 2026-09-23. Non-flagged, non-user entry: the shape
-  // that reaches the untrusted candidate loop today.
+  // Non-flagged, non-user entry: the shape that reaches the untrusted candidate loop.
   const line = entry({
     type: 'assistant',
     message: { content: "You've used 91% of your session limit · resets 12:40pm" },
@@ -537,11 +467,8 @@ test('the same percentage text still arms once Claude Code flags the entry (posi
 });
 
 test('a grep result quoting a banner, inside a tool_result block, does not arm a timer (real false positive)', () => {
-  // Reconstructed: the brief names this false positive but gives no exact
-  // text. `error` (not isApiErrorMessage/rate_limit) makes the entry an
-  // apiError without flagging it as a rate-limit event, so it still reaches
-  // the untrusted candidate loop, same as a genuine failed-tool-call entry
-  // would.
+  // `error` without isApiErrorMessage/rate_limit makes an apiError that is not
+  // flagged, so it reaches the untrusted candidate loop.
   const line = entry({
     type: 'user',
     error: 'tool execution failed',
@@ -607,38 +534,49 @@ test('a flagged real banner still arms a timer (positive case)', () => {
   assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-// ---------------------------------------------------------------------------
-// Fix round 1: the subagent-file veto must not swallow a FLAGGED entry. A
-// subagent that genuinely hits the limit still writes Claude Code's own
-// rate-limit marker into its own file, and that must still arm - only an
-// unflagged note merely quoting what happened is vetoed. Flagged entries are
-// exempt from every veto in this module, subagent-file included.
-// ---------------------------------------------------------------------------
+// A subagent's failure is reported back to the parent, which writes its own flagged entry,
+// so a flagged entry in a subagents/ file arms nothing; the parent file still does.
 
-test('a flagged banner in a subagents/ file still arms a timer', () => {
+test('a flagged banner in a subagents/ file does not arm a timer, but the same entry in the parent file does', () => {
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
     message: { content: "You've hit your session limit · resets 12:40am (America/Chicago)" },
   });
-  assert.ok(make().inspectLine(line, SUBAGENT_FILE).limit, 'a flagged entry must not be dropped by the subagent-file veto');
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-test('a flagged quotaLimits.resetsAt entry in a subagents/ file still arms a timer', () => {
+test('a flagged quotaLimits.resetsAt entry in a subagents/ file does not arm a timer, but the parent file does', () => {
   const resetsAt = Date.now() + 2 * 3_600_000;
-  const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours"), SUBAGENT_FILE);
-  assert.ok(out.limit, 'a flagged quotaLimits.resetsAt entry must not be dropped by the subagent-file veto');
+  const line = quotaEntry(resetsAt, "You've hit your session limit · resets in 2 hours");
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  const out = make().inspectLine(line, FILE);
+  assert.ok(out.limit);
   assert.equal(Math.round(out.limit.detection.resumeAt.getTime() / 1000), Math.floor(resetsAt / 1000));
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a: the three new overload-detection rules, wired through inspectLine.
-// ---------------------------------------------------------------------------
+test('a flagged overload in a subagents/ file arms nothing, but the parent file still does', () => {
+  const line = entry({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: { content: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' },
+  });
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
+  assert.ok(make().inspectLine(line, FILE).overload);
+});
+
+test('a compaction limit line in a subagents/ file arms nothing', () => {
+  const line = entry(compactionEntry());
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).limit, undefined);
+  assert.ok(make().inspectLine(line, FILE).limit, 'control: the parent file arms');
+});
+
+// Overload-detection rules, wired through inspectLine.
 
 test('an in-flight retry does not report overload, even from a flagged entry', () => {
   // Claude Code is already retrying: a flagged entry that carries the
-  // countdown is still not a stop. (Every "Retrying in" form is in the next
-  // test; only flagged entries reach overload detection at all - R3.)
+  // countdown is still not a stop.
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -647,7 +585,7 @@ test('an in-flight retry does not report overload, even from a flagged entry', (
   assert.equal(make().inspectLine(line, FILE).overload, undefined);
 });
 
-test('every "Retrying in" form is ignored, with or without an attempt counter (Task 4c R2)', () => {
+test('every "Retrying in" form is ignored, with or without an attempt counter', () => {
   for (const text of [
     'API Error (529 {"type":"error"}) · Retrying in 12s',
     'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
@@ -661,8 +599,7 @@ test('every "Retrying in" form is ignored, with or without an attempt counter (T
 });
 
 test('the transient-429 render (a flagged entry) schedules an overload retry, not a limit timer', () => {
-  // Ruling 1: this message must never arm a usage-limit timer, on either
-  // path. Routing it to overload gives it the overload treatment instead.
+  // Must never arm a usage-limit timer, on either path; it routes to overload.
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -688,13 +625,8 @@ test('a sleep-interruption render (a flagged entry) schedules an overload retry'
   assert.equal(out.overload.detection.rule, 'stream-interrupted');
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a constraint: the untrusted-text rules from Task 3 (quoted text, tool
-// results) must keep working for the new overload rules too - a quoted or
-// tool-result copy of any of these strings on the untrusted path must not
-// schedule anything. Flagged entries stay exempt, same as every other veto
-// in this module.
-// ---------------------------------------------------------------------------
+// The untrusted-text vetoes (quoted text, tool results) apply to the overload
+// rules too. Flagged entries stay exempt.
 
 test('a quoted copy of the sleep-interruption render inside a tool_result block does not schedule an overload retry', () => {
   const line = entry({
@@ -743,20 +675,12 @@ test('a flagged entry is exempt from the new tool-result/quoted vetoes on the ov
   );
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a fix round 1 (review finding #1, Important): the quotaLimits branch
-// (line ~452) used to return before any text was ever read, so a flagged
-// transient-429 entry that also happens to carry quotaLimits (the research
-// doc says every rate_limit entry does) was read as a usage limit instead of
-// routed to overload - exactly the outcome ruling 1 forbids. Ruling: skip
-// the quotaLimits branch outright when the entry's own text is a
-// transient-429 render, regardless of quotaLimits.status.
-// ---------------------------------------------------------------------------
+// A flagged transient-429 entry that also carries quotaLimits routes to overload:
+// the quotaLimits branch is skipped when the entry's own text is a transient-429
+// render, whatever quotaLimits.status says.
 
-test('a flagged transient-429 entry WITH quotaLimits still routes to overload, not a limit timer (fix round 1, finding #1)', () => {
-  // Verbatim shape from the review finding: quotaLimits.status "allowed" (not
-  // "rejected"), a plausible future resetsAt - the kind of entry Claude Code
-  // could plausibly write for a transient-429.
+test('a flagged transient-429 entry WITH quotaLimits still routes to overload, not a limit timer', () => {
+  // quotaLimits.status "allowed" with a plausible future resetsAt.
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -775,23 +699,16 @@ test('a flagged transient-429 entry WITH quotaLimits still routes to overload, n
 });
 
 test('an ordinary flagged quotaLimits entry is unaffected by the transient-429 skip', () => {
-  // Positive control: a genuine limit banner with quotaLimits must keep
-  // winning via the structured field, exactly as before.
+  // Positive control: a genuine limit banner with quotaLimits still wins via the structured field.
   const resetsAt = Date.now() + 2 * 3_600_000;
   const out = make().inspectLine(quotaEntry(resetsAt, "You've hit your session limit · resets in 5 hours"), FILE);
   assert.ok(out.limit, 'a genuine quotaLimits entry must still arm via the structured field');
   assert.equal(out.overload, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a fix round 1 (review finding #3, Important): the subagent-file veto
-// was applied to the limit path (line ~446) but never extended to the
-// overload path's new untrusted-text vetoes, so an unflagged assistant note
-// in a subagents/ file quoting one of the new overload renders still armed a
-// retry. Flagged entries stay exempt, same as every other veto here.
-// ---------------------------------------------------------------------------
+// Subagent files arm no overload, flagged or not.
 
-test('an unflagged assistant note in a subagents/ file does not schedule an overload retry (fix round 1, finding #3)', () => {
+test('an unflagged assistant note in a subagents/ file does not schedule an overload retry', () => {
   const line = entry({
     type: 'assistant',
     message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
@@ -799,28 +716,22 @@ test('an unflagged assistant note in a subagents/ file does not schedule an over
   assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
 });
 
-test('a flagged banner in a subagents/ file still schedules an overload retry (positive control)', () => {
+test('a flagged banner in a subagents/ file does not schedule an overload retry either', () => {
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
     message: { content: 'API Error: Your computer went to sleep mid-response. The response above may be incomplete.' },
   });
-  assert.ok(
-    make().inspectLine(line, SUBAGENT_FILE).overload,
-    'a flagged entry must not be dropped by the subagent-file veto',
-  );
+  assert.equal(make().inspectLine(line, SUBAGENT_FILE).overload, undefined);
+  assert.ok(make().inspectLine(line, FILE).overload, 'control: the parent file schedules');
 });
 
-// ---------------------------------------------------------------------------
-// Task 4c (R1): every transient render Claude Code documents, as the text of
-// the flagged entry Claude Code writes it in (shape from the 2.1.282 binary,
-// research-api-errors-binary.md Q1, and GitHub #64030 / #68816), is an
-// overload - never a limit.
-// ---------------------------------------------------------------------------
+// Every transient render Claude Code documents, as the text of the flagged entry
+// it is written in, is an overload, never a limit.
 
 const STATUS_LINK = 'If it persists, check https://status.claude.com.';
 
-/** [render, `error`, `apiErrorStatus`] as the binary writes each. */
+/** [render, `error`, `apiErrorStatus`] as Claude Code writes each. */
 const FLAGGED_RENDERS: [string, string, number | undefined][] = [
   [`API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment. ${STATUS_LINK}`, 'server_error', 529],
   [`API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`, 'server_error', 500],
@@ -862,10 +773,8 @@ for (const [render, error, status] of FLAGGED_RENDERS) {
 }
 
 test('a flagged 429 capacity render WITH rejected quotaLimits is still not a limit', () => {
-  // The binary attaches quotaLimits only to a rejected usage-limit 429 (research
-  // Q2), so Claude Code never writes this entry; the skip is belt and braces,
-  // and this pins that it holds for the "Request rejected (429)" render as it
-  // does for the transient-429 one.
+  // Claude Code never writes quotaLimits on this entry; the skip is belt and
+  // braces, and must hold for the "Request rejected (429)" render too.
   const line = flaggedEntry(
     `API Error: Request rejected (429) · this may be a temporary capacity issue. ${STATUS_LINK}`,
     'rate_limit',
@@ -877,7 +786,7 @@ test('a flagged 429 capacity render WITH rejected quotaLimits is still not a lim
   assert.ok(out.overload);
 });
 
-// R1b: not transient, so no resume - a flagged entry included.
+// Not transient, so no resume - a flagged entry included.
 const NOT_TRANSIENT: [string, string, number][] = [
   ['API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', 'authentication_failed', 401],
   ["There's an issue with the selected model (claude-x). It may not exist or you may not have access to it. Run --model to pick a different model.", 'invalid_request', 404],
@@ -892,14 +801,8 @@ for (const [text, error, status] of NOT_TRANSIENT) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Task 4c (R3): overloads are read only from an entry Claude Code marked as an
-// API error. Every error message the binary writes is built with
-// isApiErrorMessage: true (research Q1), and a scan of the 168 synthetic
-// entries in ~/.claude/projects found 138 flagged (all rate_limit / 429) and
-// 30 unflagged ("No response requested."); none of the unflagged carries an
-// error render. An unflagged entry is someone TALKING ABOUT an error.
-// ---------------------------------------------------------------------------
+// Overloads are read only from an entry Claude Code marked as an API error; an
+// unflagged entry is someone TALKING ABOUT an error.
 
 const RENDER_ON_ITS_OWN_LINE = `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`;
 
@@ -954,7 +857,7 @@ test('a flagged entry keeps full recall, with no API Error head needed', () => {
   assert.equal(make().inspectLine(line, FILE).overload?.detection.rule, 'timeout');
 });
 
-test('an overload hit carries its entry timestamp, the identity every window shares (final review I3)', () => {
+test('an overload hit carries its entry timestamp, the identity every window shares', () => {
   const ts = new Date(Date.now() - 60_000).toISOString();
   const line = entry({ type: 'assistant', isApiErrorMessage: true, timestamp: ts, message: { content: 'API Error: 529 Overloaded' } });
   assert.equal(make().inspectLine(line, FILE).overload?.entryTimestampMs, new Date(ts).getTime());
@@ -967,12 +870,9 @@ test('an overload hit from an entry with no timestamp carries none', () => {
   assert.equal(out.overload.entryTimestampMs, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Task 4c (R4): the limit type travels with the detection, so the fire
-// decision can tell a limit Claude Code's native auto-continue covers
-// (five_hour) from one it never continues (weekly, Opus, Sonnet, Fable,
-// usage credit - research-api-errors-binary.md Q4).
-// ---------------------------------------------------------------------------
+// The limit type travels with the detection, so the fire decision can tell limits
+// native auto-continue covers (five_hour) from those it never continues (weekly,
+// Opus, Sonnet, Fable, usage credit).
 
 const typedQuotaEntry = (rateLimitType: unknown, text = "You've hit your limit · resets in 5 hours") =>
   entry({
@@ -1043,9 +943,8 @@ test('the text path leaves the type undefined when the notice names none', () =>
 });
 
 
-// Fix round 1 (Task 4c review, minor 2 and 4): a quotaLimits.rateLimitType
-// that is empty reads as absent, and an absent one falls back to the label in
-// the entry's own text.
+// An empty quotaLimits.rateLimitType reads as absent; an absent one falls back
+// to the label in the entry's own text.
 test('a quotaLimits entry with an empty rateLimitType leaves the type undefined', () => {
   const out = make().inspectLine(typedQuotaEntry(''), FILE);
   assert.equal(out.limit?.detection.rule, 'quota-limits');
@@ -1071,13 +970,8 @@ test('a quotaLimits entry whose text names no type and whose field has none leav
   assert.equal(Object.hasOwn(out.limit!.detection, 'rateLimitType'), false);
 });
 
-// ---------------------------------------------------------------------------
-// Final fix wave A, A1 (final review C1): a usage limit is read only from an
-// entry Claude Code flagged (isApiErrorMessage: true). Every limit message in
-// the binary is built by the constructor that sets the flag (research Q1),
-// and all 138 limit entries on this machine carry it (task-4c-report.md).
-// These three sentences each armed a timer on the compiled f40ee41 code.
-// ---------------------------------------------------------------------------
+// A usage limit is read only from an entry Claude Code flagged
+// (isApiErrorMessage: true); unflagged prose must not arm a timer.
 
 const C1_PROSE = [
   "The session hit its usage limit and resets at 2:10am, so I'll pick this up after that.",
@@ -1086,13 +980,13 @@ const C1_PROSE = [
 ];
 
 for (const prose of C1_PROSE) {
-  test(`unflagged assistant text does not arm a limit (final review C1): ${prose.slice(0, 40)}`, () => {
+  test(`unflagged assistant text does not arm a limit: ${prose.slice(0, 40)}`, () => {
     const line = entry({ type: 'assistant', message: { content: [{ type: 'text', text: prose }] } });
     assert.equal(make().inspectLine(line, FILE).limit, undefined, prose);
   });
 }
 
-test('an unflagged thinking block does not arm a limit (final review C1)', () => {
+test('an unflagged thinking block does not arm a limit', () => {
   const line = entry({
     type: 'assistant',
     message: { content: [{ type: 'thinking', thinking: C1_PROSE[1], signature: 'sig' }] },
@@ -1100,7 +994,7 @@ test('an unflagged thinking block does not arm a limit (final review C1)', () =>
   assert.equal(make().inspectLine(line, FILE).limit, undefined);
 });
 
-test('an unflagged tool_use input does not arm a limit (final review C1)', () => {
+test('an unflagged tool_use input does not arm a limit', () => {
   const line = entry({
     type: 'assistant',
     message: {
@@ -1117,7 +1011,7 @@ test('an unflagged entry marked only by error: rate_limit or status 429 does not
   }
 });
 
-test('a flagged real render still arms a limit (positive control for C1)', () => {
+test('a flagged real render still arms a limit (positive control)', () => {
   const line = entry({
     type: 'assistant',
     isApiErrorMessage: true,
@@ -1128,9 +1022,8 @@ test('a flagged real render still arms a limit (positive control for C1)', () =>
   assert.ok(make().inspectLine(line, FILE).limit);
 });
 
-// A2 (final review M1): an overload, too, only from isApiErrorMessage: true -
-// a bare `error` string or a 5xx status no longer admits an entry.
-test('an unflagged entry with a top-level error string or a 529 status does not arm an overload (M1)', () => {
+// An overload, too, only from isApiErrorMessage: true - a bare `error` string or a 5xx status does not admit an entry.
+test('an unflagged entry with a top-level error string or a 529 status does not arm an overload', () => {
   for (const marks of [{ error: 'server_error' }, { apiErrorStatus: 529 }, { status: 529 }]) {
     const line = entry({ type: 'assistant', ...marks, message: { content: 'API Error: 529 Overloaded' } });
     const out = make().inspectLine(line, FILE);
@@ -1139,15 +1032,10 @@ test('an unflagged entry with a top-level error string or a 529 status does not 
   }
 });
 
-// ---------------------------------------------------------------------------
-// Wave C, C1: a usage limit hit DURING COMPACTION. `/compact` that fails on a
-// limit is written UNFLAGGED - a `system`/`local_command` entry whose content
-// is `<local-command-stderr>Error during compaction: You've hit your ...`.
-// Real lines from this machine (05690955 line 1496, 2.1.267; 1e8a6fb6 lines
-// 5443 and 10360), private text trimmed, structural fields kept. Claude Code
-// writes a `system` entry itself: model prose, a tool result or a user paste
-// can never be one, so admitting exactly this shape keeps the C1 hole shut.
-// ---------------------------------------------------------------------------
+// A usage limit hit DURING COMPACTION: a failed /compact is written UNFLAGGED as a
+// `system`/`local_command` entry whose content is
+// `<local-command-stderr>Error during compaction: You've hit your ...`. Only Claude
+// Code writes `system` entries, so admitting exactly this shape is safe.
 
 const COMPACT_TEXT = "You've hit your session limit · resets 8:30pm (America/Chicago)";
 const compactContent = (text = COMPACT_TEXT) => `<local-command-stderr>Error during compaction: ${text}</local-command-stderr>`;
@@ -1172,7 +1060,7 @@ const compactionEntry = (over: Record<string, unknown> = {}, ts = new Date(Date.
   ...over,
 });
 
-test('C1: a usage limit hit during compaction arms a limit, typed from its label', () => {
+test('a usage limit hit during compaction arms a limit, typed from its label', () => {
   const out = make().inspectLine(entry(compactionEntry()), FILE);
   assert.ok(out.limit, 'the unflagged compaction failure must be detected');
   assert.equal(out.limit.detection.rateLimitType, 'five_hour', 'session -> five_hour');
@@ -1185,46 +1073,46 @@ test('C1: a usage limit hit during compaction arms a limit, typed from its label
   assert.ok(!out.limit.detection.text.includes('Error during compaction'), 'and so is the prefix');
 });
 
-test('C1: the compaction text is read as trusted, so a relative reset works too', () => {
+test('the compaction text is read as trusted, so a relative reset works too', () => {
   const out = make().inspectLine(entry(compactionEntry({ content: compactContent("You've hit your weekly limit · resets in 5 hours") })), FILE);
   assert.ok(out.limit);
   assert.equal(out.limit.detection.rateLimitType, 'seven_day');
 });
 
-test('C1: an unrecognised limit label leaves rateLimitType undefined', () => {
+test('an unrecognised limit label leaves rateLimitType undefined', () => {
   const out = make().inspectLine(entry(compactionEntry({ content: compactContent("You've hit your org limit · resets in 5 hours") })), FILE);
   assert.ok(out.limit);
   assert.equal(Object.hasOwn(out.limit.detection, 'rateLimitType'), false);
 });
 
-test('C1: a fork copy of an old compaction failure is history, not a limit (stale-reset rule)', () => {
-  // The real timestamp from 05690955 line 1496: that 8:30pm reset passed weeks ago.
+test('a fork copy of an old compaction failure is history, not a limit (stale-reset rule)', () => {
+  // Stale timestamp: that 8:30pm reset passed long ago.
   const out = make().inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE);
   assert.equal(out.limit, undefined);
 });
 
 // One mutation per match condition: each of these is the real entry with
 // exactly one condition broken.
-test('C1: type must be system', () => {
+test('type must be system', () => {
   for (const type of ['user', 'assistant', 'progress']) {
     assert.equal(make().inspectLine(entry(compactionEntry({ type })), FILE).limit, undefined, type);
   }
 });
 
-test('C1: subtype must be local_command', () => {
+test('subtype must be local_command', () => {
   for (const subtype of ['informational', 'api_error', 'compact_boundary', undefined]) {
     assert.equal(make().inspectLine(entry(compactionEntry({ subtype })), FILE).limit, undefined, String(subtype));
   }
 });
 
-test('C1: content must be a string', () => {
+test('content must be a string', () => {
   const blocks = [{ type: 'text', text: compactContent() }];
   for (const content of [blocks, { text: compactContent() }, 42, null]) {
     assert.equal(make().inspectLine(entry(compactionEntry({ content })), FILE).limit, undefined, JSON.stringify(content));
   }
 });
 
-test('C1: content must START with the stderr tag and the compaction prefix', () => {
+test('content must START with the stderr tag and the compaction prefix', () => {
   const bad = [
     // stdout, not stderr
     `<local-command-stdout>Error during compaction: ${COMPACT_TEXT}</local-command-stdout>`,
@@ -1242,14 +1130,14 @@ test('C1: content must START with the stderr tag and the compaction prefix', () 
   }
 });
 
-test('C1: the text must name a usage limit', () => {
+test('the text must name a usage limit', () => {
   for (const text of ['Conversation too long. Press esc twice to go up a few messages and try again.', 'Request timed out after 120 seconds', 'Not enough messages to compact.']) {
     const out = make().inspectLine(entry(compactionEntry({ content: compactContent(text) })), FILE);
     assert.equal(out.limit, undefined, text);
   }
 });
 
-test('C1: user prose, an assistant message and a tool result quoting the compaction line never arm', () => {
+test('user prose, an assistant message and a tool result quoting the compaction line never arm', () => {
   const quoted = compactContent();
   const shapes = [
     { type: 'user', message: { role: 'user', content: quoted } },
@@ -1263,7 +1151,7 @@ test('C1: user prose, an assistant message and a tool result quoting the compact
   }
 });
 
-test('C1: a limit-named compaction failure with no parseable reset time arms nothing and warns, naming session and text', () => {
+test('a limit-named compaction failure with no parseable reset time arms nothing and warns, naming session and text', () => {
   const warnings: string[] = [];
   const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
   const out = w.inspectLine(entry(compactionEntry({ content: compactContent("You've hit your session limit") })), FILE);
@@ -1274,11 +1162,11 @@ test('C1: a limit-named compaction failure with no parseable reset time arms not
   assert.match(warnings[0]!, /no parseable reset time/);
 });
 
-test('C1: a STALE reset is history and does not claim "no parseable reset time"', () => {
+test('a STALE reset is history and does not claim "no parseable reset time"', () => {
   const warnings: string[] = [];
   const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
   assert.equal(w.inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE).limit, undefined);
-  // Wave D, D4: never silent - but as history, once per file, not as a miss.
+  // Never silent - but as history, once per file, not as a miss.
   assert.equal(w.inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE).limit, undefined);
   assert.equal(warnings.length, 1, `saw ${JSON.stringify(warnings)}`);
   assert.match(warnings[0]!, /^Usage limit during compaction in session 0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234 reset at /);
@@ -1286,22 +1174,19 @@ test('C1: a STALE reset is history and does not claim "no parseable reset time"'
   assert.doesNotMatch(warnings[0]!, /no parseable reset time/);
 });
 
-test('C1: an unrelated compaction failure does not warn about a reset time', () => {
+test('an unrelated compaction failure does not warn about a reset time', () => {
   const warnings: string[] = [];
   const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
   w.inspectLine(entry(compactionEntry({ content: compactContent('Conversation too long.') })), FILE);
   assert.deepEqual(warnings, []);
 });
 
-test('C1: outside the watch scope a compaction failure is ignored like any other entry', () => {
+test('outside the watch scope a compaction failure is ignored like any other entry', () => {
   const w = new TranscriptWatcher(() => 24, () => 5, silent, () => ({ mode: 'workspace', folders: ['C:/elsewhere'] }));
   assert.equal(w.inspectLine(entry(compactionEntry()), FILE).limit, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Wave C, C4: Claude Code's native auto-continue status lines are observed.
-// Real armed and cancelled lines from fd493448 (2026-09-23, v2.1.278).
-// ---------------------------------------------------------------------------
+// Claude Code's native auto-continue status lines are observed (armed and cancelled).
 
 const nativeLine = (content: unknown, over: Record<string, unknown> = {}) =>
   entry({
@@ -1326,7 +1211,7 @@ const NATIVE_ARMED = 'Usage limit reached · continuing automatically at 11:10am
 const NATIVE_CANCELLED =
   'Automatic continue cancelled · Claude Code exited during the wait, so the task will not resume on its own when the usage limit resets (send a prompt after the reset to continue)';
 
-test('C4: inspectLine reports armed, cancelled and fired status lines, and arms nothing from them', () => {
+test('inspectLine reports armed, cancelled and fired status lines, and arms nothing from them', () => {
   const cases: [string, string][] = [
     [NATIVE_ARMED, 'armed'],
     ['Usage limit reached again · continuing automatically at 4:10pm · esc or type to cancel', 'armed'],
@@ -1344,7 +1229,7 @@ test('C4: inspectLine reports armed, cancelled and fired status lines, and arms 
   }
 });
 
-test('C4: the same words in a user entry, an assistant entry or another subtype are not status', () => {
+test('the same words in a user entry, an assistant entry or another subtype are not status', () => {
   const shapes = [
     nativeLine(NATIVE_ARMED, { type: 'user' }),
     nativeLine(NATIVE_ARMED, { type: 'assistant' }),
@@ -1357,12 +1242,12 @@ test('C4: the same words in a user entry, an assistant entry or another subtype 
   }
 });
 
-test('C4: outside the watch scope a status line is ignored like any other entry', () => {
+test('outside the watch scope a status line is ignored like any other entry', () => {
   const w = new TranscriptWatcher(() => 24, () => 5, silent, () => ({ mode: 'workspace', folders: ['C:/elsewhere'] }));
   assert.equal(w.inspectLine(nativeLine(NATIVE_ARMED), FILE).nativeStatus, undefined);
 });
 
-test('C4: a scan fires onNativeStatus for each status line, ahead of a limit in the same batch', async () => {
+test('a scan fires onNativeStatus for each status line, ahead of a limit in the same batch', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
   try {
     const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
@@ -1386,7 +1271,7 @@ test('C4: a scan fires onNativeStatus for each status line, ahead of a limit in 
   }
 });
 
-test('C4: a scan of status lines alone reports every one, in order', async () => {
+test('a scan of status lines alone reports every one, in order', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
   try {
     const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
@@ -1404,7 +1289,7 @@ test('C4: a scan of status lines alone reports every one, in order', async () =>
   }
 });
 
-test('C4: with two limits in one batch the FIRST still decides (unchanged by the status-line pass)', async () => {
+test('with two limits in one batch the FIRST still decides (unchanged by the status-line pass)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-native-scan-'));
   try {
     const file = path.join(dir, '0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234.jsonl');
@@ -1422,7 +1307,7 @@ test('C4: with two limits in one batch the FIRST still decides (unchanged by the
   }
 });
 
-test('C4: the /rate-limit-options "Don\'t continue automatically" user entry and the log-only lines are reported too (derived from the 2.1.285 binary)', () => {
+test('the /rate-limit-options "Don\'t continue automatically" user entry and the log-only lines are reported too (binary-derived strings)', () => {
   const wait = 'Automatic continue cancelled. Your session will wait for you instead; /rate-limit-options can arm it again.';
   const userEntry = entry({
     type: 'user',
@@ -1437,13 +1322,8 @@ test('C4: the /rate-limit-options "Don\'t continue automatically" user entry and
   assert.equal(other.nativeStatus?.status.kind, 'other');
 });
 
-// ---------------------------------------------------------------------------
-// Wave C fix round 1.
-// I1: the batch-priority guarantees of scanFile, which the wave C restructure
-// (no early return at the first limit) now holds up by the placement of the
-// `if (limit)` block alone. M1: one bad line cannot drop a recorded limit.
-// M3: a flagged entry that reads as a usage limit but yields nothing warns.
-// ---------------------------------------------------------------------------
+// scanFile batch priority: a limit outranks everything else in the batch, and one
+// bad line cannot drop a recorded limit.
 
 type ScanCounts = { hits: number; overloads: number; inputs: number };
 
@@ -1470,37 +1350,37 @@ const batchLimit = () =>
   entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', timestamp: new Date().toISOString(), message: { content: 'Claude AI usage limit reached. Try again in 5 hours' } });
 const batchTurnEnd = () => entry({ type: 'assistant', cwd: 'C:/p', message: { stop_reason: 'end_turn', content: 'Done.' } });
 
-test('I1: a limit outranks every overload and turn end in the same batch', async () => {
+test('a limit outranks every overload and turn end in the same batch', async () => {
   const counts = await scanBatch([batchOverload(), batchLimit(), batchOverload(), batchTurnEnd()]);
   assert.deepEqual(counts, { hits: 1, overloads: 0, inputs: 0 });
 });
 
-test('I1: a limit that comes first or last in the batch outranks the same way', async () => {
+test('a limit that comes first or last in the batch outranks the same way', async () => {
   assert.deepEqual(await scanBatch([batchLimit(), batchOverload(), batchTurnEnd()]), { hits: 1, overloads: 0, inputs: 0 });
   assert.deepEqual(await scanBatch([batchTurnEnd(), batchOverload(), batchLimit()]), { hits: 1, overloads: 0, inputs: 0 });
 });
 
-test('I1: an overload in the batch suppresses the turn end ("your turn" would be a lie)', async () => {
+test('an overload in the batch suppresses the turn end ("your turn" would be a lie)', async () => {
   const counts = await scanBatch([batchOverload(), batchTurnEnd()]);
   assert.deepEqual(counts, { hits: 0, overloads: 1, inputs: 0 });
 });
 
-test('I1: a turn end on its own still reports input needed (control)', async () => {
+test('a turn end on its own still reports input needed (control)', async () => {
   assert.deepEqual(await scanBatch([batchTurnEnd()]), { hits: 0, overloads: 0, inputs: 1 });
 });
 
-test('M1: a line that is valid JSON but not an object is not an entry', () => {
+test('a line that is valid JSON but not an object is not an entry', () => {
   for (const line of ['null', '7', '"text"', '[1,2]', 'true']) {
     assert.deepEqual(make().inspectLine(line, FILE), {}, line);
   }
 });
 
-test('M1: a limit already recorded in a batch still fires when a later line is JSON null', async () => {
+test('a limit already recorded in a batch still fires when a later line is JSON null', async () => {
   const counts = await scanBatch([batchLimit(), 'null', '[1]', batchTurnEnd()]);
   assert.deepEqual(counts, { hits: 1, overloads: 0, inputs: 0 });
 });
 
-test('M1: a line that makes inspectLine throw is skipped and logged, and the batch still fires its limit', async () => {
+test('a line that makes inspectLine throw is skipped and logged, and the batch still fires its limit', async () => {
   const warnings: string[] = [];
   const w = new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
   const real = w.inspectLine.bind(w);
@@ -1516,7 +1396,6 @@ test('M1: a line that makes inspectLine throw is skipped and logged, and the bat
   assert.match(warnings[0]!, /Cannot inspect a line/);
 });
 
-// M3 -------------------------------------------------------------------------
 const warnWatcher = () => {
   const warnings: string[] = [];
   return { warnings, w: new TranscriptWatcher(() => 24, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} }) };
@@ -1524,7 +1403,7 @@ const warnWatcher = () => {
 const flaggedText = (text: string, over: Record<string, unknown> = {}) =>
   entry({ type: 'assistant', isApiErrorMessage: true, cwd: 'C:/p', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text }] }, ...over });
 
-test('M3: a flagged entry that reads as a usage limit with no parseable reset time arms nothing and warns', () => {
+test('a flagged entry that reads as a usage limit with no parseable reset time arms nothing and warns', () => {
   const { w, warnings } = warnWatcher();
   const out = w.inspectLine(flaggedText("You've hit your session limit"), FILE);
   assert.equal(out.limit, undefined);
@@ -1534,19 +1413,19 @@ test('M3: a flagged entry that reads as a usage limit with no parseable reset ti
   assert.match(warnings[0]!, /no parseable reset time/);
 });
 
-test('M3: it warns once per entry even when the text repeats in several fields', () => {
+test('it warns once per entry even when the text repeats in several fields', () => {
   const { w, warnings } = warnWatcher();
   w.inspectLine(flaggedText("You've hit your session limit", { error: "You've hit your session limit", detail: "You've hit your session limit" }), FILE);
   assert.equal(warnings.length, 1);
 });
 
-test('M3: a flagged limit that parses does not warn (control)', () => {
+test('a flagged limit that parses does not warn (control)', () => {
   const { w, warnings } = warnWatcher();
   assert.ok(w.inspectLine(flaggedText("You've hit your session limit · resets in 5 hours"), FILE).limit);
   assert.deepEqual(warnings, []);
 });
 
-test('M3: a flagged limit with a readable but STALE reset is history, not a miss (wave D, D4: warned once, as history)', () => {
+test('a flagged limit with a readable but STALE reset is history, not a miss (warned once, as history)', () => {
   const { w, warnings } = warnWatcher();
   const stale = flaggedText("You've hit your session limit · resets in 5 hours", { timestamp: hoursAgo(20) });
   assert.equal(w.inspectLine(stale, FILE).limit, undefined);
@@ -1555,7 +1434,7 @@ test('M3: a flagged limit with a readable but STALE reset is history, not a miss
   assert.doesNotMatch(warnings[0]!, /no parseable reset time/);
 });
 
-test('M3: a flagged overload does NOT warn, including one that names a limit and one too old to act on', () => {
+test('a flagged overload does NOT warn, including one that names a limit and one too old to act on', () => {
   const { w, warnings } = warnWatcher();
   assert.ok(w.inspectLine(flaggedText('API Error: 529 Overloaded'), FILE).overload);
   const transient = flaggedText('API Error: Server is temporarily limiting requests (not your usage limit) \u00b7 Rate limited', { error: 'rate_limit', apiErrorStatus: 429 });
@@ -1569,7 +1448,7 @@ test('M3: a flagged overload does NOT warn, including one that names a limit and
   assert.deepEqual(warnings, []);
 });
 
-test('M3: a flagged entry that is not about a limit does not warn, and neither does unflagged prose', () => {
+test('a flagged entry that is not about a limit does not warn, and neither does unflagged prose', () => {
   const { w, warnings } = warnWatcher();
   w.inspectLine(flaggedText('No response requested.'), FILE);
   w.inspectLine(entry({ type: 'assistant', message: { content: [{ type: 'text', text: "You've hit your session limit" }] } }), FILE);
@@ -1577,18 +1456,16 @@ test('M3: a flagged entry that is not about a limit does not warn, and neither d
   assert.deepEqual(warnings, []);
 });
 
-test('M3: a long file-sized string in a flagged entry is not read for the warning either', () => {
+test('a long file-sized string in a flagged entry is not read for the warning either', () => {
   const { w, warnings } = warnWatcher();
   w.inspectLine(flaggedText("You've hit your session limit " + 'x'.repeat(500)), FILE);
   assert.deepEqual(warnings, []);
 });
 
-// ---------------------------------------------------------------------------
-// Wave D, D1 and D4 (policy B): the structured path's three outcomes, and no
-// limit that is detected but not scheduled goes unlogged.
-// ---------------------------------------------------------------------------
+// The structured path's three outcomes; no limit that is detected but not
+// scheduled goes unlogged.
 
-test('D1: a structured weekly reset beyond maxWaitHours is picked up as offer-only, type intact', () => {
+test('a structured weekly reset beyond maxWaitHours is picked up as offer-only, type intact', () => {
   const resetsAt = Date.now() + 3 * 86_400_000;
   const line = entry({
     type: 'assistant',
@@ -1608,13 +1485,13 @@ test('D1: a structured weekly reset beyond maxWaitHours is picked up as offer-on
   assert.deepEqual(warnings, []);
 });
 
-test('D1: a structured reset within maxWaitHours carries no offerOnly key', () => {
+test('a structured reset within maxWaitHours carries no offerOnly key', () => {
   const out = make().inspectLine(quotaEntry(Date.now() + 2 * 3_600_000, "You've hit your session limit · resets 3pm"), FILE);
   assert.ok(out.limit);
   assert.equal(Object.hasOwn(out.limit.detection, 'offerOnly'), false);
 });
 
-test('D1/D4: a structured reset more than 8 days out arms nothing and warns, naming the session and the reason', () => {
+test('a structured reset more than 8 days out arms nothing and warns, naming the session and the reason', () => {
   const { w, warnings } = warnWatcher();
   const out = w.inspectLine(quotaEntry(Date.now() + 9 * 86_400_000, "You've hit your weekly limit"), FILE);
   assert.equal(out.limit, undefined);
@@ -1623,7 +1500,16 @@ test('D1/D4: a structured reset more than 8 days out arms nothing and warns, nam
   assert.match(warnings[0]!, /more than 8 days out/);
 });
 
-test('D4: a structured reset in the past warns as history, once per file however many copies the fork holds', () => {
+test('with maxWaitHours above 8 days, the absurd warning names that bound', () => {
+  const warnings: string[] = [];
+  const w = new TranscriptWatcher(() => 300, () => 5, { info() {}, warn: (m: string) => warnings.push(m), error() {} });
+  const out = w.inspectLine(quotaEntry(Date.now() + 13 * 86_400_000, "You've hit your weekly limit"), FILE);
+  assert.equal(out.limit, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /more than 12\.5 days out/);
+});
+
+test('a structured reset in the past warns as history, once per file however many copies the fork holds', () => {
   const { w, warnings } = warnWatcher();
   const written = new Date(Date.now() - 12 * 3_600_000);
   const stale = quotaEntry(written.getTime() + 3_600_000, "You've hit your session limit · resets 1am", written);
@@ -1638,7 +1524,7 @@ test('D4: a structured reset in the past warns as history, once per file however
   assert.equal(warnings.length, 2, 'another file (another fork) gets its own one warning');
 });
 
-test('D4: a stale TEXT reset warns once per file too, and shares the once with the structured path', () => {
+test('a stale TEXT reset warns once per file too, and shares the once with the structured path', () => {
   const { w, warnings } = warnWatcher();
   const stale = flaggedText("You've hit your session limit · resets in 5 hours", { timestamp: hoursAgo(20) });
   w.inspectLine(stale, FILE);
@@ -1649,7 +1535,7 @@ test('D4: a stale TEXT reset warns once per file too, and shares the once with t
   assert.match(warnings[0]!, /history/);
 });
 
-test('D4: an absurd text reset warns every time it is seen (it is not fork history)', () => {
+test('an absurd text reset warns every time it is seen (it is not fork history)', () => {
   const { w, warnings } = warnWatcher();
   const far = flaggedText(`You've hit your session limit, resets at ${new Date(Date.now() + 20 * 86_400_000).toISOString()}`);
   assert.equal(w.inspectLine(far, FILE).limit, undefined);
@@ -1658,7 +1544,7 @@ test('D4: an absurd text reset warns every time it is seen (it is not fork histo
   assert.match(warnings[0]!, /more than 8 days out/);
 });
 
-test('D4: the offsets prune forgets a file it no longer tracks, so its warn-once memory does not grow forever', () => {
+test('the offsets prune forgets a file it no longer tracks, so its warn-once memory does not grow forever', () => {
   const { w, warnings } = warnWatcher();
   const written = new Date(Date.now() - 12 * 3_600_000);
   const stale = quotaEntry(written.getTime() + 3_600_000, 'x limit', written);
@@ -1668,11 +1554,8 @@ test('D4: the offsets prune forgets a file it no longer tracks, so its warn-once
   assert.equal(warnings.length, 2, 'a file pruned and met again is a new file');
 });
 
-// ---------------------------------------------------------------------------
-// Wave D, D2 through the watcher: the dated weekly-limit text, which Claude
-// Code writes with no quotaLimits on older builds, on both the flagged and
-// the compaction path.
-// ---------------------------------------------------------------------------
+// The dated weekly-limit text (written with no quotaLimits on older builds), on
+// both the flagged and the compaction path.
 
 /** "Oct 4" for an instant `days` from now, as Claude Code's Zd renders it in Chicago. */
 const chicagoDate = (days: number) => {
@@ -1682,7 +1565,7 @@ const chicagoDate = (days: number) => {
   return `${parts.find((p) => p.type === 'month')!.value} ${parts.find((p) => p.type === 'day')!.value}`;
 };
 
-test('D2: a flagged weekly limit in the dated form, with no quotaLimits, is picked up as offer-only', () => {
+test('a flagged weekly limit in the dated form, with no quotaLimits, is picked up as offer-only', () => {
   const { w, warnings } = warnWatcher();
   const out = w.inspectLine(
     flaggedText(`You've hit your weekly limit · resets ${chicagoDate(3)}, 1am (America/Chicago)`, { error: 'rate_limit' }),
@@ -1696,7 +1579,7 @@ test('D2: a flagged weekly limit in the dated form, with no quotaLimits, is pick
   assert.deepEqual(warnings, []);
 });
 
-test('D2: a compaction failure at a weekly limit is picked up too (C1 could not read the dated form)', () => {
+test('a compaction failure at a weekly limit is picked up too', () => {
   const out = make().inspectLine(
     entry(compactionEntry({ content: compactContent(`You've hit your weekly limit · resets ${chicagoDate(3)} at 9am (America/Chicago)`) })),
     FILE,
@@ -1705,7 +1588,7 @@ test('D2: a compaction failure at a weekly limit is picked up too (C1 could not 
   assert.equal(out.limit.detection.offerOnly, true);
 });
 
-test('D2/D4: a dated weekly limit with no zone arms nothing and warns that the zone is missing', () => {
+test('a dated weekly limit with no zone arms nothing and warns that the zone is missing', () => {
   const { w, warnings } = warnWatcher();
   assert.equal(w.inspectLine(flaggedText(`You've hit your weekly limit · resets ${chicagoDate(3)}, 1am`), FILE).limit, undefined);
   assert.equal(warnings.length, 1);
@@ -1713,8 +1596,8 @@ test('D2/D4: a dated weekly limit with no zone arms nothing and warns that the z
   assert.match(warnings[0]!, /0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234/);
 });
 
-test('D2/D4: the real v2.1.220 line, met today in a fork, is history: not picked up, one warning', () => {
-  // Verbatim from session 1e8a6fb6 (2026-07-31), less the usage block.
+test('a real dated-reset line met today in a fork is history: not picked up, one warning', () => {
+  // Real line, less the usage block.
   const real = JSON.stringify({
     type: 'assistant',
     timestamp: '2026-07-31T04:55:10.016Z',

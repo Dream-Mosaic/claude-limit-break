@@ -13,29 +13,20 @@ export interface LimitDetection {
   rule: string;
   text: string;
   /**
-   * Which usage limit this is, in Claude Code's own vocabulary (`five_hour`,
-   * `seven_day`, `seven_day_opus`, `seven_day_sonnet`,
-   * `seven_day_overage_included`, `overage`), when it can be told: the
-   * watcher reads it from `quotaLimits.rateLimitType`, and detectLimit from
-   * the label in "You've hit your <label> limit". Absent otherwise - the key
-   * is left off, not set to undefined. It exists because Claude Code's native
-   * auto-continue covers the five-hour limit only (see holderPolicy.ts).
+   * Which usage limit this is, in Claude Code's vocabulary (`five_hour`, `seven_day`, ...),
+   * when it can be told: from `quotaLimits.rateLimitType`, or the label in "You've hit your
+   * <label> limit". The key is left off when unknown. Native auto-continue covers only the
+   * five-hour limit (see holderPolicy.ts).
    */
   rateLimitType?: string;
   /**
-   * Wave D (policy B, the user's decision): the reset lies beyond
-   * maxWaitHours but no more than {@link MAX_RESET_DAYS} out - a weekly limit,
-   * typically. Such a limit is scheduled but never resumed automatically: at
-   * the reset, Resume Now is offered instead. Absent (not false) otherwise.
+   * The reset lies beyond maxWaitHours but within {@link MAX_RESET_DAYS}: scheduled but never
+   * resumed automatically; Resume Now is offered at the reset. Absent (not false) otherwise.
    */
   offerOnly?: true;
 }
 
-/**
- * A rule that recognised its shape but could not turn it into an instant, and
- * can say why ("a dated reset with no time zone"). The caller's warning
- * carries the reason, so a miss is never silent (wave D, D4).
- */
+/** A rule that recognised its shape but could not turn it into an instant, with the reason. */
 interface Unparseable {
   unparseable: string;
 }
@@ -47,12 +38,9 @@ interface Rule {
 }
 
 /**
- * Why a limit that was detected is not scheduled (wave D, D4): its reset is
- * further back than {@link RESET_GRACE_MS} (`past` - history, such as a
- * fork's copy), further out than {@link MAX_RESET_DAYS} (`absurd` - longer
- * than any Claude limit, so a misread), or could not be read at all
- * (`unparseable`, with a `detail` when the rule that matched can say why).
- * `at` is the instant read, for `past` and `absurd`.
+ * Why a detected limit is not scheduled: `past` (reset older than {@link RESET_GRACE_MS},
+ * e.g. a fork's copy), `absurd` (further than {@link MAX_RESET_DAYS}, a misread), or
+ * `unparseable` (with a `detail` when known). `at` is the instant read, for past and absurd.
  */
 export interface LimitRejection {
   kind: 'rejected';
@@ -62,9 +50,8 @@ export interface LimitRejection {
 }
 
 /**
- * What an already-absolute reset instant means under policy B (wave D, D1):
- * `auto` within maxWaitHours, `offerOnly` beyond it but within {@link
- * MAX_RESET_DAYS}, otherwise rejected.
+ * Outcome for an already-absolute reset instant: `auto` within maxWaitHours, `offerOnly`
+ * beyond it but within the bound (the larger of {@link MAX_RESET_DAYS} and maxWaitHours), otherwise rejected.
  */
 export type ResetVerdict = { kind: 'auto'; at: Date } | { kind: 'offerOnly'; at: Date } | LimitRejection;
 
@@ -119,13 +106,9 @@ export function looksLikeLimitMessage(text: string): boolean {
 const HOUR_MS = 3_600_000;
 
 /**
- * The label Claude Code puts in "You've hit your <label> limit" for each usage
- * limit type - the 2.1.282 binary's own map (`vue`, research-api-errors-
- * binary.md Q1), keyed by the `rateLimitType` the same build writes into
- * `quotaLimits`. The label is lower-cased here; the text is matched without
- * regard to case. One table serves both directions: detectLimit reads the type
- * back out of a notice's label, and holderPolicy names the label in its log
- * line.
+ * The label Claude Code puts in "You've hit your <label> limit" per limit type, keyed by
+ * `rateLimitType`. Lower-cased; text is matched case-insensitively. Read by detectLimit and
+ * by holderPolicy, which names the label in its log line.
  */
 export const RATE_LIMIT_LABELS: Readonly<Record<string, string>> = {
     five_hour: 'session',
@@ -137,12 +120,9 @@ export const RATE_LIMIT_LABELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The limit type a notice names, or undefined when it names none. Only the
- * exact "You've hit your <label> limit" form counts: Claude Code's other limit
- * wordings (the pre-2.1 "Claude AI usage limit reached", "You've reached your
- * Fable 5 limit", a "monthly limit") do not say which window tripped, and
- * guessing would stand the extension down for a limit Claude Code never
- * continues.
+ * The limit type a notice names, or undefined. Only the exact "You've hit your <label> limit"
+ * form counts: other wordings do not say which window tripped, and guessing would stand the
+ * extension down for a limit Claude Code never continues.
  */
 export function rateLimitTypeFromText(text: string): string | undefined {
     const m = /\byou'?ve hit your (session|weekly|opus|sonnet|fable|usage credit) limit\b/i.exec(text);
@@ -158,24 +138,13 @@ const COMPACTION_STDERR_CLOSE = '</local-command-stderr>';
 const COMPACTION_PREFIX = 'Error during compaction:';
 
 /**
- * The usage-limit text of a failed `/compact`, or undefined when the entry is
- * not exactly that (wave C, C1).
+ * The usage-limit text of a failed `/compact`, or undefined when the entry is not exactly that.
  *
- * A compaction that runs into a usage limit is written UNFLAGGED - no
- * `isApiErrorMessage` - as a `system`/`local_command` entry whose content is
- * `<local-command-stderr>Error during compaction: You've hit your session
- * limit · resets 8:30pm (America/Chicago)</local-command-stderr>` (real lines:
- * 2.1.252 and 2.1.267). Without this the session has no flagged entry and 1.0
- * never resumes it.
- *
- * The entry is admitted ONLY when every one of these holds: `type` is
- * `system`, `subtype` is `local_command`, `content` is a string that STARTS
- * with the stderr tag and the compaction prefix, and what follows names a
- * usage limit. A `system` entry is something Claude Code itself writes; model
- * prose, a thinking block, a tool result and a user's paste can never be one,
- * so the "prose arms a resume" hole that the flagged gate closes (final review
- * C1) stays closed. Returns the text with the tag and the prefix stripped, to
- * be read as trusted text like a flagged entry's own.
+ * A compaction that hits a limit is written UNFLAGGED, as a `system`/`local_command` entry.
+ * Admitted only when `type` is `system`, `subtype` is `local_command`, and `content` is a string
+ * that STARTS with the stderr tag and the compaction prefix and then names a usage limit.
+ * Model prose, tool results and user pastes can never be one, so the flagged gate stays
+ * closed. Returns the text with tag and prefix stripped, to be read as trusted text.
  */
 export function compactionLimitText(entry: Record<string, unknown>): string | undefined {
     if (entry.type !== 'system' || entry.subtype !== 'local_command') {
@@ -196,31 +165,22 @@ const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
 /**
- * The furthest out a reset is believed at all (wave D, D1 and D2). Claude
- * Code's longest limits are the seven-day ones, so a weekly reset is at most
- * 7 days out; a day of slack covers a zone or rounding difference. Anything
- * later is a misread (a stray year, a wrong zone) and is rejected with a
- * warning. This took over the misread role maxWaitHours used to play, which
- * now only decides automatic versus offer-only - and it holds whatever
- * maxWaitHours is set to.
+ * The furthest out a reset is believed. The longest limits are seven-day, so a weekly reset
+ * is at most 7 days out; a day of slack covers zone or rounding differences. Later is a
+ * misread and rejected, unless the user set maxWaitHours higher, which then is the bound.
  */
 export const MAX_RESET_DAYS = 8;
 
 /**
- * Sort a resolved reset instant into policy B's outcomes (wave D, D1).
- *
- * `basis` is what the horizons are measured from (the entry's own timestamp
- * for text, as detectLimit always did; the real time for a structured
- * value), `readAt` what staleness is judged against. Past first: a reset
- * already history is that, however the horizons compare. Both bounds are
- * inclusive - a reset exactly at maxWaitHours is automatic (`>` rejects, as
- * before), exactly at MAX_RESET_DAYS still believed.
+ * Sort a resolved reset instant into policy outcomes. `basis` is what the horizons are
+ * measured from (the entry's timestamp for text, the real time for a structured value);
+ * `readAt` is what staleness is judged against. Past is checked first. Both bounds are inclusive.
  */
 function classifyReset(at: Date, basis: Date, readAt: Date, maxWaitHours: number): ResetVerdict {
     if (at.getTime() < readAt.getTime() - RESET_GRACE_MS) {
         return { kind: 'rejected', reason: 'past', at };
     }
-    if (at.getTime() > basis.getTime() + MAX_RESET_DAYS * DAY_MS) {
+    if (at.getTime() > basis.getTime() + Math.max(MAX_RESET_DAYS * DAY_MS, maxWaitHours * HOUR_MS)) {
         return { kind: 'rejected', reason: 'absurd', at };
     }
     if (at.getTime() > basis.getTime() + maxWaitHours * HOUR_MS) {
@@ -291,41 +251,13 @@ function renderedWallClock(timeZone: string, at: Date): string | undefined {
  * The instant at which a named zone's wall clock reads the given date and time.
  * Iterates twice so a reading that lands on a DST transition still converges.
  *
- * A DST fall-back repeats one wall-clock hour twice, an hour apart in real
- * time (issue A7). The 2-pass loop above always converges on whichever
- * offset applies to the *naively guessed* instant - which is always the
- * EARLIER of the two real instants that share that wall-clock reading,
- * confirmed by direct execution against the unmodified algorithm. Detect
- * that by checking whether stepping the candidate forward one hour still
- * reads the same wall clock: if so, the candidate is the ambiguous hour's
- * first pass, and the later occurrence - one hour on - is what
- * nextZonedOccurrence's callers want. Resolving to the later instant is
- * deliberate: waking an hour late finds a still-live limit safe to
- * re-check; waking an hour early risks resuming into a session that has
- * not actually reset yet.
+ * Fall-back repeats a wall-clock hour and the loop lands on the earlier instant; it steps
+ * forward an hour to prefer the later one: waking late finds a live limit safe to re-check,
+ * waking early risks resuming into a session that has not reset.
  *
- * A DST spring-forward SKIPS one wall-clock hour outright (Task 4a, A7's
- * other half): the reading asked for may not exist at all (e.g.
- * America/Chicago's clock jumps from 01:59:59 straight to 03:00:00, so
- * "02:30" never happens). The 2-pass loop still converges on some instant,
- * but it does so by re-resolving the offset a second time at its own
- * first-pass candidate - which by then sits on the far side of the jump - so
- * it lands on the offset that took effect *after* the jump and reads back an
- * hour EARLIER than what was asked for (confirmed by direct execution:
- * "02:30" on that gap resolves to an instant reading 01:30, not 02:30). That
- * is the unsafe direction by the same reasoning as the fall-back case above,
- * so it is detected the same way a missed target is always detected here -
- * the resolved candidate's own wall-clock reading no longer matches what was
- * asked for - and corrected onto the safe side of the gap instead.
- *
- * The correction is the reading taken with the offset in force BEFORE the
- * jump: the requested time pushed forward by the gap ("02:30" in Chicago
- * reads 03:30 CDT). It used to be a flat hour onto the candidate, which is
- * the same thing west of UTC but not east of it (wave D): there the two
- * passes already land past the gap, reading 03:30 in Berlin for "02:30", and
- * the extra hour made it 04:30 - an hour late (NEXT.md's deferred London
- * finding). The offsets a day either side are the two in play; the one
- * before a spring-forward is always the smaller.
+ * Spring-forward skips an hour, and a reading inside the gap lands an hour early (the same
+ * unsafe direction). It is corrected by taking the requested time with the offset in force
+ * BEFORE the jump; a flat extra hour is wrong east of UTC.
  */
 function zonedWallClockToInstant(
     timeZone: string,
@@ -349,11 +281,8 @@ function zonedWallClockToInstant(
     if (renderedWallClock(timeZone, candidate) === renderedWallClock(timeZone, oneHourLater)) {
         return oneHourLater;
     }
-    // Spring-forward gap: the resolved instant does not read back the hour
-    // and minute that were actually asked for, proof the requested wall
-    // clock fell inside a skipped hour. Read it with the offset from before
-    // the jump, which lands the requested time plus the gap on the safe,
-    // later side of it (see the doc comment for why not a flat hour).
+    // Spring-forward gap: the result does not read back the requested hour and minute. Use the
+    // pre-jump offset, which lands on the safe, later side.
     const requested = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
     if (renderedWallClock(timeZone, candidate)?.slice(-5) !== requested) {
         const dayBefore = zoneOffsetMs(timeZone, new Date(target - DAY_MS));
@@ -367,7 +296,7 @@ function zonedWallClockToInstant(
 }
 const RULES: Rule[] = [
     {
-        // "Claude AI usage limit reached|1754035200"  (epoch seconds or millis)
+        // Epoch seconds or millis.
         id: 'epoch',
         re: /limit reached\s*[|:]\s*(\d{9,13})\b/i,
         resolve(m) {
@@ -380,11 +309,8 @@ const RULES: Rule[] = [
         },
     },
     {
-        // "...resets at 2026-08-03T18:00:00Z"
-        //
-        // The lead-in must sit within a few characters of the timestamp, and no
-        // quote may intervene. Transcript lines carry their own "timestamp" field,
-        // and without this the rule would happily read that instead.
+        // ISO timestamp. The lead-in must sit within a few characters of it with no quote between,
+        // or the rule would read a transcript line's own "timestamp" field.
         id: 'iso',
         re: /(?:reset(?:s|ting)?|try again|available|come back|until)\b[^"\n]{0,30}?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/i,
         resolve(m) {
@@ -393,7 +319,7 @@ const RULES: Rule[] = [
         },
     },
     {
-        // "wait 5 hours", "try again in about 4h 32m", "resets in 2 hours and 5 minutes"
+        // Relative duration.
         id: 'duration-hours',
         re: new RegExp(`${LEAD_IN}\\s*(?:in|after|for)?\\s*(?:about|approximately|roughly|~)?\\s*` +
             // Longest alternative first, so "hours" is never chopped down to "hour"
@@ -410,7 +336,7 @@ const RULES: Rule[] = [
         },
     },
     {
-        // "try again in 45 minutes"
+        // Relative minutes only.
         id: 'duration-minutes',
         re: new RegExp(`${LEAD_IN}\\s*(?:in|after|for)?\\s*(?:about|approximately|roughly|~)?\\s*` +
             `(\\d{1,3})\\s*(?:minutes|minute|mins|min|m)\\b`, 'i'),
@@ -420,14 +346,8 @@ const RULES: Rule[] = [
         },
     },
     {
-        // Wave D, D2. "resets Aug 4, 1am (America/Chicago)" - the form Claude
-        // Code's own `Zd` writes for a reset more than 24h out (real
-        // transcripts: v2.1.220 and v2.1.270) - and "resets Jun 3 at 4pm
-        // (Europe/Berlin)" (GitHub #68816). Exactly the forms those sources
-        // show: a short English month, a day, then a comma or " at", an
-        // hour with an optional ":MM", and am/pm. The zone is optional in the
-        // pattern only so that a notice WITHOUT one is recognised and
-        // rejected with a reason rather than passed over in silence.
+        // Dated form: short month, day, then a comma or " at", an hour and am/pm. The zone is
+        // optional in the pattern only so a notice without one is recognised and rejected with a reason.
         id: 'dated-reset',
         re: /reset(?:s|ting)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:,|\s+at)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(\s*([^()\s]+)\s*\))?/i,
         resolve(m, now) {
@@ -435,10 +355,7 @@ const RULES: Rule[] = [
         },
     },
     {
-        // Wave D, D2. "resets Mon 12:00am" - the weekday form the errors
-        // docs quote. Read only with a zone in parentheses, like the dated
-        // form; the docs' own example has none and is rejected with that
-        // reason.
+        // Weekday form; read only with a zone in parentheses, like the dated form.
         id: 'weekday-reset',
         re: /reset(?:s|ting)?\s+(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(\s*([^()\s]+)\s*\))?/i,
         resolve(m, now) {
@@ -446,12 +363,8 @@ const RULES: Rule[] = [
         },
     },
     {
-        // "resets 3pm", "reset at 10:30 (UTC)", "resets 1:40am (Asia/Jerusalem)"
-        //
-        // The hour may not run on into more digits (wave D): "resets at
-        // 2026-08-20T00:00Z" is the iso rule's, and when that reading is
-        // rejected as more than MAX_RESET_DAYS out, this rule used to pick up
-        // the "20" of the year as 8pm and arm a resume for tonight.
+        // Clock reset. The hour may not run on into more digits, or an ISO date's year would be
+        // read as an hour.
         id: 'clock-reset',
         re: /reset(?:s|ting)?(?:\s+(?:at|around))?\s+(\d{1,2})(?!\d)(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*(?:(utc|gmt|z)\s*([+-]\d{1,2})?(?::?(\d{2}))?|([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+))?\s*\)?/i,
         resolve(m, now, zone) {
@@ -459,8 +372,7 @@ const RULES: Rule[] = [
         },
     },
     {
-        // "try again at 3:15pm", "available again at 18:00 UTC" (the hour may
-        // not run on into a year, as in clock-reset above)
+        // "try again at" form; same hour restriction as clock-reset above.
         id: 'clock-retry',
         re: /(?:try again|available(?: again)?|come back|check back|back)\s+(?:at|after)\s+(\d{1,2})(?!\d)(?::(\d{2}))?\s*(am|pm)?\s*\(?\s*(?:(utc|gmt|z)\s*([+-]\d{1,2})?(?::?(\d{2}))?|([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+))?\s*\)?/i,
         resolve(m, now, zone) {
@@ -469,23 +381,11 @@ const RULES: Rule[] = [
     },
 ];
 /**
- * The soonest instant, starting from `today` and walking forward up to two
- * calendar days, at which the named zone's wall clock reads `h:minute` and
- * the result is still in the future relative to `now`, or - within
- * {@link RESET_GRACE_MS} - has only just passed.
- *
- * That last clause matters for a notice read moments after its own clock
- * time struck: without it, "resets 1am" read at 1:03am would skip today's
- * occurrence for being three minutes stale and roll all the way to tomorrow,
- * arming a needless ~24h wait for a limit that had just lifted. The final
- * accept/reject call on how stale is still acceptable belongs to
- * detectLimit's own grace check against the real current time; this only
- * has to stop rolling forward past a candidate that check might still want.
- *
- * Re-derives the wall clock for each date instead of adding a flat 24h, so a
- * DST change during the walk does not shift the result by an hour (issue
- * #10: a flat-milliseconds roll-forward resumed the fall-back case an hour
- * early, into a session that was still limited).
+ * The soonest instant, from `today` forward up to two calendar days, at which the named zone
+ * reads `h:minute` and is still in the future relative to `now`, or within {@link
+ * RESET_GRACE_MS} past it. The grace keeps a notice read just after its own time from rolling
+ * to tomorrow. Re-derives the wall clock per date rather than adding a flat 24h, so a DST
+ * change does not shift the result an hour early.
  */
 function nextZonedOccurrence(
     zone: string,
@@ -519,10 +419,8 @@ function meridiemHour(hourText: string | undefined, minuteText: string | undefin
 }
 
 /**
- * The zone a dated or weekday notice names, checked against the runtime's
- * own zone data, or why it cannot be used. Required (wave D, D2): a date
- * more than a day out read in the wrong zone is wrong by hours, and this
- * machine's zone is only a guess at the one Claude Code wrote it in.
+ * The zone a dated or weekday notice names, checked against the runtime's zone data, or why
+ * it cannot be used. Required: this machine's zone is only a guess at Claude Code's.
  */
 function noticeZone(zone: string | undefined, now: Date): { zone: string; today: { y: number; m: number; d: number } } | Unparseable {
     if (!zone) {
@@ -533,13 +431,9 @@ function noticeZone(zone: string | undefined, now: Date): { zone: string; today:
 }
 
 /**
- * "Aug 4, 1am (America/Chicago)": that wall-clock reading in that zone, in
- * the first year whose occurrence is on or after `now` (the entry's own
- * timestamp) less {@link RESET_GRACE_MS} - so a December entry's "Jan 2" is
- * next year's, and a reset that struck minutes before its entry was written
- * stays this year's and is due now. The year starts from the zone's own
- * calendar, not UTC's. A day the month does not have is rejected, not
- * rolled into the next month the way Date.UTC would.
+ * "Aug 4, 1am (America/Chicago)": that reading in the first year whose occurrence is on or
+ * after `now` less {@link RESET_GRACE_MS}. The year starts from the zone's own calendar, not
+ * UTC's. A day the month lacks is rejected, not rolled over as Date.UTC would.
  */
 function resolveDatedReset(m: RegExpExecArray, now: Date): Date | Unparseable {
     const month = MONTHS.indexOf((m[1] ?? '').toLowerCase());
@@ -571,10 +465,9 @@ function resolveDatedReset(m: RegExpExecArray, now: Date): Date | Unparseable {
 }
 
 /**
- * "Mon 12:00am (America/Chicago)": the first such weekday, from the zone's
- * own today, whose reading is on or after `now` less {@link RESET_GRACE_MS}.
- * Eight days are walked so that today's weekday whose time has passed rolls
- * to the same weekday next week.
+ * "Mon 12:00am (America/Chicago)": the first such weekday, from the zone's own today, on or
+ * after `now` less {@link RESET_GRACE_MS}. Eight days are walked so today's weekday, if
+ * passed, rolls to next week.
  */
 function resolveWeekdayReset(m: RegExpExecArray, now: Date): Date | Unparseable {
     const weekday = WEEKDAYS.indexOf((m[1] ?? '').toLowerCase());
@@ -661,14 +554,8 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
             }
         }
         else {
-            // No zone named in the notice: read the given zone - an explicit
-            // override so a test can pin a fixed zone, since `TZ` is not
-            // reliably honoured by Node on Windows (issue #10) - or the
-            // process's own resolved zone otherwise, so production behaviour
-            // is unchanged when no override is given. Walk forward and
-            // re-derive the wall clock exactly as the named-zone branch
-            // above does, rather than adding a flat DAY_MS once the "today"
-            // reading turns out to be in the past.
+            // No zone named: use the given zone (an override, since `TZ` is not reliably honoured by
+            // Node on Windows) or the process zone. Walk forward as the named-zone branch does.
             const localZone = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
             const today = zoneToday(localZone, now);
             candidate = today ? nextZonedOccurrence(localZone, today, h, minute, now) : undefined;
@@ -683,39 +570,23 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
     return best;
 }
 /**
- * How far in the past a resolved reset time may lie and still count as an
- * event due right now, rather than history. Exists because a notice is
- * resolved against when it was *written*, not when this pass happens to read
- * it (see the `now` parameter below) - and a session left alone past its own
- * reset time is a real, current situation: it needs resuming now, not
- * skipped as stale, and it certainly does not need to wait for the same
- * clock time tomorrow. Longer ago than this is instead treated as history:
- * a limit that lifted last night is not a reason to act this morning.
- *
- * 15 minutes: comfortably past the couple of minutes a fork's own write and
- * this watcher's poll interval could add, without being so wide that a
- * genuinely stale notice from hours ago slips through as "current".
+ * How far in the past a resolved reset may lie and still count as due now rather than
+ * history: a session left alone past its reset needs resuming now. Covers a fork's write
+ * and the poll interval.
  */
 export const RESET_GRACE_MS = 15 * 60_000;
 
 /**
- * Scan a chunk of text for a usage-limit notice. The detection, offer-only or
- * not, or undefined - for both "not a notice" and "a notice that cannot be
- * scheduled". A caller that must tell those two apart (to warn about the
- * second, wave D, D4) uses {@link classifyLimit}.
+ * Scan text for a usage-limit notice. Returns the detection (offer-only or not), or undefined
+ * for both "not a notice" and "a notice that cannot be scheduled"; use {@link classifyLimit}
+ * to tell those apart.
  *
- * `now` is the instant the notice is resolved *against* - the entry's own
- * timestamp when the caller has one, so "try again in 5 hours" means 5 hours
- * from when Claude Code wrote that line, not from whenever this pass happens
- * to read it. `opts.readAt` is the actual current time, used only to decide
- * whether a reset that has already passed is still within {@link
- * RESET_GRACE_MS} of now (a live event) or further back than that (history).
- * It defaults to `now` itself, which is exactly right when a caller has only
- * one instant to give - every existing caller, before `readAt` existed.
+ * `now` is what the notice is resolved against (the entry's own timestamp when known).
+ * `opts.readAt` is the real current time, used only to judge whether a passed reset is within
+ * {@link RESET_GRACE_MS}; it defaults to `now`.
  *
- * `maxWaitHours` decides automatic versus offer-only (wave D, policy B); a
- * reset more than {@link MAX_RESET_DAYS} out is rejected as a misread (a
- * stray year in the text, a misread timezone) whatever it is set to.
+ * `maxWaitHours` decides automatic versus offer-only; a reset beyond the larger of
+ * {@link MAX_RESET_DAYS} and maxWaitHours is rejected as a misread.
  */
 export function detectLimit(
     rawText: string,
@@ -728,17 +599,13 @@ export function detectLimit(
 }
 
 /**
- * {@link detectLimit}, telling its outcomes apart (wave D, D1 and D4).
- * Undefined when the text is not a limit notice at all (no limit wording,
- * too long, or untrusted text that looks like code or a quotation). A
- * notice gives `detected` - with `offerOnly` when its reset is beyond
- * maxWaitHours but within {@link MAX_RESET_DAYS} - or `rejected` with the
- * reason.
+ * {@link detectLimit}, telling its outcomes apart. Undefined when the text is not a limit
+ * notice at all (no limit wording, too long, or untrusted text that looks like code or a
+ * quotation); otherwise `detected` (`offerOnly` when beyond maxWaitHours) or `rejected` with
+ * the reason.
  *
- * Rule precedence keeps its old meaning: the first rule whose reading is
- * automatic wins outright, as the first "within the horizon" reading always
- * did. Failing that, the first offer-only reading; failing that, the first
- * rule's reason for rejecting (unparseable, if no rule matched at all).
+ * The first automatic rule wins; failing that the first offer-only; failing that the first
+ * rule's rejection reason (unparseable if none matched).
  */
 export function classifyLimit(
     rawText: string,
@@ -753,18 +620,8 @@ export function classifyLimit(
     if (!looksLikeLimitMessage(text)) {
         return undefined;
     }
-    // Source code and conversation *about* limits - which is exactly what a
-    // transcript of working on this extension looks like - must not arm a timer.
-    // Mirrors detectOverload, which has always guarded internally. Entries Claude
-    // Code itself tagged as a rate-limit event are trusted past this.
-    //
-    // Two more shapes join the same guard (synthesis A3, 2026-09-23 false
-    // positives): a percentage-usage status line ("You've used 91% of your
-    // session limit"), which is Claude Code's own readout, not a "you're
-    // blocked" notice, and text someone else is visibly quoting - a subagent
-    // recap, a `grep` hit, a reply - rather than a notice Claude Code is
-    // delivering right now. All three are skipped outright on a flagged
-    // entry, exactly like looksLikeCode.
+    // Source code, a percentage-usage readout and visibly quoted text are not notices. Skipped
+    // for a trusted (flagged) entry.
     if (!opts.trusted && (looksLikeCode(text) || looksLikePercentageUsage(text) || looksLikeQuotedNotice(rawText))) {
         return undefined;
     }
@@ -792,10 +649,8 @@ export function classifyLimit(
         if (!at || Number.isNaN(at.getTime())) {
             continue;
         }
-        // A reset still inside the grace window is returned as-is, resumeAt
-        // at or before readAt, which is exactly the "due now" signal the
-        // scheduler already treats a past deadline as (see
-        // planResume/ResumeScheduler.tick).
+        // A reset inside the grace window is returned as-is (resumeAt at or before readAt): the
+        // "due now" signal the scheduler already understands.
         const verdict = classifyReset(at, now, readAt, maxWaitHours);
         if (verdict.kind === 'auto') {
             return { kind: 'detected', detection: detection(at, rule.id, false) };
@@ -813,22 +668,12 @@ export function classifyLimit(
 }
 
 /**
- * Resolve an already-absolute reset time - `quotaLimits.resetsAt`, epoch
- * seconds Claude Code writes on a flagged rate-limit entry - against the same
- * grace and horizon rules a parsed notice gets. There is no text to
- * misread here (no zone, no DST, no calendar rollover), which is exactly why
- * this field wins over the text when both are present: it is simply trusted,
- * checked only for staleness (too far in the past) and absurdity (more than
- * {@link MAX_RESET_DAYS} out).
+ * Resolve an already-absolute reset time (`quotaLimits.resetsAt`, epoch seconds) against the
+ * same grace and horizon rules a parsed notice gets. It wins over the text because nothing
+ * can be misread; it is checked only for staleness and absurdity (beyond the larger of {@link MAX_RESET_DAYS} and maxWaitHours).
  *
- * Wave D, D1 (policy B): the result says which of the three outcomes it is,
- * rather than `undefined` for every miss - automatic within maxWaitHours,
- * offer-only beyond it, or rejected with the reason the caller logs.
- *
- * Unlike {@link detectLimit}, there is only one time reference: the value is
- * already absolute, so nothing needs a separate "when this was written"
- * basis to resolve a relative expression against. `now` here is the real
- * current time, used for both horizons and the grace check.
+ * The result says which outcome it is: automatic, offer-only, or rejected with a reason.
+ * `now` is the real time, used for both horizons and the grace check.
  */
 export function resolveStructuredReset(
     resetsAtSeconds: number,
@@ -846,47 +691,27 @@ export function resolveStructuredReset(
  */
 export const MAX_NOTICE_LENGTH = 400;
 /**
- * Cheap guard against text that quotes a banner inside source code rather than
- * being one. A real notice is a plain sentence with none of this punctuation.
- *
- * Shared with the overload parser, which needs the same protection: a
- * transcript of working on this very extension is full of strings that read
- * exactly like the errors it hunts for.
+ * Cheap guard against text that quotes a banner inside source code rather than being one.
+ * Shared with the overload parser.
  */
 export function looksLikeCode(text: string): boolean {
     return /[{};]|=>|\b(?:const|let|var|function|return|assert|import|export|test|describe)\b|\/\/|\/\*|`/.test(text);
 }
 /**
- * Whether the text is a usage-percentage readout ("You've used 91% of your
- * session limit") rather than a "you're blocked" notice. Claude Code writes
- * these as ordinary status lines while a session is still usable; a real
- * false positive on 2026-09-23 armed a timer from one read on the untrusted
- * path.
+ * Whether the text is a usage-percentage readout ("You've used 91% of your session limit"),
+ * an ordinary status line rather than a "you're blocked" notice.
  */
 export function looksLikePercentageUsage(text: string): boolean {
     return /\bused\s+\d{1,3}%/i.test(text);
 }
 /**
- * Whether the text is visibly quoted rather than a live banner: fenced in
- * backticks, blockquoted with a leading `>`, or carrying a `grep`-style
- * "path:line:" / "path:line-" citation. (Any backtick already trips
- * looksLikeCode above; this checks independently too, since a plain-worded
- * quote inside backticks has none of that function's other punctuation.)
- * Each shape is exactly how a real banner turns up as someone else's
- * evidence - a subagent's recap, a `grep` hit on a doc, a reply quoting an
- * earlier message - rather than a notice Claude Code is delivering now.
+ * Whether the text is visibly quoted rather than a live banner: fenced in backticks,
+ * blockquoted with `>`, or carrying a `grep`-style "path:line:" citation.
  *
- * Checked per physical line of the *raw* text, before normalize() collapses
- * every run of whitespace (newlines included) to a single space: a prefix
- * only has to sit at the start of its own line, not the whole candidate.
- * The grep pattern is deliberately narrow - an optional single-letter drive
- * ("C:"), then a bare token with no whitespace or colon in it, immediately
- * followed by ":<digits>:" or ":<digits>-" - so an ordinary banner ("resets
- * 12:40pm") never matches: "12" is followed by ":40pm", not a run of digits
- * followed by ':' or '-'. The drive letter is optional (fix round 1: an
- * absolute Windows path like "C:\Users\x\y.ts:12:" was missed without it -
- * "C" alone has no trailing digits, so the un-prefixed pattern never got
- * past the drive letter to the real path).
+ * Checked per physical line of the *raw* text, before normalize() collapses newlines. The
+ * grep pattern is deliberately narrow (a bare token, then ":<digits>:" or ":<digits>-") so a
+ * banner like "resets 12:40pm" never matches; the optional drive letter lets an absolute
+ * Windows path match.
  */
 export function looksLikeQuotedNotice(rawText: string): boolean {
     return rawText.split(/\r?\n/).some((line) => {
@@ -897,11 +722,7 @@ export function looksLikeQuotedNotice(rawText: string): boolean {
         return /`/.test(t) || /^>/.test(t) || /^(?:[A-Za-z]:)?[^\s:]+:\d+[:-]/.test(t);
     });
 }
-/**
- * "6d 23h", "4h 32m", "59m 12s", "42s" - compact countdown rendering. Days
- * from 24 hours up (wave D fix round 1): an offer-only weekly reset counts
- * down from days away.
- */
+/** "6d 23h", "4h 32m", "42s": compact countdown rendering; days from 24 hours up. */
 export function formatDuration(ms: number): string {
     if (ms <= 0) {
         return '0s';

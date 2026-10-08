@@ -2,30 +2,22 @@ import { readAppendedWindow, ContinuedFs } from './continuedSince';
 import * as nodeFs from 'node:fs';
 
 /**
- * Claude Code's native auto-continue writes its state into the transcript as
- * `system` / `informational` entries (wave C; research-autocontinue-
- * compaction.md). Derived from the 2.1.285 binary, except the armed line and
- * the process_exit cancel line, which are byte-exact from a real transcript
- * (fd493448 lines 29 and 31, v2.1.278):
+ * Claude Code's native auto-continue writes its state into the transcript as `system` /
+ * `informational` entries:
  *
- *   armed:     "Usage limit reached · continuing automatically at 11:10am · esc or type to cancel"
- *              ("Usage limit reached again · continuing automatically ..." after a takeover).
- *              The tail varies by version (2.1.285 ends "· esc to cancel") and
- *              by a remote flag, so only the prefix is matched.
+ *   armed:     "Usage limit reached · continuing automatically at <time> · esc or type to cancel"
+ *              ("... reached again ..." after a takeover). The tail varies, so only the prefix
+ *              is matched.
  *   cancelled: "Automatic continue cancelled · <reason>"
  *   fired:     "Usage limit reset · continuing automatically"
- *   other:     the early-fire, stale, turned-off, stopped and did-not-run lines,
- *              logged and otherwise ignored.
+ *   other:     the early-fire, stale, turned-off, stopped and did-not-run lines, logged only.
  *
  * One cancel reason is NOT a system entry: "Don't continue automatically" in
- * /rate-limit-options is the command's own output, a `user` entry whose
- * content is `<local-command-stdout>Automatic continue cancelled. Your session
- * will wait for you instead; ...</local-command-stdout>` (derived from code;
- * no real sample on this machine).
+ * /rate-limit-options is the command's own output, a `user` entry whose content is
+ * `<local-command-stdout>Automatic continue cancelled. ...</local-command-stdout>`.
  *
- * Recognition is by type, subtype and prefix only, and the text is never
- * parsed for a time: Claude Code writes these itself, so a `system` entry is
- * trustworthy provenance, but the wording is not a contract.
+ * Recognition is by type, subtype and prefix only, and the text is never parsed for a time: a
+ * `system` entry is trustworthy provenance, but the wording is not a contract.
  */
 
 export type NativeStatusKind = 'armed' | 'cancelled' | 'fired' | 'other';
@@ -129,24 +121,18 @@ export const STAND_DOWN_LABEL: Readonly<Record<StandDownReason, string>> = {
 const CANCELLED = `${CANCELLED_PREFIX} ${DOT} `;
 
 /**
- * Cancel-line wordings, matched as prefixes of the content (all pinned from
- * the 2.1.285 binary; research-autocontinue-compaction.md sections B to D).
- * Each carries more after the reason ("... , so the task will not resume on
- * its own when the usage limit resets (continue it there)") that is
- * deliberately not matched, so a wording tweak past the reason does not break
- * the stand-down.
+ * Cancel-line wordings, matched as prefixes of the content. Each carries more after the reason
+ * that is deliberately not matched, so a wording tweak past the reason does not break the
+ * stand-down.
  *
  * - desktop: /desktop handed the session to Claude Desktop.
  * - cloud: the session is being sent to the cloud.
- * - background: the task continues in another (background) session, so a
- *   resume here is a second writer.
- * - user: Esc or Ctrl+C at an empty prompt (a system line), or "Don't continue
- *   automatically" in /rate-limit-options (a user entry; see
- *   classifyNativeStatus).
+ * - background: the task continues in another (background) session, so a resume here is a
+ *   second writer.
+ * - user: Esc or Ctrl+C at an empty prompt (a system line), or "Don't continue automatically"
+ *   in /rate-limit-options (a user entry; see classifyNativeStatus).
  *
- * Not listed on purpose, so today's behaviour holds: `process_exit` ("Claude
- * Code exited during the wait") and `relaunch` ("Claude Code relaunched
- * during the wait"). A mismatch only falls back to resuming as before.
+ * Not listed on purpose: `process_exit` and `relaunch`. A mismatch only falls back to resuming.
  */
 const STAND_DOWN_PATTERNS: readonly { reason: StandDownReason; re: RegExp }[] = [
   { reason: 'desktop', re: new RegExp(`^${CANCELLED}this session moved to Claude Desktop`) },

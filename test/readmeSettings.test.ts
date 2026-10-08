@@ -4,19 +4,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
- * README.md's `## Settings` table is hand-written prose, not generated - so
- * nothing stops it drifting from `package.json` the moment a setting's
- * default changes or a new one is added. This test parses the table exactly
- * as a reader would - short of reading `package.json` itself - and checks it
- * against the manifest: every `claudeLimitBreak.*` property is listed with
- * its declared default, and nothing listed is not in the manifest.
+ * README.md's `## Settings` table is hand-written, so this checks it against
+ * package.json: every `claudeLimitBreak.*` property is listed with its
+ * declared default, and nothing listed is missing from the manifest.
  *
- * A row's Setting/Default cell can name more than one setting at once (the
- * `alertSound` / `alertSoundFile` and `randomDelayMinMinutes` /
- * `randomDelayMaxMinutes` rows), each backtick-quoted name paired
- * positionally with the backtick-quoted default in the same slash-joined
- * position - so parsing splits on ` / ` before stripping backticks, rather
- * than just collecting every backtick span in the row.
+ * A row can name several settings (`alertSound` / `alertSoundFile`), each
+ * name paired positionally with the default in the same slash-joined
+ * position, so parsing splits on ` / ` before stripping backticks.
  */
 
 function readManifestProperties(): Record<string, { default: unknown }> {
@@ -55,9 +49,8 @@ function parseReadmeSettingsTable(readme: string): ParsedRow[] {
 
   const rows: ParsedRow[] = [];
   for (const line of body.split('\n')) {
-    // Data rows only: start with "| `" (the Setting column is always
-    // backtick-quoted names). Skips the header row ("| Setting | ...") and
-    // the separator row ("|---|---|---|").
+    // Data rows only: they start with "| `"; this skips the header and
+    // separator rows.
     if (!line.startsWith('| `')) {
       continue;
     }

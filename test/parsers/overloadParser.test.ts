@@ -54,15 +54,9 @@ test('the added marker does not admit prose about sockets', () => {
   assert.equal(detectOverload('the socket layer hangs up on idle connections'), undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a (synthesis A5): Claude Code's own in-flight retry must not also be
-// scheduled - acting on it would interrupt Claude's own backoff. The PARENS
-// form carrying a "Retrying in"/"attempt k/n" suffix is that in-flight retry;
-// the COLON form with no such suffix is terminal and stays actionable.
-// Source: prior-art/1-autoretry-detection.md "Three gaps" #1 (line ~30) and
-// the fixture table near line 230; overload.test.js:83-85 ("Acting on it
-// would interrupt Claude's own backoff").
-// ---------------------------------------------------------------------------
+// Claude Code's own in-flight retry must not also be scheduled. The PARENS form with
+// a "Retrying in"/"attempt k/n" suffix is that retry; the COLON form with no such
+// suffix is terminal and actionable.
 
 test('an in-flight retry (parens form, "Retrying in"/"attempt k/n") must not schedule anything', () => {
   const positives = [
@@ -81,12 +75,8 @@ test('the colon form with no retry suffix stays terminal and actionable', () => 
   assert.ok(detectOverload('API Error: 529 Overloaded'), 'colon form with no suffix must still fire');
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a: the transient-429 render disclaims being a usage limit in its own
-// text and must route to overload instead of being dropped by both parsers.
-// Source: prior-art/1-autoretry-detection.md "Three gaps" #3 (line ~37-48)
-// and the fixture table near line 230.
-// ---------------------------------------------------------------------------
+// The transient-429 render disclaims being a usage limit in its own text and routes
+// to overload instead of being dropped by both parsers.
 
 const TRANSIENT_429 = 'API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited';
 
@@ -101,18 +91,9 @@ test('the transient-429 render never arms a usage-limit timer, trusted or not', 
   assert.equal(detectLimit(TRANSIENT_429, new Date(), 24, { trusted: true }), undefined, 'trusted (flagged) path');
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a: "computer went to sleep mid-response" and its sibling renders
-// (dropped connection, stalled stream) must route to overload as a
-// retry-class interruption. Anchored on the "API Error:" head so prose that
-// merely mentions sleep never matches.
-// Sources: prior-art/1-autoretry-detection.md line 80-81 (six of the seven
-// variants, verbatim from claude-auto-retry's own fixture, tmux pane %111);
-// prior-art/2-autoretry-resume.md line 296-297 (the "before a response was
-// produced" sleep variant, config.js:89-90); prior-art/5-history-issues.md
-// bug entry #3 ("all seven render variants... suspend, dropped connection,
-// stalled stream, mid-response server error in two forms").
-// ---------------------------------------------------------------------------
+// "Computer went to sleep mid-response" and its sibling renders (dropped connection,
+// stalled stream) route to overload as retry-class interruptions. Anchored on the
+// "API Error:" head so prose that merely mentions sleep never matches.
 
 test('sleep/stream-interruption renders route to overload', () => {
   const positives: [string, string][] = [
@@ -140,33 +121,20 @@ test('prose merely mentioning sleep, without the API Error: head, never matches'
 });
 
 test('the exact stream-interruption wording without the API Error: head does not match, even when other overload vocabulary is present', () => {
-  // Isolates the head anchor itself: this text carries an ERROR_MARKERS word
-  // ("error") so it clears looksLikeOverloadMessage and actually reaches the
-  // RULES loop, and it carries the literal "your computer went to sleep
-  // mid-response" phrase the rule matches - but with a bare "error:", not
-  // "API Error:", ahead of it. Only the head anchor stands between this and
-  // a false positive.
+  // Isolates the head anchor: this text clears looksLikeOverloadMessage (it has
+  // "error") and carries the sleep phrase, but with a bare "error:" instead of
+  // "API Error:".
   assert.equal(
     detectOverload('There was an error: your computer went to sleep mid-response, apparently.'),
     undefined,
   );
 });
 
-// ---------------------------------------------------------------------------
-// Task 4a fix round 1 (review finding #2, Important): the transient-429 and
-// stream-interrupted RULES entries were not anchored to a line start, so
-// "API Error:" turning up mid-sentence in model prose - or inside a quoted
-// shell argument - fired both on the untrusted path. Anchored per physical
-// line of the raw text (matchesApiErrorLine), the same technique
-// looksLikeQuotedNotice (limitParser.ts) already uses, since normalize()
-// collapses every real newline before the RULES loop ever sees the text.
-// Sources: prior-art/1-autoretry-detection.md:82 ("NOT just 'API Error
-// nearby'... these are ordinary-English causes... that get quoted in prose
-// easily"); 5-history-issues.md:55, :174.
-// ---------------------------------------------------------------------------
+// The transient-429 and stream-interrupted rules are anchored to a line start
+// (matchesApiErrorLine, per physical line of the raw text), so "API Error:"
+// mid-sentence in prose or inside a quoted shell argument does not fire.
 
-test('mid-sentence "API Error:" for the stream-interrupted wording does not fire (fix round 1, finding #2)', () => {
-  // Verbatim from the review finding.
+test('mid-sentence "API Error:" for the stream-interrupted wording does not fire', () => {
   assert.equal(
     detectOverload(
       'Added a rule so API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
@@ -175,7 +143,7 @@ test('mid-sentence "API Error:" for the stream-interrupted wording does not fire
   );
 });
 
-test('mid-sentence "API Error:" for the transient-429 wording does not fire (fix round 1, finding #2)', () => {
+test('mid-sentence "API Error:" for the transient-429 wording does not fire', () => {
   assert.equal(
     detectOverload(
       'When Claude Code prints API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited we should back off.',
@@ -184,7 +152,7 @@ test('mid-sentence "API Error:" for the transient-429 wording does not fire (fix
   );
 });
 
-test('a quoted shell argument echoing the sleep-interruption wording does not fire (fix round 1, finding #2)', () => {
+test('a quoted shell argument echoing the sleep-interruption wording does not fire', () => {
   // The Bash tool_use `command` shape: a shell string literal, not a banner
   // line of its own.
   assert.equal(detectOverload('echo "API Error: Your computer went to sleep mid-response."'), undefined);
@@ -218,14 +186,8 @@ test('the message glyph Claude Code prefixes a banner line with is still accepte
   );
 });
 
-// ---------------------------------------------------------------------------
-// Task 4c (R1): every transient render the Claude Code docs (errors.md) and
-// the 2.1.282 binary (research-api-errors-binary.md Q1, function INn) name.
-// Each is the text of a FLAGGED entry - overload detection reads no other kind
-// of entry any more (inspectLine, R3) - so the parser itself has no
-// "unflagged" mode to test: whether the ENTRY is Claude Code's own is decided
-// before detectOverload is ever called.
-// ---------------------------------------------------------------------------
+// Every transient render Claude Code documents. Each is the text of a FLAGGED entry;
+// whether the entry is Claude Code's own is decided before detectOverload is called.
 
 const STATUS_LINK = 'If it persists, check https://status.claude.com.';
 
@@ -309,10 +271,8 @@ test('the documented renders are still found on a line of their own, after other
 
 test('the "//" in "https://status.claude.com" is what dropped the documented renders', () => {
   const withLink = `API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. ${STATUS_LINK}`;
-  // The control: the very same sentence with only the scheme's "//" removed.
-  // Before the fix this was detected and `withLink` was not, so nothing else in
-  // the text - not "Internal server error", not the em dash, not the length -
-  // was what dropped it.
+  // The control: the same sentence with only the scheme's "//" removed, so nothing
+  // else in the text (error wording, em dash, length) is what drops the linked one.
   const withoutScheme = withLink.replace('https://', '');
   assert.equal(detectOverload(withoutScheme)?.rule, 'api-error-status', 'control: no "//" in the text');
   assert.equal(detectOverload(withLink)?.rule, 'api-error-status', 'a URL\'s "//" is not a code comment');
@@ -326,10 +286,8 @@ test('a real comment marker beside a banner still marks it as quoted source code
 });
 
 test('"Request rejected (429)" carrying a usage-limit message stays a limit, not an overload', () => {
-  // Verbatim from a real transcript (Claude Code 2.1.267, entrypoint sdk-cli): the
-  // same "Request rejected (429)" head, but the API's own message is a usage
-  // limit with a reset time. Only the "temporary capacity issue" tail is an
-  // overload.
+  // Real transcript: the same "Request rejected (429)" head, but the API's message is a
+  // usage limit with a reset time. Only the "temporary capacity issue" tail is an overload.
   const usageLimit = 'API Error: Request rejected (429) · Claude AI usage limit reached|1789071998';
   assert.equal(detectOverload(usageLimit), undefined);
   assert.equal(
@@ -354,16 +312,16 @@ test('the no-response and request-rejected renders are anchored on their "API Er
   );
 });
 
-test('a connection loss is recognised whatever the OS error code (Task 4c ruling)', () => {
-  // The binary interpolates the code into the render (INn: `Connection to the
-  // API was lost (${w.code})`), so ECONNRESET is one of several.
+test('a connection loss is recognised whatever the OS error code', () => {
+  // The code is interpolated into the render (`Connection to the API was lost
+  // (${code})`), so ECONNRESET is one of several.
   for (const code of ['EPIPE', 'ETIMEDOUT', 'ECONNABORTED', 'ENETUNREACH']) {
     const hit = detectOverload(`API Error: Connection to the API was lost (${code}). This is usually temporary — try again.`);
     assert.equal(hit?.rule, 'connection-error', code);
   }
 });
 
-// R1b: not transient, so a resume would only loop until the budget gives up.
+// Not transient, so a resume would only loop until the budget gives up.
 const NOT_TRANSIENT_RENDERS = [
   'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
   "There's an issue with the selected model (claude-x). It may not exist or you may not have access to it. Run --model to pick a different model.",
@@ -379,10 +337,8 @@ for (const render of NOT_TRANSIENT_RENDERS) {
   });
 }
 
-// R2: a "Retrying in ..." line is Claude Code still retrying, so nothing is
-// scheduled on top of it - with or without an attempt counter, in either unit
-// spelling. (The binary builds it inside a React render function only, never a
-// transcript message; ignoring it can therefore not lose a real stop.)
+// A "Retrying in ..." line is Claude Code still retrying, so nothing is scheduled on
+// top of it - with or without an attempt counter, in either unit spelling.
 const IN_FLIGHT_RETRY_LINES = [
   'API Error (529 {"type":"error"}) · Retrying in 12s',
   'API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10',
@@ -401,9 +357,8 @@ test('the same 529 without a "Retrying in" suffix is still terminal (control for
   assert.equal(detectOverload('API Error: 500 Internal server error')?.rule, 'api-error-status');
 });
 
-// Fix round 1 (Task 4c review, minor 1): the URL that is taken out before the
-// code check stops at the characters that end a link in source code, so a
-// comment marker glued onto it still marks the text as quoted source.
+// The URL taken out before the code check stops at characters that end a link in
+// source, so a glued-on comment marker still marks the text as quoted source.
 test('a code marker glued onto a link still marks the text as quoted source', () => {
   for (const text of [
     'x = "https://a.com";//API Error: 529 Overloaded',

@@ -65,35 +65,30 @@ import { RATE_LIMIT_LABELS } from './parsers/limitParser';
 
 const NS = 'claudeLimitBreak';
 
-/** Label for the trust-hotlink button on the untrusted-folder notice (Task 5a). */
+/** Label for the trust-hotlink button on the untrusted-folder notice. */
 const TRUST_BUTTON = 'Open Claude to Trust';
 
 /**
  * Where jobs waiting for "Resume Now" are kept across a reload. Separate from
- * the scheduler's own `claudeLimitBreak.pending`: these have already fired,
- * and putting them back there would leave the scheduler counting down to a
- * deadline that has passed.
+ * the scheduler's own `claudeLimitBreak.pending`: these have already fired, and
+ * putting them back there would count down to a deadline that has passed.
  */
 const READY_KEY = 'claudeLimitBreak.ready';
 
 /**
- * How much of a transcript's end to read when looking for its newest usage
- * record. Generous next to one entry, trivial next to a file that reached
- * 11.2 MB in a single session.
+ * Tail of a transcript read for its newest usage record; wide enough to reach
+ * past one oversized entry (a base64 image) to the last real turn.
  */
-const USAGE_TAIL_BYTES = 256 * 1024;
+const USAGE_TAIL_BYTES = 8 * 1024 * 1024;
 
 /**
- * Whether a transcript entry's working directory belongs to this window.
+ * Whether a transcript entry's cwd belongs to this window. The watcher is
+ * global (every project under ~/.claude/projects), so per-turn reactions must
+ * filter with this.
  *
- * The transcript watcher is global — it sees every Claude session in every
- * project under ~/.claude/projects — so anything that reacts per turn has to
- * ask this first, or every window reacts to every project on the machine.
- *
- * Compared as resolved paths with a separator boundary rather than a bare
- * startsWith, so /work/app does not swallow /work/app-old, and folded to lower
- * case because a Windows path recorded by the CLI need not match the casing VS
- * Code reports for the same folder.
+ * Compared as resolved paths with a separator boundary (/work/app must not match
+ * /work/app-old), and case-folded because a Windows path recorded by the CLI need
+ * not match VS Code's casing.
  */
 export function isInsideWorkspace(cwd: string | undefined, folders: readonly string[]): boolean {
   if (!cwd) {
@@ -108,10 +103,9 @@ export function isInsideWorkspace(cwd: string | undefined, folders: readonly str
 }
 
 /**
- * The label a notice names a limit by: Claude Code's own ("weekly", "Opus",
- * ...), or "usage" when the type is unknown. An own property only, so a
- * stored type of `constructor` or `toString` is no label (wave D fix round
- * 1, Minor 1; holderPolicy guards the same lookup).
+ * The label a notice names a limit by (Claude Code's own, e.g. "weekly",
+ * "Opus"), or "usage" when unknown. Own property only, so a stored type of
+ * `constructor` is no label.
  */
 function limitLabel(job: { rateLimitType?: string }): string {
   return job.rateLimitType !== undefined && Object.hasOwn(RATE_LIMIT_LABELS, job.rateLimitType)
@@ -129,18 +123,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const log = createLogger('limit-break', (line) => channel.appendLine(line));
   const settings = () => readSettings(vscode.workspace.getConfiguration(NS));
 
-  // Task 10: sweep claim files this window's own crashes or a stale race left
-  // behind. Disk hygiene, not a correctness step - claimResume's own 1h
-  // staleness check is what keeps a claim from blocking anything for long;
-  // this just keeps the machine-wide directory from growing forever.
+  // Disk hygiene: keeps the machine-wide claims directory from growing.
+  // claimResume's own staleness check is what stops a stale claim blocking anything.
   cleanupStaleClaims(claimsDir(), Date.now(), fs, log);
 
   /**
-   * Take (or, on a manual path, refresh) the cross-window claim for `key`
-   * (Task 10), recording this window's identity in it so a later collision
-   * can be told apart from another window's (final review, Important 3).
-   * `vscode.env.sessionId` is per window and per run - exactly the scope of
-   * "this window" here.
+   * Take (or, on a manual path, refresh) the cross-window claim for `key`,
+   * recording this window's identity (`vscode.env.sessionId`, per window and run)
+   * so a collision can be told apart from another window's.
    */
   const claim = (key: string) => claimResume(claimsDir(), key, Date.now(), fs, log, vscode.env.sessionId);
 
@@ -148,26 +138,20 @@ export function activate(context: vscode.ExtensionContext): void {
   const status = new CountdownStatusBar();
 
   /**
-   * Sessions this window has stopped trying to resume, and why (Task 4b -
-   * see gaveUp.ts). In memory only: a reload starts clean, which the brief
-   * allows, and the ready-job persistence (#11) is a separate mechanism.
+   * Sessions this window has stopped trying to resume, and why (gaveUp.ts).
+   * In memory only: a reload starts clean.
    */
   const gaveUp = new GaveUpState();
 
   /**
    * Consecutive overload retries planned per session since its last finished
-   * turn (final fix wave A, A6 - the user's decision; overloadBackoff.ts):
-   * the count that picks each retry's backoff, and gives up at the sixth.
-   * In memory only, like `gaveUp`.
+   * turn; picks each retry's backoff (overloadBackoff.ts). In memory only.
    */
   const overloadStreaks = new OverloadStreaks();
 
   /**
    * The one place the status bar is drawn from. Reads `scheduler.jobs` and
-   * `readyJobs` fresh every call, rather than taking either as a parameter,
-   * so every caller - a countdown tick, a ready-job change, a gave-up
-   * change, a trust change - draws the exact same picture. Task 5b: the
-   * tooltip now lists every one of them, not just the soonest.
+   * `readyJobs` fresh each call so every caller draws the same picture.
    */
   const render = (): void => {
     status.update(scheduler.jobs, readyJobs, settings().statusBar, gaveUp.list());
@@ -176,9 +160,8 @@ export function activate(context: vscode.ExtensionContext): void {
     () => settings().maxWaitHours,
     () => settings().transcriptPollSeconds,
     log,
-    // The watcher discards out-of-scope entries before parsing them, rather
-    // than every consumer filtering afterwards (#2). Read per call, so
-    // changing the setting or opening a folder takes effect without a reload.
+    // Out-of-scope entries are dropped before parsing. Read per call so a
+    // setting or folder change applies without a reload.
     () => ({
       mode: settings().watchScope,
       folders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
@@ -188,35 +171,23 @@ export function activate(context: vscode.ExtensionContext): void {
   const statBytes = (p: string) => fs.statSync(p).size;
 
   // Jobs whose cooldown elapsed while autoResume was off. The scheduler clears
-  // its own state before firing — a deliberate re-entrancy guard — so without
-  // holding them here they would simply be gone and "Resume Now" would report
-  // nothing pending.
-  //
-  // A list, not a slot. Sessions in different projects hit their limits
-  // independently, so a second one can come ready while the first is still
-  // sitting in an unanswered notification. One slot would silently overwrite
-  // the first, and its notification would then resume the wrong session.
+  // its own state before firing, so without this list "Resume Now" would find
+  // nothing. A list, not a slot: sessions in different projects can come ready
+  // while an earlier notification is unanswered, and one slot would resume the
+  // wrong session.
   const readyJobs: PendingJob[] = [];
 
   /**
-   * Written through to globalState on every change, and read back at
-   * activation.
-   *
-   * Without this a reload silently destroyed a job waiting to be started by
-   * hand: the scheduler clears its own state before firing, so this list was
-   * the only thing holding it, and it lived in memory alone (#11). That
-   * matters more since #7, where reopening the window is the remedy offered
-   * for a stale panel tab — the advice would otherwise take the job with it.
+   * Written through to globalState on every change and read back at
+   * activation, so a reload does not destroy a job waiting for a manual start.
    */
   const persistReady = () => {
     void context.globalState.update(READY_KEY, readyJobs.length > 0 ? [...readyJobs] : undefined);
   };
 
   /**
-   * Drop a remembered job. Reports whether it was still there to drop.
-   * Re-renders on an actual removal (Task 5b: the tooltip now lists ready
-   * jobs, so every change to this list must reach the status bar - not just
-   * the ones that happened to be followed by some other render() already).
+   * Drop a remembered job; reports whether it was there. Re-renders on
+   * removal because the tooltip lists ready jobs.
    */
   const forgetReady = (sessionId: string) => {
     const at = readyJobs.findIndex((j) => j.sessionId === sessionId);
@@ -237,11 +208,10 @@ export function activate(context: vscode.ExtensionContext): void {
     render();
   };
 
-  // Restored before anything can add to the list. A job read back here is one
-  // the previous window offered and nobody answered; it stays claimable from
-  // "Resume Now", which is what the setting's description promises.
-  // Validated like the scheduler's own list (final fix wave B, B2): this
-  // is globalState too, and a job that fails is dropped with a log line.
+  // Restored before anything can add to the list: a job the previous window
+  // offered and nobody answered stays claimable from "Resume Now". Validated like
+  // the scheduler's list, since this is globalState too; failures are dropped
+  // with a log line.
   const restoredReady = restoreJobs(context.globalState.get<unknown>(READY_KEY), log, 'ready');
   if (restoredReady.length > 0) {
     readyJobs.push(...restoredReady);
@@ -249,12 +219,10 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   /**
-   * The newest usage record in a transcript, read from the end of the file.
-   *
-   * A window off the end rather than the whole file: transcripts reach tens of
-   * megabytes, this runs on a detection, and only the last record matters.
-   * Any failure - missing file, unreadable, no record in the window - is
-   * undefined, which puts the estimate back on the byte count.
+   * The newest real usage record in a transcript, read from the tail only
+   * (transcripts reach tens of MB). A limit's synthetic error entry has zero usage
+   * and is skipped by parseLastUsage, hence USAGE_TAIL_BYTES. Failure, or no real
+   * turn in the window, is undefined (unmeasured).
    */
   const readUsage = (transcript: string): UsageRecord | undefined => {
     try {
@@ -278,13 +246,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /** Arm a planned resume: trust check, scheduler, and the notice that names both. */
-  const schedule = (planned: PendingJob, s: Settings, estimate: number): void => {
-    // Checked here, at schedule time, rather than when the cooldown fires:
-    // the user is still at the keyboard for this notice, and can trust the
-    // folder before walking away. By fire time they are already gone, which
-    // is exactly why an untrusted folder stalls silently at Claude's own
-    // trust prompt (#5). Never written back here, only read - answering that
-    // prompt is the user's call, not this extension's.
+  const schedule = (planned: PendingJob, s: Settings, estimate: number | undefined): void => {
+    // Checked at schedule time, while the user is at the keyboard and can trust
+    // the folder; by fire time an untrusted folder stalls silently at Claude's
+    // trust prompt. Read only: answering that prompt is the user's call.
     const folderTrusted = planned.cwd
       ? isFolderTrusted(
           planned.cwd,
@@ -296,19 +261,15 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!scheduler.schedule(job)) {
       return;
     }
-    // A6: counted when a retry is SCHEDULED, not when one launches - every
-    // window sees the same detections and turn ends, so every window's count
-    // agrees, while only one of them launches each resume (overloadBackoff.ts).
+    // Counted when a retry is scheduled, not launched: every window sees the
+    // same detections so counts agree, while only one launches each resume.
     if (job.reason === 'overload') {
       overloadStreaks.planned(job.sessionId);
     }
-    // Final fix wave A, A8 (cloud parked #33): Cancel holds each cancelled
-    // job's claim until its fire time so every OTHER window drops its copy.
-    // But this window cancelling and then detecting the same reset again (the
-    // user retried, and hit the limit again) is a fresh plan, and its own
-    // Cancel claim would drop it at fire as "already claimed by this window".
-    // So a claim THIS window owns on the fresh plan's key is released; one
-    // another window holds is left exactly as it is.
+    // Cancel holds a cancelled job's claim until its fire time. If this window
+    // cancelled then re-detects the same reset, its own Cancel claim would drop
+    // the fresh plan at fire, so release a claim this window owns; leave another
+    // window's.
     const freshKey = claimKeyFor(job);
     if (claimOwner(claimsDir(), freshKey, fs) === vscode.env.sessionId) {
       releaseClaim(claimsDir(), freshKey, fs, log);
@@ -316,18 +277,20 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     warnIfUntrusted(job);
     if (job.offerOnly) {
-      // Wave D, D3: "resuming at" would be a lie for a job that only ever
-      // offers. Its own notice replaces it.
+      // "resuming at" would be a lie for a job that only offers.
       announceOfferOnly(job, s);
       return;
     }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
-      showResumeNotice(job, `Limit Break: resuming at ${at} (~${estimate.toLocaleString()} tokens).`);
+      showResumeNotice(
+        job,
+        `Limit Break: resuming at ${at}${estimate === undefined ? '' : ` (~${estimate.toLocaleString()} tokens)`}.`,
+      );
     }
   };
 
-  /** The log line for a job whose folder the Claude CLI has not trusted (#5). */
+  /** The log line for a job whose folder the Claude CLI has not trusted. */
   const warnIfUntrusted = (job: PendingJob): void => {
     if (job.folderTrusted === false) {
       log.warn(
@@ -337,13 +300,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Show a notice about a resume that will run unattended - a fresh schedule,
-   * or an offer-only job made automatic (wave D fix round 2, N2). When its
-   * folder is not trusted by the Claude CLI the notice says so and offers
-   * "Open Claude to Trust": a one-click way to answer the trust dialog ahead
-   * of the resume, right when the user is at the keyboard to see this notice
-   * (Task 5a). The button only ever opens a terminal - see openClaudeToTrust
-   * below - never answers the dialog itself (#2).
+   * Notice about a resume that will run unattended. When the folder is not
+   * trusted by the Claude CLI it offers "Open Claude to Trust" so the user can
+   * answer the trust dialog now. The button only opens a terminal; it never
+   * answers the dialog itself.
    */
   const showResumeNotice = (job: PendingJob, message: string): void => {
     if (job.folderTrusted !== false) {
@@ -361,18 +321,11 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Wave D, D3 (policy B, the user's decision): tell the user, at detection,
-   * that a limit resetting beyond maxWaitHours will not resume on its own.
-   * Always logged. Shown once across windows, not once per window: every
-   * window watching the machine detects and schedules the same reset, so the
-   * notice takes its own claim (the fire's key plus a suffix, so it never
-   * collides with the fire's claim), held to the same deadline the fire's
-   * claim is, and a window that finds it taken stays quiet. A same-reset
-   * re-detection in this window never gets here: the scheduler either keeps
-   * the offer-only job as it is (an offer-only re-detection) or makes it
-   * automatic in place (an automatic one, announced by announceUpgrade
-   * below), and returns false either way (wave D fix round 1).
-   * Honours `notify` like the "resuming at" notice it stands in for.
+   * Tell the user at detection that a limit resetting beyond maxWaitHours will
+   * not resume on its own. Always logged; shown once across windows via its own
+   * claim (the fire's key plus a suffix, held to the same deadline). A same-reset
+   * re-detection in this window never gets here: the scheduler keeps the
+   * offer-only job or upgrades it in place (announceUpgrade). Honours `notify`.
    */
   const announceOfferOnly = (job: PendingJob, s: Settings): void => {
     const label = limitLabel(job);
@@ -384,18 +337,16 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Wave D fix round 1 (Important 1; the user's decision: the latest
-   * detection decides): an offer-only job that a same-reset re-detection
-   * made automatic (scheduler.onUpgrade). Told once across windows, like
-   * the offer-only notice, on a claim of its own.
+   * An offer-only job that a same-reset re-detection made automatic
+   * (scheduler.onUpgrade). Told once across windows, on a claim of its own.
    */
   const announceUpgrade = (job: PendingJob, s: Settings): void => {
     const message =
       `Limit Break: session ${job.sessionId.slice(0, 8)} hit its ${limitLabel(job)} limit again. ` +
       `It resets within ${s.maxWaitHours} hours, so it will now resume automatically at ` +
       `${new Date(job.resumeAtMs).toLocaleTimeString()}.`;
-    // N2: it now resumes unattended, so an untrusted folder is called out
-    // exactly as a fresh schedule's notice calls it out.
+    // It now resumes unattended, so call out an untrusted folder as a fresh
+    // schedule does.
     warnIfUntrusted(job);
     announceOnce(job, s, 'upgrade-notice', message, 'upgrade', () => showResumeNotice(job, message));
   };
@@ -428,9 +379,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
-    // A6: an overload retry's backoff comes from how many this session has
-    // had in a row. `undefined` is the sixth: nothing more is scheduled.
-    // Only the id is wanted here, so resolveSession's size is stubbed.
+    // An overload retry's backoff comes from this session's consecutive count;
+    // `undefined` is the sixth, when nothing more is scheduled. Only the id is
+    // wanted, so resolveSession's size is stubbed.
     const streakId = reason === 'overload' ? resolveSession(hit.file, hit.cwd, () => 0)?.sessionId : undefined;
     const backoffMs = streakId === undefined ? 0 : overloadBackoffMs(overloadStreaks.count(streakId));
     const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage, backoffMs ?? 0);
@@ -439,12 +390,10 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     if (backoffMs === undefined) {
-      // Final fix wave A, A6 (final review M8, Goal 4): the session kept
-      // stopping on server errors through five retries in a row. Nothing is
-      // scheduled or remembered; it gives up - visibly, in the status bar,
-      // and notified once (warn-once, gaveUp.ts) - until it finishes a turn.
-      // Ahead of gaveUp.detected() on purpose: a further overload is the
-      // same streak, not news, so it must not clear the record or re-warn.
+      // Kept stopping on server errors through repeated retries: schedule
+      // nothing, show it as given up (notified once, gaveUp.ts) until it finishes a
+      // turn. Before gaveUp.detected() on purpose: a further overload is the same
+      // streak, so must not clear the record or re-warn.
       const sessionId = plan.kind === 'refuse' ? plan.sessionId : plan.job.sessionId;
       const cwd = plan.kind === 'refuse' ? plan.cwd : plan.job.cwd;
       log.warn(
@@ -460,29 +409,22 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       return;
     }
-    // A new detection for a session - refused or scheduled, limit or
-    // overload - means it is live again: whatever it last gave up on is
-    // history, and the next failure is news (Task 4b ruling 2). 'ignore'
-    // never names a session, so it cannot clear one.
+    // Any new detection means the session is live again, so whatever it last
+    // gave up on is history. 'ignore' names no session, so clears none.
     if (gaveUp.detected(plan.kind === 'refuse' ? plan.sessionId : plan.job.sessionId)) {
       render();
     }
     if (plan.kind === 'refuse') {
       log.warn(plan.reason);
-      // Offered, not just announced. The estimate can be several times too
-      // high on a long session - the byte count counts history that
-      // compaction already summarised away - and refusing outright takes the
-      // decision away from the person whose session it is. Saying yes plans
-      // the same resume with the cap lifted for this one incident.
+      // Offered, not just announced: a cold cache makes a big resume costly, but
+      // whether it is worth it is the user's call. Yes replans with the cap lifted
+      // for this one incident.
       void Promise.resolve(
         vscode.window.showWarningMessage(budgetRefusalNotice(plan.sessionId, plan.reason), 'Resume anyway'),
       ).then((choice) => {
         if (choice !== 'Resume anyway') {
-          // Closed without going ahead (the promise resolves undefined when
-          // the notification is dismissed): this session will not be resumed,
-          // so it gives up - visibly, in the status bar. No second popup: the
-          // refusal just closed WAS the notice for this cause, naming it and
-          // both ways through (budgetRefusalNotice).
+          // Dismissed without going ahead: give up visibly; no second popup, since
+          // the refusal itself was the notice for this cause.
           log.warn(`Budget refusal for ${plan.sessionId} dismissed; not resuming it.`);
           gaveUp.record({ sessionId: plan.sessionId, cwd: plan.cwd, cause: 'budget', atMs: Date.now() });
           render();
@@ -507,27 +449,22 @@ export function activate(context: vscode.ExtensionContext): void {
       });
       return;
     }
+    if (plan.budgetUnmeasured) {
+      log.info(`Resume budget: no usage record for session ${plan.job.sessionId.slice(0, 8)}; not checked.`);
+    }
     schedule(plan.job, s, plan.estimate);
   };
 
   /**
-   * Re-read trust for a job whose folder was untrusted when it was scheduled.
+   * Re-read trust for a job whose folder was untrusted when scheduled, so the
+   * warning can clear once the user trusts the folder during the countdown.
    *
-   * The warning exists to get the folder trusted *during* the countdown, so
-   * the one state change it is designed to cause was the one it could not see:
-   * the flag was computed once and rendered until the resume fired (#8).
-   *
-   * Only ever false -> true. Trust being withdrawn mid-countdown is not worth
-   * chasing, and a stale "trusted" costs nothing the resume itself will not
-   * discover. Keyed on the config file's mtime so the common case - nothing
-   * changed - is a stat rather than a parse of a file that grows with every
-   * project the user opens. An unreadable mtime falls through to re-reading,
-   * which is the safe direction: the read itself is the thing that answers.
+   * Only false -> true. Keyed on the config file's mtime so an unchanged file
+   * costs a stat, not a parse; an unreadable mtime falls through to re-reading.
    */
-  // Keyed by session, not one scalar for the window. onChange only ever
-  // reports the soonest job, so a second session's first check can land on an
-  // mtime a different session's check already recorded - and then its trust is
-  // never re-read at all, which is the bug this function exists to fix.
+  // Keyed by session, not per window: onChange reports only the soonest job,
+  // so a second session's first check could hit an mtime another session already
+  // recorded and never re-read its trust.
   const trustStamps = new Map<string, number>();
   /** Returns whether this call actually flipped `job.folderTrusted` to true. */
   const refreshTrust = (job: PendingJob | undefined): boolean => {
@@ -561,19 +498,12 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Re-check trust for every session the tooltip can currently show a
-   * marker for: every counting-down job AND every job waiting for
-   * "Resume Now" (review 1, Important 2 - the tooltip lists both since Task
-   * 5b, but this used to refresh only `scheduler.current`, or only
-   * `scheduler.jobs`). Each check is `refreshTrust`'s own cheap mtime-cached
-   * stat - no config parse unless the file actually changed - so looping
-   * the whole set on a scheduler change or a trust-terminal close costs at
-   * most one stat per listed job, not a re-parse.
+   * Re-check trust for every job the tooltip can show a marker for
+   * (counting down and ready). Each check is refreshTrust's cheap mtime-cached
+   * stat.
    *
-   * A ready job's flip is written back to `readyJobs`' own persistence:
-   * without this, a ready job trusted right before a reload would come back
-   * with the stale `folderTrusted: false` it was persisted with, and the
-   * tooltip would call it untrusted again despite nothing having changed.
+   * A ready job's flip is persisted: otherwise a reload would restore the stale
+   * `folderTrusted: false`.
    */
   const refreshAllTrust = (): void => {
     for (const job of scheduler.jobs) {
@@ -605,15 +535,6 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const stallChecks = new Set<NodeJS.Timeout>();
 
-  /**
-   * Attempts to launch a resume. Returns whether a terminal launch was
-   * actually attempted - false covers everything that stops before
-   * createTerminal (no claude executable found, a cwd that no longer
-   * exists). Callers rely on this to decide whether the job has been
-   * discharged or is still outstanding: every call site here used to drop
-   * the job the moment it decided to resume it, before knowing whether the
-   * launch would actually start.
-   */
   const which = (cmd: string) => {
     try {
       const finder = process.platform === 'win32' ? 'where' : 'which';
@@ -633,22 +554,18 @@ export function activate(context: vscode.ExtensionContext): void {
     resolveClaudeLauncher(configured, process.platform, which, readShim);
 
   /**
-   * Sessions THIS extension has resumed, this window, this run, each against
-   * the pid of the terminal it was resumed in.
-   *
-   * onInputNeeded fires for every turn in every session on the machine, and a
-   * panel tab going stale is only this extension's doing for the sessions it
-   * actually put a `--resume` terminal against. The pid is what stops the
-   * detector counting that resume as somebody else holding the session (#7).
+   * Sessions THIS extension has resumed (this window, this run), each against
+   * its terminal's pid. onInputNeeded fires for every session on the machine; a
+   * stale panel tab is this extension's doing only for sessions it put a
+   * `--resume` terminal against, and the pid keeps the detector from counting
+   * that resume as someone else holding the session.
    */
   const resumedSessions = new Map<string, Promise<number | undefined>>();
 
   /**
-   * `claude agents --json`, run with a timeout so a hung CLI cannot take
-   * whichever handler called this with it. Shared by every reader of the
-   * listing below - detectLivePanel (end-of-turn) and detectAgentRows (a
-   * manual resume, and scheduler.onFire) - so a hang or a missing executable
-   * is one behaviour to reason about, not three.
+   * `claude agents --json`, with a timeout so a hung CLI cannot take the
+   * caller with it. Shared by every listing reader so a hang or missing
+   * executable is one behaviour.
    */
   const runAgentsListing = (): string => {
     const launcher = findLauncher(settings().claudeCommand);
@@ -667,30 +584,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /**
    * Is a panel tab holding this session open, apart from our own resume?
-   *
-   * `claude agents --json` for liveness, the per-pid record for the
-   * entrypoint - see liveSessions.ts for why it is split that way.
+   * Liveness comes from `claude agents --json`, the entrypoint from the per-pid
+   * record (see liveSessions.ts).
    */
   const detectLivePanel = livePanelDetector(runAgentsListing, readHolderRecord);
 
   /**
-   * `claude agents --json`, run once and parsed - or `'unknown'` when the
-   * listing itself could not be run. A manual resume's live-holder check
-   * (confirmManualResume, below) and scheduler.onFire's holder AND
-   * busy-folder-peers checks are all built on this one snapshot function,
-   * via the pure `classifyHolder` / `busyFolderPeers` (liveSessions.ts).
+   * `claude agents --json`, run once and parsed, or `'unknown'` when the
+   * listing could not be run. Feeds classifyHolder / busyFolderPeers.
    */
   const detectAgentRows = agentRowsDetector(runAgentsListing);
 
   /**
-   * Record that a resume of `job` failed for `cause`, and notify - through
-   * `show`, so each site keeps its own severity - the first time that cause
-   * is seen for that session since its last detection (Task 4b ruling 1),
-   * and every time when `manual`: a failure answering a user's click is
-   * always shown (ruling on concern 1; see GaveUpState.record). The caller
-   * logs; this only decides about the popup and the status bar. Never
-   * touches claims: every caller's claim release happens after resume()
-   * returns, exactly as before (Task 10).
+   * Record that a resume of `job` failed for `cause` and notify through
+   * `show` (each site keeps its own severity) the first time that cause is seen
+   * for the session since its last detection, and every time when `manual`. The
+   * caller logs; this only decides about the popup and status bar. Never touches
+   * claims: callers release theirs after resume() returns.
    */
   const giveUp = (
     job: PendingJob,
@@ -712,13 +622,15 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * `manual` is true for every call that runs because the user clicked
-   * something (the resumeNow command, the Resume Now notification button,
-   * "Resume in Terminal Anyway"): its launch failures are always notified.
-   * Only scheduler.onFire's own automatic resume leaves it false. The stall
-   * check below takes it too: one session can hold a ready job AND a
-   * counting-down job, so two manual launches - and two stalls - can happen
-   * with no detection in between (fix round 1, finding 1).
+   * Attempts to launch a resume. Returns whether a terminal launch was
+   * attempted (false: no claude executable, or cwd gone), so callers know whether
+   * the job is discharged or still outstanding.
+   *
+   * `manual` is true when the user clicked something (resumeNow, the Resume Now
+   * button, "Resume in Terminal Anyway"): launch failures are then always
+   * notified. Only scheduler.onFire's automatic resume leaves it false. The stall
+   * check takes it too: one session can hold a ready job AND a counting-down job,
+   * so two manual stalls can happen with no detection in between.
    */
   const resume = (job: PendingJob, manual = false): boolean => {
     const s = settings();
@@ -739,29 +651,18 @@ export function activate(context: vscode.ExtensionContext): void {
     };
     const launcher = resolveClaudeLauncher(s.claudeCommand, process.platform, which, readShim);
     if (!launcher) {
-      // Logged every time, notified once per session (Task 4b ruling 1): a
-      // repeat must still leave a trace somewhere.
+      // Logged every time, notified once per session.
       log.error(`Cannot resume ${job.sessionId}: no claude executable found for "${s.claudeCommand || 'claude'}".`);
       giveUp(job, 'launcher', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
-    // vscode.window.createTerminal does not throw on a bad cwd - VS Code
-    // reports "Starting directory (cwd) ... does not exist" asynchronously,
-    // inside the terminal process, well after this function would already
-    // have logged success. The cwd is whatever the session started in,
-    // recorded whenever that transcript entry was written - possibly weeks
-    // ago, and a renamed project or an unplugged drive is enough to make it
-    // stale. Checking first turns that into a synchronous refusal that names
-    // the path and the transcript it came from, instead of a generic VS Code
-    // error days later that names neither.
+    // createTerminal does not throw on a bad cwd; VS Code reports it
+    // asynchronously, after success is logged. A stale cwd (renamed project,
+    // unplugged drive) is refused here synchronously, naming the path and
+    // transcript.
     //
-    // fs.existsSync is true for a regular file, not only a directory - a
-    // transcript's cwd pointing at a file (renamed-over project folder, a
-    // stray path) would sail through it and hit the exact async
-    // createTerminal failure this check exists to avoid (#8). statSync's
-    // isDirectory() is the only one of the two that actually distinguishes
-    // them; wrapped in try/catch because statSync throws on a missing path,
-    // which must still read as "does not exist", not as an uncaught error.
+    // statSync().isDirectory(), not existsSync, which is also true for a file;
+    // try/catch because statSync throws on a missing path.
     const cwdIsDirectory = (p: string): boolean => {
       try {
         return fs.statSync(p).isDirectory();
@@ -774,29 +675,23 @@ export function activate(context: vscode.ExtensionContext): void {
       giveUp(job, 'cwd', (m) => vscode.window.showErrorMessage(m), manual);
       return false;
     }
-    // Constraint 4, asserted where it matters: `claude --resume` only ever
-    // receives a UUID. Every job is validated when it is restored or resolved,
-    // so this should never fire; it is here because the argv is the one place a
-    // bad id could do harm, and a job that reached it by some path nobody
-    // thought of must stop here, not launch (final review M2).
+    // `claude --resume` only ever receives a UUID. Jobs are validated on restore
+    // and resolve, so this should never fire; it stops a bad id at the one place it
+    // could do harm.
     if (!isSessionId(job.sessionId)) {
       log.error(`Refusing to resume: "${String(job.sessionId)}" is not a session id.`);
       return false;
     }
-    // Headless is opt-in and machine-scoped, and does NOT inherit the
-    // session's permission mode - a verified acceptEdits session resumed with
-    // -p was denied a Write - so headlessPermissionMode is what decides
-    // whether it can do tool work at all. Empty means it cannot, which is the
-    // safe default for something that runs while nobody is watching.
+    // Headless is opt-in and does not inherit the session's permission mode, so
+    // headlessPermissionMode decides whether it can do tool work; empty means it
+    // cannot, the safe default for an unattended run.
     const claudeArgs =
       s.resumeMode === 'headless'
         ? buildHeadlessArgs(job.sessionId, job.prompt, s.headlessPermissionMode)
         : buildResumeArgs(job.sessionId, job.prompt);
-    // The CLI finds its trust record by exact key, and one folder can hold
-    // several: the panel writes the drive letter the way VS Code reports it,
-    // trusting from a terminal writes another. Launching from the spelling on
-    // record as trusted is what lets the CLI see the answer the user already
-    // gave. Same directory either way - only the name changes.
+    // The CLI finds its trust record by exact key and one folder can hold
+    // several spellings (e.g. drive-letter case). Launch from the spelling on
+    // record as trusted; same directory, only the name changes.
     const onRecord = job.cwd
       ? trustedSpelling(
           job.cwd,
@@ -818,25 +713,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // Claude has died, the prompt would land in whatever shell is sitting there.
     const terminal = vscode.window.createTerminal(opts);
     terminal.show();
-    // Recorded only once the terminal actually launched: the returns above
-    // mean no resume happened, and a session this never resumed must not
-    // later be warned about on this extension's behalf.
+    // Only once the terminal launched, so a session never resumed is not warned about later.
     resumedSessions.set(job.sessionId, Promise.resolve(terminal.processId).catch(() => undefined));
     log.info(`Resumed ${job.sessionId} in a new terminal.`);
-    // A resume that launched is no longer given up (ruling 2); if it stalls,
-    // the check below records it again.
+    // A launched resume is no longer given up; a stall records it again.
     if (gaveUp.launched(job.sessionId)) {
       render();
     }
 
-    // A terminal existing is not a resume happening. Two observed failures
-    // leave one sitting there looking healthy: an untrusted folder parks
-    // `claude` at its own trust prompt waiting for a keypress nobody is there
-    // to give (#5), and a launch that fails inside the terminal process does
-    // so asynchronously, after this function has already logged success (#4).
-    // A resumed session that is actually working appends to its transcript,
-    // so that is what gets checked - once, after a grace period long enough
-    // for a cold cache to be rebuilt.
+    // A terminal existing is not a resume happening: an untrusted folder parks
+    // `claude` at its trust prompt, and a launch can fail inside the terminal
+    // process after success was logged. A working session appends to its
+    // transcript, so check that once, after a grace long enough for a cold cache.
     const bytesAtLaunch = transcriptBytes(job.transcript) ?? 0;
     const check = setTimeout(() => {
       stallChecks.delete(check);
@@ -861,22 +749,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Final fix wave A, A3 (final review I1): the session has moved on since
-   * its stop was detected - a real user or assistant entry appended after
-   * the job's detection-time size (continuedSince.ts). A job with no such
-   * size (an older build's) or an unreadable transcript reads as not
-   * continued, which is how every resume behaved before this check.
+   * The session has moved on since its stop was detected: a real user or
+   * assistant entry appended after the job's detection-time size
+   * (continuedSince.ts). A job without that size, or an unreadable transcript,
+   * reads as not continued.
    */
   const hasContinued = (job: PendingJob): boolean => continuedSince(job.transcript, job.transcriptBytesAtDetection);
 
   /**
-   * A3's gate for every MANUAL path: the resumeNow command, the Resume Now
-   * notification button, the native-continue offer's button (both through
-   * offerResumeNow) and "Resume in Terminal Anyway". A resume here would put
-   * a second writer on a conversation that has already moved on, so the
-   * person is asked first - modal, since the answer decides whether the
-   * conversation forks. Resolves true when there is nothing to ask, or they
-   * chose to go ahead.
+   * Gate for every MANUAL path (resumeNow, the Resume Now button, the
+   * native-continue offer, "Resume in Terminal Anyway"): resuming a session that
+   * has moved on would put a second writer on it, so ask first (modal). Resolves
+   * true when there is nothing to ask or they go ahead.
    */
   const confirmNotContinued = async (job: PendingJob): Promise<boolean> => {
     if (!hasContinued(job)) {
@@ -895,18 +779,12 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * The gate every MANUAL resume goes through before `resume()` is ever
-   * called: the command, and the off-autoResume notification's own button.
-   * The A3 continued-since check runs first; the live-holder warning after.
+   * The gate every MANUAL resume goes through before `resume()`: the
+   * continued-since check, then the live-holder warning.
    *
-   * A scheduled fire has its own, separate holder check (see
-   * scheduler.onFire below) that never spawns a second writer at all; this
-   * one is different on purpose - the person clicking Resume Now already
-   * knows which session they mean, so a live holder is a warning to click
-   * through, not a reason to silently redirect them into "remembered for
-   * later" the way the automatic path does. `ourPid` is omitted (undefined):
-   * the job has not been resumed yet, so there is no terminal pid of our own
-   * to exclude.
+   * Unlike scheduler.onFire's holder check, a live holder here is a warning to
+   * click through, not a reason to silently redirect: the user knows which session
+   * they mean. `ourPid` is undefined: nothing of ours has been resumed yet.
    */
   const confirmManualResume = async (job: PendingJob): Promise<boolean> => {
     if (!(await confirmNotContinued(job))) {
@@ -925,53 +803,35 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * A "Resume Now" notification for one remembered job: the off-autoResume
-   * cooldown notice, and - final review, Important 6 - the notice that Claude
-   * Code's own auto-continue did not pick a session back up. The caller has
-   * already remembered the job (rememberReady); the click is a manual resume
-   * of exactly that job.
+   * A "Resume Now" notification for one remembered job (the off-autoResume
+   * cooldown, or Claude Code's own auto-continue not picking the session back up).
+   * The caller has already remembered the job; the click is a manual resume of
+   * exactly that job.
    */
   const offerResumeNow = (job: PendingJob, claimKey: string, message: string): void => {
     void Promise.resolve(vscode.window.showInformationMessage(message, 'Resume Now')).then(async (choice) => {
       if (choice !== 'Resume Now') {
         return;
       }
-      // Same live-holder gate the resumeNow command goes through - this
-      // button is just as much a manual resume as the palette command is.
+      // Same live-holder gate as the resumeNow command.
       if (!(await confirmManualResume(job))) {
         return;
       }
-      // This job, closed over here - not "whatever is ready now". Another
-      // session can come ready while this notification is still on
-      // screen, and the offer names a session, so it must honour it.
-      //
-      // Removing it is also how this click takes ownership of it
-      // (forgetReady) - not the Task 10 cross-window claim below, which
-      // is a separate thing. The notification outlives the job: the same
-      // session can be resumed from the command palette first, and
-      // without that ownership a later click here would launch a second
-      // `claude --resume` on it.
+      // This job, closed over - not "whatever is ready now": another session can
+      // come ready while this notice is up. forgetReady is also how this click takes
+      // ownership: the notice outlives the job, and without it a later click would
+      // launch a second `claude --resume`.
       if (!forgetReady(job.sessionId)) {
         void vscode.window.showInformationMessage(
           `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
         );
         return;
       }
-      // forgetReady above is how this click takes ownership of the job;
-      // if the launch never actually started, that ownership must be
-      // undone (rememberReady) or the job is gone with no way back.
-      //
-      // Task 10, fix round 3: this notification can sit unanswered for a
-      // long time - nothing else resumes a remembered job in the meantime
-      // - long enough for the claim onFire wrote at fire time to
-      // go stale (>1h) and another window to take it over before this
-      // click happens. Round 1 released that claim unconditionally,
-      // reasoning it was always this window's own; round 2 fixed the same
-      // assumption on the other three manual paths but missed this one.
-      // Same fix: bypass the answer to decide whether to launch (the
-      // user's explicit intent), but only release if this call actually
-      // won the claim itself ('claimed', including a stale takeover it
-      // just performed) - never a claim 'taken' by someone else.
+      // If the launch never started, undo that ownership (rememberReady) or the
+      // job is gone. The notice can sit unanswered long enough for the fire's claim to
+      // go stale and another window to take it, so bypass the answer to launch
+      // (explicit user intent) but release only a claim this call won ('claimed'),
+      // never one 'taken' by someone else.
       const notifyClaim = claim(claimKey);
       if (!resume(job, true)) {
         rememberReady(job);
@@ -983,26 +843,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Wave C, C5: stand down when Claude Code's own auto-continue was cancelled
-   * for a reason that means "someone else has this session" or "the user
-   * declined" - the session moved to Claude Desktop, to the cloud or to a
-   * background session, or the user pressed Esc / chose to wait. A resume here
-   * would be a second writer on a session another place now holds, or against
-   * what the user just said.
+   * Stand down when Claude Code's own auto-continue was cancelled because
+   * someone else has the session (Desktop, cloud, background) or the user declined
+   * (Esc / chose to wait); a resume would be a second writer or against what they
+   * said.
    *
-   * Reads the job's transcript from its detection baseline, the same window
-   * continuedSince judges, and takes the LAST cancel line in it. Only the four
-   * reasons in nativeContinue.ts stand down; any other reason (Claude Code
-   * exited or relaunched during the wait) and no cancel line at all leave
-   * every caller exactly as it was, so a string that stops matching falls back
-   * to today's behaviour, and a false match costs a notice instead of a
-   * resume: neither can start a second writer.
+   * Takes the LAST cancel line since the baseline. Only the reasons in
+   * nativeContinue.ts stand down; other reasons or no cancel line return false,
+   * and a false match costs a notice, not a resume.
    *
-   * On a stand-down the job is remembered, so Resume Now works from the
-   * palette and from the notice's own button (both manual paths: the user
-   * chose). The claim the fire took is KEPT, like every other fire that
-   * declines to resume (see `!decision.resume` in scheduler.onFire). Reports
-   * whether it stood down.
+   * On stand-down the job is remembered for Resume Now, and the fire's claim is
+   * KEPT like every other declined fire (see `!decision.resume` in
+   * scheduler.onFire). Reports whether it stood down.
    */
   const standDownOnNativeCancel = (job: PendingJob, claimKey: string, baseline: number | undefined): boolean => {
     const cancel = lastNativeCancel(job.transcript, baseline);
@@ -1022,38 +874,26 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Native auto-continue checks still waiting out their grace (final review,
-   * Important 6), kept apart from stallChecks so Cancel can drop them: a
-   * check that fires after Cancel would offer back a job the user just
-   * discarded.
+   * Native auto-continue checks waiting out their grace, apart from stallChecks
+   * so Cancel can drop them (a late check would offer back a discarded job).
    */
   const nativeChecks = new Set<NodeJS.Timeout>();
 
   /**
-   * Check back on a session left to Claude Code's own auto-continue (final
-   * review, Important 6). decideOnFire stands down for it - only for a
-   * five-hour limit or one of unknown type (native auto-continue arms for
-   * no other, Task 4c R4), and only while the setting reads as on, including
-   * when the key is simply absent, which the CLI reads as on - but the
-   * research found the toggle offered to some
-   * accounts only, and an account without the feature would otherwise have
-   * its idle-terminal limit dropped with nothing said at all.
+   * Check back on a session left to Claude Code's own auto-continue.
+   * decideOnFire stands down for it (five-hour or unknown-type limits, setting on
+   * or absent), but the toggle exists for some accounts only; without this check
+   * such an account's limit would be dropped silently.
    *
-   * Reuses the stall watch's grace period. The baseline is the transcript's
-   * size at DETECTION when the job carries it, not at this fire: randomDelay
-   * pads the fire 5-30 minutes past the reset, so a working auto-continue
-   * has usually written (and often finished) its turn before this runs, and
-   * measuring from the fire would call that a failure. An older job without
-   * the field falls back to the size now.
+   * Reuses the stall grace. The baseline is the transcript size at DETECTION when
+   * the job carries it: randomDelay pads the fire past the reset, so a working
+   * auto-continue has often finished before this runs. Older jobs fall back to
+   * the size now.
    *
-   * What counts as "Claude Code continued it" is a real turn since the
-   * baseline (continuedSince.ts; final fix wave A, A3 / final review M7),
-   * not any growth: a trailing hook entry, or a second limit notice from a
-   * hand retry, used to read as continued and drop the offer silently.
-   *
-   * Not continued: the job is remembered and offered back. The claim onFire
-   * took is kept either way (consistent with Important 2) - the offer's own
-   * button bypasses claims like every manual path.
+   * "Continued" means a real turn since the baseline (continuedSince.ts), not any
+   * growth. If not continued the job is remembered and offered back; the fire's
+   * claim is kept either way, and the offer's button bypasses claims like every
+   * manual path.
    */
   const armNativeContinueCheck = (job: PendingJob, claimKey: string): void => {
     const baseline = job.transcriptBytesAtDetection ?? transcriptBytes(job.transcript);
@@ -1063,9 +903,8 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(`Claude Code continued ${job.sessionId} on its own; a new turn follows the limit in its transcript.`);
         return;
       }
-      // C5: a cancel line written during the grace (the session moved to
-      // Desktop, the cloud or the background, or the user pressed Esc) is the
-      // answer to "why did it not continue", and it is not a failure.
+      // A cancel line written during the grace is the answer to "why did it not
+      // continue", not a failure.
       if (standDownOnNativeCancel(job, claimKey, baseline)) {
         return;
       }
@@ -1111,16 +950,11 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * After a resumed session's turn ends, deal with the panel tab that is
-   * still open on the conversation as it stood before the resume.
-   *
-   * This is not cosmetic. The experiment in
-   * docs/research/2026-09-20-panel-fork-experiment.md showed that the next
-   * message typed into that tab is anchored to the node from before the
-   * resume, which forks the transcript and leaves the resumed turn on a branch
-   * nothing follows afterwards - with no error on either side. Reopening the
-   * tab resyncs it, because a restarted panel reads the transcript instead of
-   * its own memory.
+   * After a resumed session's turn ends, deal with the panel tab still open on
+   * the pre-resume conversation. Not cosmetic: the next message typed there is
+   * anchored to the pre-resume node, forking the transcript and stranding the
+   * resumed turn, with no error. Reopening resyncs it, since a restarted panel
+   * reads the transcript.
    */
   const handleStalePanel = async (hit: { file: string; cwd?: string }): Promise<void> => {
     const resolved = resolveSession(hit.file, hit.cwd, statBytes);
@@ -1133,10 +967,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const target = await resolveReopenTarget();
     if (!target) {
-      // The viewType match was verified against a synthetic webview, not the
-      // real Claude panel (#7). If that string ever changes, this degrades to
-      // a text-only warning - correct, but silent about why - so the tabs it
-      // actually looked at are named here.
+      // The viewType match was only verified against a synthetic webview; if it
+      // changes this degrades to a text-only warning, so name the tabs seen.
       const seen = webviewTabs().map((t) => t.entry.viewType);
       log.info(
         `No Claude panel tab to reopen for ${resolved.sessionId} in this window. Webview tabs seen: ${seen.length ? seen.join(', ') : 'none'}.`,
@@ -1161,9 +993,8 @@ export function activate(context: vscode.ExtensionContext): void {
     if (choice !== offer.button) {
       return;
     }
-    // Re-resolved rather than reusing `target`: a message with a button does
-    // not auto-dismiss and can sit unanswered for a long time, by which point
-    // the tab may be gone or a second Claude tab may have been opened.
+    // Re-resolved: a button message can sit unanswered until the tab is gone or
+    // a second Claude tab exists.
     const fresh = await resolveReopenTarget();
     if (!fresh) {
       void vscode.window.showInformationMessage(
@@ -1175,11 +1006,9 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * A VSIX installed outside the Marketplace never updates itself and VS Code
-   * will never mention it (#1), so this is the only way someone finds out. It
-   * is off until asked for: the offer is made once, and all three answers are
-   * final - "Not now" means the same as "Never ask" here, because an offer
-   * that keeps coming back is the nag this is trying not to be.
+   * A VSIX installed outside the Marketplace never updates itself, so this is
+   * the only way to learn of a release. Off until asked: the offer is made once
+   * and all three answers are final ("Not now" = "Never ask"), to avoid nagging.
    */
   const offerUpdateChecks = async (): Promise<void> => {
     if (!shouldOfferFirstRunPrompt(context.globalState.get<FirstRunPromptChoice>(FIRST_RUN_PROMPT_KEY))) {
@@ -1203,9 +1032,8 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * At most one request per activation, and silent about everything except a
-   * version that is actually newer. Both the timestamp and the tag are cached,
-   * so a day's worth of activations cost nothing.
+   * At most one request per activation, silent unless a newer version exists.
+   * Timestamp and tag are cached.
    */
   const runUpdateCheck = async (): Promise<void> => {
     if (!settings().checkForUpdates) {
@@ -1244,23 +1072,20 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.env.openExternal(vscode.Uri.parse(RELEASE_TAG_URL(action.latestTag)));
     }
     if (choice !== undefined) {
-      // Either answer counts as seen. Left unanswered it asks again tomorrow,
-      // which is the one case where repeating is the right behaviour.
+      // Either answer counts as seen; unanswered, it asks again tomorrow.
       await context.globalState.update(DISMISSED_VERSION_KEY, action.latestTag);
     }
   };
 
-  // Fire and forget: a failure here must never take activation with it, and
-  // the issue asks for silence on every failure, not just no notification.
+  // Fire and forget: a failure must never take activation with it, and update
+  // checks stay silent on every failure.
   void offerUpdateChecks()
     .then(() => runUpdateCheck())
     .catch(() => {});
 
   /**
-   * Terminals opened by openClaudeToTrust, tracked so the close hook below
-   * (ruling 2) only re-checks trust for terminals THIS command opened - a
-   * resume terminal, or any other terminal in the window, closing must not
-   * trigger it.
+   * Terminals opened by openClaudeToTrust, so the close hook only re-checks
+   * trust for those.
    */
   const trustTerminals = new Set<vscode.Terminal>();
 
@@ -1280,30 +1105,24 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduler,
     watcher.onHit((h) => onDetection(h, 'limit')),
     watcher.onOverload((h) => onDetection(h, 'overload')),
-    // Wave C, C4: Claude Code's own auto-continue lines (armed, cancelled,
-    // fired) are observed and logged, never acted on from here. Recognition is
-    // by type, subtype and prefix in the watcher; the text is the log's only
-    // use of it.
+    // Claude Code's own auto-continue lines are observed and logged, never
+    // acted on from here.
     watcher.onNativeStatus((h) => {
       const id = resolveSession(h.file, h.cwd, () => 0)?.sessionId ?? h.file;
       log.info(`Claude Code auto-continue ${h.status.kind} for session ${id}: ${h.status.text}`);
     }),
     watcher.onInputNeeded((hit) => {
-      // A finished turn is evidence the session works again, so a gave-up
-      // record for it is stale (fix round 1, ruling 2a). Ahead of both
-      // filters below: gave-up records belong to any watched session, not
-      // just this window's folders, and clearing one is safe while disabled -
-      // it launches and notifies nothing, it only stops the status bar
-      // showing a problem that is over. A subagent's transcript finishing a
-      // turn says nothing about its parent session, so it never clears one.
-      // resolveSession's statBytes is stubbed: only the id is wanted here.
+      // A finished turn means the session works again, so its gave-up record is
+      // stale. Before the filters below: records belong to any watched session, and
+      // clearing is safe while disabled (nothing launches). A subagent's turn says
+      // nothing about its parent, so it never clears one. resolveSession's statBytes
+      // is stubbed: only the id is wanted.
       const ended = isSubagentFile(hit.file) ? undefined : resolveSession(hit.file, hit.cwd, () => 0);
       if (ended && gaveUp.turnEnded(ended.sessionId)) {
         log.info(`Session ${ended.sessionId} finished a turn; clearing its gave-up state.`);
         render();
       }
-      // A6: a finished turn ends a run of server errors; the next overload
-      // retry of this session is a first one again.
+      // A finished turn ends a run of server errors.
       if (ended && overloadStreaks.turnEnded(ended.sessionId)) {
         log.info(`Session ${ended.sessionId} finished a turn; its overload retries start over.`);
       }
@@ -1311,17 +1130,14 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s.enabled) {
         return;
       }
-      // A turn ends roughly once per Claude response, in every session on the
-      // machine. Only this window's own folders are worth reacting to - for
-      // the chime, and for the stale tab below, since tabGroups is per-window
-      // anyway.
+      // A turn ends once per Claude response in every session on the machine; only
+      // this window's folders matter, for the chime and the stale tab.
       const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
       if (!isInsideWorkspace(hit.cwd, folders)) {
         return;
       }
-      // alertSound gates the chime alone. The stale-tab warning has its own
-      // gates - this extension resumed the session, and a panel still holds
-      // it - and must not go quiet because someone turned the sound off.
+      // alertSound gates the chime alone; the stale-tab warning has its own gates
+      // and must not go quiet when sound is off.
       if (s.alertSound) {
         playAlertSound({ file: s.alertSoundFile });
       }
@@ -1329,55 +1145,37 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     scheduler.onUpgrade((job) => announceUpgrade(job, settings())),
     scheduler.onChange(() => {
-      // Every listed job/ready session, not just the soonest (review 1,
-      // Important 2) - this fires every countdown tick too, which is fine:
-      // refreshTrust's own mtime cache keeps a no-op tick to a bare stat
-      // per listed job.
+      // Every listed and ready session, not just the soonest; refreshTrust's mtime
+      // cache keeps a tick to a bare stat per job.
       refreshAllTrust();
       render();
     }),
     scheduler.onFire((job) => {
-      // Final fix wave A, A7 (final review M11): disabled means disabled,
-      // for a job scheduled before the setting was turned off too. Kept for
-      // Resume Now rather than dropped - turning the extension off is not
-      // asking to lose the session - and checked BEFORE the claim: this
-      // window is not handling the reset, so another window that is still
-      // enabled must remain free to.
+      // Disabled means disabled, even for a job scheduled before the setting was
+      // turned off. Kept for Resume Now, and checked BEFORE the claim so another
+      // enabled window stays free to handle the reset.
       const s = settings();
       if (!s.enabled) {
         rememberReady(job);
         log.info(`Limit Break is disabled; kept session ${job.sessionId.slice(0, 8)} for Resume Now instead of resuming.`);
         return;
       }
-      // Task 10: claim this reset before anything else. Every window watching
-      // this account can independently detect and schedule the SAME reset -
-      // watchScope: machine means every copy of the extension watches every
-      // transcript - and two windows have been seen firing within a second or
-      // two of each other, too close for Task 2's holder check (which reads
-      // `claude agents`) to have caught the first window's child yet. A
-      // machine-wide file claim is first-past-the-post across windows in a way
-      // an in-memory guard inside one extension host cannot be. 'taken' means
-      // some other window already won this race: drop entirely, before the
-      // autoResume split below, so the off-autoResume path cannot become a
-      // backdoor around a lost claim either.
+      // Claim this reset first. Every window watching this account can detect and
+      // schedule the SAME reset (watchScope: machine), and two can fire within a
+      // second, too close for the holder check to have seen the first's child. A
+      // machine-wide file claim is first-past-the-post across windows. 'taken': drop
+      // entirely, before the autoResume split, so the off-autoResume path is no
+      // backdoor.
       //
-      // Final fix wave A, A5 (final review M4): held until the reset plus the
-      // longest jitter the setting in force allows plus ten minutes, not the
-      // ordinary hour from now. Every window's copy of this job fires
-      // somewhere in that jitter band, and randomDelayMaxMinutes is
-      // window-scoped and unbounded: at 90, a copy firing 80 minutes after
-      // this one found an hour-old claim stale and resumed the same reset
-      // again. holdClaim pushes the file's mtime to the deadline, and only
-      // ever forward, so a fire long past its reset (an overdue restore)
-      // still gets at least the ordinary hour.
+      // Held until the reset plus the longest jitter in force plus ten minutes, not
+      // the ordinary hour: every window's copy fires somewhere in the jitter band, and
+      // randomDelayMaxMinutes is unbounded, so a late copy would find an hour-old claim
+      // stale and resume again. holdClaim only moves the mtime forward, so an overdue
+      // fire still gets at least the ordinary hour.
       const claimKey = claimKeyFor(job);
       const holdUntil = claimHoldDeadline(job, s.randomDelayMinMinutes, s.randomDelayMaxMinutes);
       if (holdClaim(claimsDir(), claimKey, Date.now(), holdUntil, fs, log, vscode.env.sessionId) === 'taken') {
-        // Worded by who holds it, for the log only - either way the fire is
-        // dropped. A claim this window wrote itself (an earlier resume of the
-        // same event) used to be reported as "another window", which sent
-        // the reader looking for a window that did not exist (final review,
-        // Important 3).
+        // Worded by who holds it, for the log only; the fire is dropped either way.
         const holder =
           claimOwner(claimsDir(), claimKey, fs) === vscode.env.sessionId
             ? 'already claimed by this window'
@@ -1385,30 +1183,26 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
         return;
       }
-      // Final fix wave A, A3 (final review I1): a resume is only for a stop
-      // that is still unhandled. A real turn since detection means someone -
-      // the user at an idle panel between messages, Claude Code's own
-      // auto-continue, another window whose claim aged out, a restore of a
-      // job overdue for hours - already moved the session on, and a resume
-      // now forks it. Ahead of the autoResume split and the holder check: an
-      // idle panel is exactly the case the holder check cannot tell apart
-      // from one left idle at the limit. Nothing is remembered or shown, and
-      // the claim is KEPT, so every other window drops its copy too.
+      // A resume is only for a stop still unhandled. A real turn since detection
+      // (user at an idle panel, Claude Code's auto-continue, another window, an
+      // overdue restore) means the session moved on and a resume would fork it.
+      // Before the autoResume split and holder check: an idle panel is what the holder
+      // check cannot tell from one left idle at the limit. Nothing is remembered or
+      // shown, and the claim is KEPT so every other window drops its copy too.
       if (hasContinued(job)) {
         log.info(`Session ${job.sessionId.slice(0, 8)} has continued since it stopped; not resuming.`);
         return;
       }
-      // Wave C, C5: after the continued-since check (a session that moved on
-      // is silent), ahead of the autoResume split and the holder check:
-      // whoever cancelled Claude Code's auto-continue for this reason either
-      // has the session or told us to leave it, and no holder listing can say
-      // that better. Keeps the claim, remembers the job, offers Resume Now.
+      // After continued-since (a moved-on session is silent), before the
+      // autoResume split and holder check: whoever cancelled auto-continue has the
+      // session or told us to leave it. Keeps the claim, remembers the job, offers
+      // Resume Now.
       if (standDownOnNativeCancel(job, claimKey, job.transcriptBytesAtDetection)) {
         return;
       }
-      // Wave D, D3: an offer-only job (a reset beyond maxWaitHours) takes
-      // exactly this path whatever autoResume says - after the claim and the
-      // continued-since check above, so a session that moved on stays silent.
+      // An offer-only job (reset beyond maxWaitHours) takes this path whatever
+      // autoResume says; after the claim and continued-since checks so a moved-on
+      // session stays silent.
       if (!s.autoResume || job.offerOnly) {
         rememberReady(job);
         log.info(
@@ -1423,13 +1217,10 @@ export function activate(context: vscode.ExtensionContext): void {
         );
         return;
       }
-      // Task 2: before ever spawning a second `claude --resume`, find out who
-      // already holds this session - a resume into a session a panel or
-      // another terminal already holds forks the transcript (see the
-      // docs/research/2026-09-20-panel-fork-experiment.md incident this task
-      // is named for). See holderPolicy.ts's decideOnFire for the full branch
-      // table; 'none', a failed listing ('unknown') and an IDLE panel are the
-      // cases that reach the ordinary resume below.
+      // Before spawning a second `claude --resume`, find out who holds this
+      // session: resuming into a held session forks the transcript. See
+      // holderPolicy.ts's decideOnFire for the branch table; 'none', a failed listing
+      // ('unknown') and an IDLE panel reach the ordinary resume below.
       const rows = detectAgentRows();
       const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
       const decision = decideOnFire(
@@ -1451,11 +1242,9 @@ export function activate(context: vscode.ExtensionContext): void {
           if (choice !== notice.button) {
             return;
           }
-          // Final fix wave A, A4 (final review I2): the offer was made on
-          // the holder snapshot from this fire, and the notification does
-          // not auto-dismiss. Look again: a terminal the user has since
-          // come back to and is typing in must not get a second writer.
-          // The job stays remembered for a later, deliberate Resume Now.
+          // The offer used the holder snapshot from this fire and the notice does not
+          // auto-dismiss: look again, so a terminal the user has since returned to gets
+          // no second writer. The job stays remembered.
           const rowsNow = detectAgentRows();
           const holderNow =
             rowsNow === 'unknown' ? 'unknown' : classifyHolder(rowsNow, job.sessionId, undefined, readHolderRecord);
@@ -1465,39 +1254,24 @@ export function activate(context: vscode.ExtensionContext): void {
             void vscode.window.showInformationMessage(busyNow);
             return;
           }
-          // Then A3: still idle (or gone, or unknown) is the case the button
-          // was offered for, but a session that has moved on since the
-          // limit is asked about first, like every manual path.
+          // Then ask about a session that has moved on, like every manual path.
           if (!(await confirmNotContinued(job))) {
             return;
           }
-          // "Resume in Terminal Anyway" takes ownership of the job
-          // (forgetReady) exactly as the off-autoResume "Resume Now" button
-          // does, then resumes it - no holder modal, because this button IS
-          // the confirmation for the holder it was offered on.
+          // Takes ownership (forgetReady) like the off-autoResume "Resume Now"
+          // button; no holder modal, since this button IS the confirmation.
           if (!forgetReady(job.sessionId)) {
             void vscode.window.showInformationMessage(
               `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
             );
             return;
           }
-          // Task 10, fix round 1: this branch is reached only after
-          // decideOnFire declined to auto-resume. Since final review
-          // Important 2 that decline KEEPS this job's original claim (see
-          // `!decision.resume` below), but it may have gone stale by the
-          // time someone clicks. The click is exactly as much an explicit
-          // user action as the resumeNow command, so - same as resumeNow -
-          // it writes/refreshes its own claim before launching, ignoring
-          // whatever claimResume reports, so another window's own automatic
-          // attempt cannot also fire while this launch is in flight.
-          //
-          // Fix round 2: bypassing the ANSWER (above) is not the same as
-          // OWNING the claim. If claimResume just reported 'taken', another
-          // window already holds this key - unconditionally releasing on a
-          // failed launch, as round 1 did, would delete THAT window's live
-          // claim out from under it. Only release when this call actually
-          // won the claim itself ('claimed', which includes a stale
-          // takeover it just performed).
+          // This branch is reached only after decideOnFire declined to auto-resume,
+          // which KEEPS the fire's claim; it may be stale by click time. Like resumeNow,
+          // write/refresh our own claim before launching, ignoring its answer, so another
+          // window's automatic attempt cannot also fire. Release on a failed launch only
+          // if this call won the claim ('claimed', incl. stale takeover), never one
+          // another window holds.
           const buttonClaim = claim(claimKey);
           if (!resume(job, true)) {
             rememberReady(job);
@@ -1511,32 +1285,18 @@ export function activate(context: vscode.ExtensionContext): void {
         armNativeContinueCheck(job, claimKey);
       }
       if (!decision.resume) {
-        // The claim is KEPT (final review, Important 2). Releasing it here -
-        // as this did until then - let every other window watching the same
-        // session (watchScope machine, the default) fire later on its own
-        // jitter, find the key free, and show the same "Resume in Terminal
-        // Anyway" offer: two clicks in two windows were two writers on a
-        // session a terminal holds. Whether the decision remembered and
-        // notified or dropped the job for a busy/waiting holder, this window
-        // has handled this reset, and the claim says so. Nothing is lost by
-        // keeping it: every manual path (Resume Now, the offer's own button)
-        // bypasses claims, and the claim ages out after STALE_MS.
+        // The claim is KEPT: releasing it would let every other window (watchScope
+        // machine) fire later, find the key free and show the same "Resume in Terminal
+        // Anyway" offer, so two clicks would be two writers on a held session. Every
+        // manual path bypasses claims, and the claim ages out after STALE_MS.
         return;
       }
-      // A second, independent controller ruling: on EVERY resume we are
-      // about to launch here - whether nobody is on this session at all, or
-      // (fix round 1, scope ruling) it is an idle panel we are resuming
-      // anyway - a DIFFERENT session may be busy or waiting in the same
-      // folder. The extension cannot message that session itself
-      // (constraint #3 - never write into a session it did not create), so
-      // instead it tells the session it is ABOUT to create: buildResumePrompt
-      // appends a sentence naming the peer(s) and asking the resumed model to
-      // coordinate with them via SendMessage before editing anything. This
-      // never blocks the resume - only the prompt passed to it changes.
-      // `decision.resume` (just checked above) is the gate: it is true for
-      // exactly 'none', an idle panel, and a listing failure - and `rows !==
-      // 'unknown'` already excludes that last one, since `holder` (and so
-      // `decision`) is only ever 'unknown' when `rows` is too.
+      // A DIFFERENT session may be busy or waiting in the same folder. The
+      // extension never writes into a session it did not create, so it tells the
+      // session it is about to create: buildResumePrompt names the peer(s) and asks
+      // the resumed model to coordinate via SendMessage. This never blocks the
+      // resume; only the prompt changes. A failed listing (rows 'unknown') cannot
+      // name peers, so it is skipped.
       let resumeJob = job;
       if (rows !== 'unknown' && decision.resume && job.cwd) {
         const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
@@ -1555,60 +1315,38 @@ export function activate(context: vscode.ExtensionContext): void {
           `Limit Break: resuming session ${job.sessionId.slice(0, 8)}.`,
         );
       }
-      // The scheduler already cleared this job before firing (its own
-      // re-entrancy guard, see consume()), so if the launch never started this
-      // is the only place still holding it - without rememberReady it would
-      // simply be gone. The ORIGINAL job (unmodified prompt) is what gets
-      // remembered: a later manual resume should not carry a coordination
-      // sentence tied to a folder-busy snapshot from this particular fire.
+      // The scheduler cleared this job before firing, so if the launch never
+      // started this is the only holder: remember it. The ORIGINAL job (unmodified
+      // prompt) is kept, since a later manual resume should not carry a coordination
+      // sentence tied to this fire's folder-busy snapshot.
       if (!resume(resumeJob)) {
         rememberReady(job);
-        // A resume that never launched must not hold the claim: a manual
-        // retry (which bypasses the claim anyway) is not what this protects -
-        // a LATER automatic attempt, from this window's own retry path or
-        // another window's, is.
+        // A resume that never launched must not hold the claim, or a later automatic
+        // attempt (this window's or another's) is blocked.
         releaseClaim(claimsDir(), claimKey, fs, log);
       }
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
-      // Exactly one job moves, and only its own source is touched. Cancelling
-      // the scheduler while resuming a ready job - or dropping a ready job
-      // while resuming the scheduler's - would throw away work nobody asked to
-      // discard.
+      // Exactly one job moves, and only its own source is touched: cancelling the
+      // scheduler while resuming a ready job (or the reverse) would discard work
+      // nobody asked to.
       //
-      // Each branch below removes the job from its source only once resume()
-      // reports the launch actually started. resume() can fail (missing cwd,
-      // no claude executable), and doing the removal first - as this used to -
-      // left a failed resume with no path back to the job.
+      // A source job is removed only once resume() reports the launch started.
       //
-      // confirmManualResume runs first in both branches: a live holder gets a
-      // modal warning naming it before anything is claimed or launched (#2).
+      // confirmManualResume runs first in both branches (live-holder modal).
       //
-      // Task 10: this is a MANUAL resume - the user's own explicit click or
-      // command - so it bypasses whatever claimResume reports (another
-      // window's claim, even a fresh one, is not a reason to refuse someone
-      // who is looking right at this). It still calls claimResume, purely for
-      // the write: the original claim from this job's own fire may have gone
-      // stale by now (the user did not answer right away), and refreshing it
-      // here is what stops a different window's own automatic attempt from
-      // also firing while this launch is in flight.
-      //
-      // Fix round 2: bypassing the ANSWER is not the same as OWNING the
-      // claim. If claimResume reports 'taken', another window already holds
-      // this key - releasing on a failed launch must not delete that OTHER
-      // window's live claim. Only release when this call actually won the
-      // claim itself ('claimed', including a stale takeover it just did).
+      // A MANUAL resume bypasses what claimResume reports (another window's claim is
+      // no reason to refuse the user) but still calls it for the write: the fire's
+      // claim may have gone stale, and refreshing it stops another window's automatic
+      // attempt firing mid-launch. Release on a failed launch only if this call won
+      // the claim ('claimed', incl. stale takeover), never another window's live one.
       const counting = scheduler.current;
       if (counting) {
-        // Only this session's job: others may still be counting down, and
-        // "Resume Now" moves exactly one.
+        // Moves exactly one job; others may still be counting down.
         if (await confirmManualResume(counting)) {
           const key = claimKeyFor(counting);
-          // Held to the same deadline as the automatic fire's claim, not
-          // the ordinary hour (final fix wave A, final review M5; one
-          // deadline since fix round 1, review m2): every other window's
-          // copy of this job still counts down to somewhere in its jitter,
-          // and an hour-old claim would read as abandoned when it fires.
+          // Held to the same deadline as the automatic fire's claim: other windows'
+          // copies still count down to somewhere in their jitter.
           const s = settings();
           const countingClaim = holdClaim(
             claimsDir(),
@@ -1627,9 +1365,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         return;
       }
-      // Oldest first: the session that has been waiting longest goes first.
-      // Peeked, not shifted, so a failed resume leaves it exactly where it was
-      // instead of needing to be spliced back in.
+      // Oldest first; peeked, not shifted, so a failed resume leaves it in place.
       const ready = readyJobs[0];
       if (!ready) {
         void vscode.window.showInformationMessage('Limit Break: nothing pending.');
@@ -1646,19 +1382,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand(`${NS}.cancel`, () => {
-      // "Cancel Pending Resume" means all of it, but say how much it threw
-      // away: a job dropped from readyJobs has no other trace.
+      // Cancel means all of it, but log how much was thrown away: a ready job has
+      // no other trace.
       //
-      // Final review, Important 7: with watchScope machine every window holds
-      // its own copy of the same pending job, and each would still fire it.
-      // Claiming each cancelled job's key here makes them drop it as taken
-      // when they do - held fresh until this job's own fire time (holdClaim),
-      // since a limit can count down for hours, far past an ordinary claim's
-      // one-hour life. This only stops the other windows ACTING on their
-      // copies; the persisted job lists are shared through globalState in a
-      // way that is not merged across windows (pre-existing, docs/NEXT.md).
-      // Held to the same deadline as every other hold (fix round 1, review
-      // m2): another window's copy can fire anywhere up to the longest jitter.
+      // With watchScope machine every window holds its own copy of the pending job;
+      // claiming each cancelled key makes them drop it when they fire, held to the
+      // same deadline as every other hold (a limit can count down for hours). This
+      // stops other windows ACTING on their copies; the persisted job lists are not
+      // merged across windows.
       const cancelled = [...scheduler.jobs, ...readyJobs];
       const nowMs = Date.now();
       const s = settings();
@@ -1669,8 +1400,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (cancelled.length > 0) {
         log.info(`Claimed ${cancelled.length} cancelled resume(s) so other windows drop them too.`);
       }
-      // A native auto-continue check still in its grace would offer back a
-      // job this just discarded (final review, Important 6).
+      // A native auto-continue check in its grace would offer back a discarded job.
       for (const t of nativeChecks) {
         clearTimeout(t);
       }
@@ -1681,27 +1411,18 @@ export function activate(context: vscode.ExtensionContext): void {
         persistReady();
       }
       scheduler.cancel();
-      // Ruling 3: Cancel clears the gave-up state along with the jobs.
+      // Cancel clears the gave-up state along with the jobs.
       if (gaveUp.clearAll()) {
         log.info('Cleared the gave-up state.');
       }
-      // Rendered unconditionally, not left to scheduler.onChange or folded
-      // into the gaveUp.clearAll() branch above: with nothing pending the
-      // scheduler has nothing to cancel and does not fire onChange, and a
-      // readyJobs-only cancel (Task 5b: readyJobs now reach the tooltip)
-      // must still clear their lines even when nothing had given up.
+      // Unconditional: with nothing pending the scheduler does not fire onChange,
+      // and a readyJobs-only cancel must still clear its lines.
       render();
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
     /**
-     * What a click on the status bar opens (#3).
-     *
-     * It used to run Cancel directly: a countdown invites a click to look at
-     * it, and the only warning that the click destroyed the pending resume
-     * was the last line of a six-line tooltip. Every other status-bar item in
-     * VS Code that shows state opens something. Cancel is still here, one
-     * deliberate keystroke further away, and dismissing the menu does nothing
-     * at all.
+     * What a click on the status bar opens. Cancel stays one deliberate pick
+     * away, and dismissing the menu does nothing.
      */
     vscode.commands.registerCommand(`${NS}.statusBarMenu`, async () => {
       const waiting = scheduler.jobs.length + readyJobs.length;
@@ -1714,9 +1435,7 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         {
           label: 'Cancel Pending Resume',
-          // Cancel also clears the gave-up state (ruling 3), so with nothing
-          // waiting it still has something to do - say so, rather than
-          // "Nothing to cancel" next to a status bar saying otherwise.
+          // Cancel also clears the gave-up state, so with nothing waiting it still has something to do.
           description:
             waiting > 0
               ? `Discard ${waiting} waiting resume(s)${gaveUpCount > 0 ? ' and clear what gave up' : ''}`
@@ -1727,9 +1446,8 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         { label: 'Show Log', description: 'Open the Limit Break output channel', command: `${NS}.showLog` },
       ];
-      // Fix round 1, ruling 2b: a way to clear the gave-up state that does
-      // not also discard every other session's waiting jobs, as Cancel does.
-      // Only offered when there is something to dismiss.
+      // Clears the gave-up state without discarding other sessions' waiting jobs,
+      // as Cancel does. Only offered when there is something to dismiss.
       const DISMISS = 'Dismiss gave-up notices';
       if (gaveUpCount > 0) {
         items.push({
@@ -1755,18 +1473,13 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.commands.executeCommand(picked.command);
     }),
     /**
-     * Trust hotlink (Task 5a). Opens a terminal running plain `claude` (no
-     * `--resume`, no prompt) in `cwd`, so the user answers Claude's own trust
-     * dialog themselves - the extension never types into this terminal and
-     * never writes `~/.claude.json` (constraint 2). Linked from the
-     * untrusted-folder notice above; the tooltip link is Task 5b.
+     * Trust hotlink. Opens a terminal running plain `claude` (no `--resume`, no
+     * prompt) in `cwd` so the user answers Claude's own trust dialog; the extension
+     * never types into it and never writes `~/.claude.json`.
      */
     vscode.commands.registerCommand(`${NS}.openClaudeToTrust`, (cwd?: unknown) => {
-      // Only ever invoked with a cwd today (the notice button, and Task 5b's
-      // tooltip link); a bare Command Palette invocation - which is why it is
-      // hidden there (`"when": "false"` in package.json) - or a stale
-      // keybinding has no folder to open, so this logs and stops rather than
-      // guessing one.
+      // A bare Command Palette invocation (hidden there) or a stale keybinding has
+      // no folder, so log and stop rather than guess one.
       if (typeof cwd !== 'string') {
         log.warn('claudeLimitBreak.openClaudeToTrust was invoked with no folder; ignoring.');
         return;
@@ -1781,10 +1494,8 @@ export function activate(context: vscode.ExtensionContext): void {
         );
         return;
       }
-      // Same reasoning as the resume launch: open from whichever spelling
-      // the CLI already has on record, so a folder trusted from a terminal
-      // is recognised even when VS Code reports a different-cased drive
-      // letter for the same directory (trust.ts).
+      // Open from the spelling the CLI has on record, so a folder trusted from a
+      // terminal is recognised despite a different-cased drive letter (trust.ts).
       const onRecord = trustedSpelling(
         cwd,
         readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
@@ -1800,27 +1511,17 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!trustTerminals.delete(terminal)) {
         return;
       }
-      // Ruling 2: re-check EVERY pending job AND ready job (review 1,
-      // Important 2 - a ready job's marker used to never clear at all), not
-      // just the one the terminal was opened for - refreshTrust is
-      // mtime-cached per session, so this is cheap, and it is what catches a
-      // job whose cwd is a different spelling of the same folder the user
-      // just trusted. Then force the same render call scheduler.onChange
-      // uses (above), so the tooltip's marker clears now instead of waiting
-      // for the next countdown tick.
+      // Re-check every pending and ready job, not just the one this terminal was
+      // opened for: a job's cwd can be a different spelling of the folder just
+      // trusted. Render now so the marker clears before the next tick.
       refreshAllTrust();
       render();
     }),
   );
 
   scheduler.start();
-  // Unconditional, not left to scheduler.start()'s own onChange (which fires
-  // only when something is pending): readyJobs restored above can be
-  // non-empty with nothing pending, and before this the status bar simply
-  // never showed them - the marker stayed hidden until the next event. The
-  // "install from a VSIX and see nothing" doubt this class's own tooltip
-  // reasoning is about applies just as much to a ready session restored
-  // across a reload.
+  // Unconditional: scheduler.start() fires onChange only when something is
+  // pending, and restored readyJobs can exist with nothing pending.
   render();
   void watcher.start();
   log.info('Limit Break active.');
