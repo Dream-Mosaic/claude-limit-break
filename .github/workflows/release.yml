@@ -118,7 +118,10 @@ jobs:
             echo "A draft for v$VERSION already exists - an earlier run failed part way. Reusing it."
             exit 0
           fi
-          args=(--draft --title "v$VERSION" --generate-notes)
+          # The release notes are this version's CHANGELOG section, not GitHub's
+          # generated PR list.
+          bash scripts/changelog-section.sh "$VERSION" > release-notes.md
+          args=(--draft --title "v$VERSION" --notes-file release-notes.md)
           # Everything below 1.0.0 goes out marked pre-release.
           case "$VERSION" in
             0.*) args+=(--prerelease) ;;
