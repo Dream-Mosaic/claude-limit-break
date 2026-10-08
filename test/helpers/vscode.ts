@@ -18,12 +18,7 @@ export class FakeEventEmitter<T> {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Recording fakes for the slice of the VS Code API that activate() touches.
-//
-// Everything below is additive: EventEmitter above is unchanged, and the tests
-// that only need it are unaffected by any of it.
-// ---------------------------------------------------------------------------
 
 export interface FakeTerminal {
   options: unknown;
@@ -34,16 +29,24 @@ export interface FakeTerminal {
   dispose(): void;
 }
 
-/**
- * One recorded information message. `answer` settles the promise the extension
- * is awaiting, so a test can leave an offer open - firing other events while it
- * hangs - and accept it later, which is the only way to reproduce a second
- * session coming ready before the first notification is clicked.
- */
+/** Module-level emitter for `vscode.window.onDidCloseTerminal`, shared like the
+ * real global. Each test's teardown disposes the extension's listener, so it
+ * needs no reset. */
+const closeTerminalEmitter = new FakeEventEmitter<FakeTerminal>();
+
+/** Fire a terminal-closed event, as if the user closed `terminal`'s tab. */
+export function fireTerminalClose(terminal: FakeTerminal): void {
+  closeTerminalEmitter.fire(terminal);
+}
+
+/** One recorded information message. `answer` settles the pending promise, so a
+ * test can leave an offer open and accept it later. */
 export interface FakeInfoMessage {
   message: string;
   items: string[];
   answer(item?: string): void;
+  /** True when shown with `{ modal: true }`, as the live-holder fork warning is. */
+  modal?: boolean;
 }
 
 export interface FakeStatusBarItem {
@@ -62,6 +65,9 @@ export interface FakeStatusBarItem {
 
 class FakeMarkdownString {
   value: string;
+  /** Mirrors MarkdownString's mutable `isTrusted`: unset means command links
+   * are inert, `{ enabledCommands }` allows exactly those. */
+  isTrusted?: boolean | { readonly enabledCommands: readonly string[] };
   constructor(value?: string, readonly supportThemeIcons?: boolean) {
     this.value = value ?? '';
   }
@@ -75,13 +81,8 @@ class FakeThemeColor {
   constructor(readonly id: string) {}
 }
 
-/**
- * Stands in for `vscode.TabInputWebview`. Real code tells a webview tab
- * apart from any other kind of tab with `instanceof`, so the fake has to be
- * a real class the extension's `instanceof` check can see - a plain
- * `{viewType}` object would silently fail that check and every reopen-offer
- * test would see zero webview tabs no matter what was set up.
- */
+/** Stands in for `vscode.TabInputWebview`; a real class, because the extension
+ * uses `instanceof`. */
 export class FakeTabInputWebview {
   constructor(public viewType: string) {}
 }
@@ -125,6 +126,8 @@ export const vscodeFake = {
   shownChannels: 0,
   /** Tabs `tabGroups.close` has removed, in call order, for assertions. */
   closedTabs: [] as FakeTab[],
+  /** What `vscode.env.sessionId` reports: this fake window's identity. */
+  envSessionId: 'fake-window-session',
 };
 
 export function resetVscodeFake(): void {
@@ -146,6 +149,7 @@ export function resetVscodeFake(): void {
   vscodeFake.shownChannels = 0;
   vscodeFake.tabs = [];
   vscodeFake.closedTabs = [];
+  vscodeFake.envSessionId = 'fake-window-session';
 }
 
 const fakeVscode = {
@@ -156,6 +160,10 @@ const fakeVscode = {
   MarkdownString: FakeMarkdownString,
   TabInputWebview: FakeTabInputWebview,
   env: {
+    /** One fixed identity per fake window; claims.ts records it. */
+    get sessionId() {
+      return vscodeFake.envSessionId;
+    },
     openExternal: (uri: unknown) => {
       vscodeFake.openedExternal.push(String((uri as { value?: string }).value ?? uri));
       return Promise.resolve(true);
@@ -165,8 +173,6 @@ const fakeVscode = {
   window: {
     tabGroups: {
       get all() {
-        // One flattened group: nothing here cares which editor group a tab
-        // lives in, only whether it exists at all.
         return [{ tabs: vscodeFake.tabs }];
       },
       close: (tab: FakeTab) => {
@@ -182,9 +188,8 @@ const fakeVscode = {
       },
       dispose: () => {},
     }),
-    // Answers with whatever a test parked in quickPickAnswer, matched back to
-    // the item the extension offered - so a test names a label rather than an
-    // index, and reordering the menu cannot silently change what it picks.
+    // Answers with the parked label, matched back to the offered item, so a
+    // test names a label rather than an index.
     showQuickPick: (items: { label: string }[]) => {
       vscodeFake.quickPicks.push({ items });
       const picked = items.find((i) => i.label === vscodeFake.quickPickAnswer);
@@ -207,6 +212,7 @@ const fakeVscode = {
       vscodeFake.statusBarItems.push(item);
       return item;
     },
+    onDidCloseTerminal: closeTerminalEmitter.event,
     createTerminal: (options: unknown): FakeTerminal => {
       const terminal: FakeTerminal = {
         options,
@@ -228,16 +234,21 @@ const fakeVscode = {
       vscodeFake.info.push({ message, items, answer: (item?: string) => settle(item) });
       return answered;
     },
-    // Mirrors showInformationMessage: a warning can carry action buttons
-    // too, and the budget refusal offers one. `warnings` stays a string
-    // array so the tests that only read messages keep working.
-    showWarningMessage: (message: string, ...items: string[]) => {
+    // Warnings can carry action buttons too. Real VS Code takes an optional
+    // MessageOptions ({modal}) before the labels, so this accepts `...args`;
+    // `warnings` stays a string array.
+    showWarningMessage: (message: string, ...args: unknown[]) => {
+      const modal =
+        args.length > 0 && typeof args[0] === 'object' && args[0] !== null
+          ? Boolean((args[0] as { modal?: boolean }).modal)
+          : undefined;
+      const items = (modal === undefined ? args : args.slice(1)) as string[];
       vscodeFake.warnings.push(message);
       let settle: (item: string | undefined) => void = () => {};
       const answered = new Promise<string | undefined>((r) => {
         settle = r;
       });
-      vscodeFake.warningOffers.push({ message, items, answer: (item?: string) => settle(item) });
+      vscodeFake.warningOffers.push({ message, items, modal, answer: (item?: string) => settle(item) });
       return answered;
     },
     showErrorMessage: (message: string) => {
@@ -256,17 +267,14 @@ const fakeVscode = {
         ? Promise.resolve(handler(...args))
         : Promise.reject(new Error(`no such command: ${id}`));
     },
-    // Real getCommands() lists thousands of built-ins; the fake only ever
-    // needs to answer "is this specific id known", so it reports whatever a
-    // test registered or set directly on vscodeFake.commands.
+    // Reports whatever a test registered or set on vscodeFake.commands.
     getCommands: (_filterInternal?: boolean) => Promise.resolve([...vscodeFake.commands.keys()]),
   },
   workspace: {
     getConfiguration: (_section: string) => ({
       get: <T>(key: string, fallback: T): T =>
         key in vscodeFake.config ? (vscodeFake.config[key] as T) : fallback,
-      // Recorded rather than applied: a test asserts what the extension tried
-      // to write, and the value it reads back stays whatever the test set.
+      // Recorded rather than applied; reads keep returning what the test set.
       update: (key: string, value: unknown) => {
         vscodeFake.configUpdates.set(key, value);
         return Promise.resolve();
@@ -308,15 +316,10 @@ export function installVscodeStub(): void {
 }
 
 /**
- * Intercept one more module, by the *exact* string its importer passes to
- * `require`. Register before the importing module is loaded — which for a
- * compiled `import` means before the `require()` that pulls it in, so the
- * importer has to be `require`d rather than imported.
- *
- * Used to keep `activate()` off the real filesystem and off the real audio
- * player: `./transcriptWatcher` becomes a fake whose events the test fires by
- * hand, and `./sound` becomes a recorder. Both strings are unique to
- * `src/extension.ts`, so nothing else is affected.
+ * Intercept one more module by the exact string its importer passes to
+ * `require`. Register before the importer is loaded, so the importer has to
+ * be `require`d rather than imported. Used for `./transcriptWatcher` and
+ * `./sound`, whose strings are unique to `src/extension.ts`.
  */
 export function stubModule(request: string, exports: unknown): void {
   installVscodeStub();

@@ -1,17 +1,9 @@
 /**
- * Bytes of transcript per cache-creation token, calibrated from one measured
- * resume: 1,618,394 bytes -> 288,574 tokens. One data point, so this is an
- * order-of-magnitude guard rather than an accounting figure. Recalibrate as
- * real numbers accumulate.
- */
-export const BYTES_PER_TOKEN = 5.6;
-
-/**
  * What one assistant turn recorded about the context it ran on.
  *
  * Claude Code writes a `usage` block on every assistant entry. Together these
  * three numbers are the size of the live context at that moment, which is the
- * thing a cold resume has to build again - and unlike the file's byte count,
+ * thing a cold resume has to build again - and unlike a byte count of the file,
  * it is measured rather than inferred.
  */
 export interface UsageRecord {
@@ -27,12 +19,15 @@ export function contextTokens(usage: UsageRecord): number {
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
 /**
- * The newest usage record in a chunk read off the end of a transcript.
+ * The newest REAL usage record in a chunk read off the end of a transcript.
  *
- * Scanned backwards, because the last one is the only one that describes the
- * context as it stands now. Lines that do not parse are skipped rather than
- * thrown on: a fixed-size read off the end of a multi-megabyte file lands
- * mid-line, and that fragment is not a record.
+ * Scanned backwards, because the last one is the only one that describes the context as it
+ * stands now. Lines that do not parse are skipped: a fixed-size read off the end lands mid-line.
+ *
+ * At a usage limit or an overload the LAST line is Claude Code's synthetic error entry, whose
+ * `usage` block is all zeros; reading it estimates 0 tokens and lets every resume through. So
+ * an entry only counts if it is a real API turn: not flagged `isApiErrorMessage`, not model
+ * `<synthetic>`, and with counted tokens summing to more than zero.
  */
 export function parseLastUsage(tail: string): UsageRecord | undefined {
   const lines = tail.split(/\r?\n/);
@@ -41,54 +36,48 @@ export function parseLastUsage(tail: string): UsageRecord | undefined {
     if (!line) {
       continue;
     }
-    let parsed: { message?: { usage?: Record<string, unknown> } };
+    let parsed: { isApiErrorMessage?: unknown; message?: { model?: unknown; usage?: Record<string, unknown> } };
     try {
       parsed = JSON.parse(line) as typeof parsed;
     } catch {
       continue;
     }
     const usage = parsed.message?.usage;
-    if (!usage) {
+    if (!usage || parsed.isApiErrorMessage === true || parsed.message?.model === '<synthetic>') {
       continue;
     }
-    return {
+    const record = {
       input: num(usage.input_tokens),
       cacheRead: num(usage.cache_read_input_tokens),
       cacheCreate: num(usage.cache_creation_input_tokens),
     };
+    // Some compaction-boundary turns report 0 here but carry real numbers in
+    // cache_creation.ephemeral_1h_input_tokens / usage.iterations[]. They are skipped, so the
+    // result is the turn before: an overestimate, never a silent pass.
+    if (contextTokens(record) <= 0) {
+      continue;
+    }
+    return record;
   }
   return undefined;
 }
 
 /**
- * What resuming this session should cost.
+ * What resuming this session should cost: the live context of its newest real turn, or
+ * `undefined` when no real turn exists.
  *
- * The byte count is the fallback, not the measure. A transcript accumulates
- * everything ever written to it: turns already summarised away by compaction,
- * whole segments a reload replayed verbatim, and bookkeeping lines that never
- * reach a prompt. On this project's own 11.2 MB session that read 2,007,179
- * tokens, while the session's records showed the largest cache creation it had
- * ever actually paid was 407,570 - so the guard refused a resume costing a
- * quarter of what it claimed, which is exactly the session someone most wants
- * back.
- *
- * A usage record says what the context really is, so it wins whenever one can
- * be read. Bytes remain for a session with no assistant turn yet, where there
- * is nothing else to go on.
+ * There is no byte-count fallback: a transcript accumulates summarised-away turns, replayed
+ * segments and bookkeeping lines, and overestimates badly. A session with no real usage record
+ * never completed an API turn, so it is small and unmeasured, not expensive.
  */
-export function estimateResumeTokens(bytes: number, usage?: UsageRecord): number {
-  if (usage) {
-    return contextTokens(usage);
-  }
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return 0;
-  }
-  return Math.round(bytes / BYTES_PER_TOKEN);
+export function estimateResumeTokens(usage?: UsageRecord): number | undefined {
+  return usage ? contextTokens(usage) : undefined;
 }
 
 export interface BudgetVerdict {
   allowed: boolean;
-  estimate: number;
+  /** Tokens the resume should cost; undefined when the session is unmeasured. */
+  estimate?: number;
   limit: number;
   reason?: string;
 }
@@ -98,11 +87,11 @@ const fmt = (n: number) => n.toLocaleString('en-US');
 /**
  * Pre-flight check. A usage-limit wait guarantees a cold prompt cache, so a
  * resume reprocesses the whole session history - recovery competes with the
- * quota it is recovering.
+ * quota it is recovering. An unmeasured session (no usage record) is allowed.
  */
-export function checkBudget(bytes: number, maxResumeTokens: number, usage?: UsageRecord): BudgetVerdict {
-  const estimate = estimateResumeTokens(bytes, usage);
-  if (maxResumeTokens <= 0) {
+export function checkBudget(maxResumeTokens: number, usage?: UsageRecord): BudgetVerdict {
+  const estimate = estimateResumeTokens(usage);
+  if (maxResumeTokens <= 0 || estimate === undefined) {
     return { allowed: true, estimate, limit: maxResumeTokens };
   }
   if (estimate > maxResumeTokens) {

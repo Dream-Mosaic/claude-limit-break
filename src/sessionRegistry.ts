@@ -1,32 +1,25 @@
-import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { claudeHome } from './claudeHome';
+
 /**
- * One field lookup in `~/.claude/sessions/<pid>.json`, the file Claude Code
- * writes per live process.
+ * One field lookup in `~/.claude/sessions/<pid>.json`, the file Claude Code writes per live process.
  *
- * Deliberately small. Issue #6 established that this store cannot answer
- * "is that process alive?" - it is keyed by pid, survives the process's
- * death, and nothing checks it. `claude agents --json` answers that (see
- * liveSessions.ts), and this file is read only for a pid that listing has
- * already vouched for, to get the one field the listing does not carry:
- * `entrypoint`, which separates a panel from a terminal.
+ * Deliberately small: this store is keyed by pid and survives the process's death, so it cannot say whether a process is alive. `claude agents --json` does (liveSessions.ts); this file is read only for a pid that listing has vouched for, to get `entrypoint`, which separates a panel from a terminal.
  *
- * `readFile` is injected rather than imported, the same shape
- * resolveClaudeLauncher uses for `which`/`readShim` in resumer.ts: this reads
- * something the extension does not own, so a test hands it fabricated records
- * instead of depending on whichever Claude Code processes happen to be
- * running on the machine at the time.
+ * `readFile` is injected so tests hand it fabricated records instead of depending on real Claude Code processes.
  */
 
 export interface SessionRecord {
   sessionId: string;
   /** Absent in records written by a version that did not record it. */
   entrypoint: string | undefined;
+  /** Present only when Remote Control has bridged this session, i.e. Claude Code web can drive it too. Omitted, not `undefined`, when absent. */
+  bridgeSessionId?: string;
 }
 
 export function sessionRegistryDir(): string {
-  return path.join(os.homedir(), '.claude', 'sessions');
+  return path.join(claudeHome(), 'sessions');
 }
 
 export function readSessionRecord(
@@ -45,8 +38,12 @@ export function readSessionRecord(
   if (parsed.pid !== pid || typeof parsed.sessionId !== 'string') {
     return undefined;
   }
-  return {
+  const record: SessionRecord = {
     sessionId: parsed.sessionId,
     entrypoint: typeof parsed.entrypoint === 'string' ? parsed.entrypoint : undefined,
   };
+  if (typeof parsed.bridgeSessionId === 'string' && parsed.bridgeSessionId.length > 0) {
+    record.bridgeSessionId = parsed.bridgeSessionId;
+  }
+  return record;
 }

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
   normalizeProjectPath,
   isFolderTrusted,
+  trustedSpelling,
   readClaudeUserConfig,
   defaultClaudeConfigPath,
 } from '../src/trust';
@@ -56,15 +57,11 @@ test('isFolderTrusted does not match a sibling project sharing a prefix', () => 
   assert.equal(isFolderTrusted('/projects/example', config, 'linux'), false);
 });
 
-// --- Case folding is platform-specific (#8 finding 3) -----------------------
-//
-// The drive-letter casing problem is real and Windows-specific: NTFS is
-// case-insensitive, so `C:/x` and `c:/x` name the same directory. Folding
-// case everywhere was wrong: on Linux (ext4 etc, case-sensitive), `/home/a`
-// and `/home/A` are two different directories that would wrongly share one
-// trust answer. darwin's default filesystem (HFS+/APFS) is case-insensitive
-// like Windows, so it folds too; platform is a parameter rather than
-// `process.platform` read internally, so both branches are directly testable.
+// --- Case folding is platform-specific ---
+// NTFS is case-insensitive, so `C:/x` and `c:/x` are one directory; on Linux
+// `/home/a` and `/home/A` differ and must not share a trust answer. darwin's
+// default filesystem folds like Windows. Platform is a parameter so both
+// branches are testable.
 
 test('normalizeProjectPath folds case on win32, where the filesystem does not distinguish it', () => {
   assert.equal(
@@ -88,8 +85,8 @@ test('normalizeProjectPath preserves case on linux, where two differently-cased 
 });
 
 test('isFolderTrusted on linux does not conflate two directories that differ only by case', () => {
-  // Before the fix, normalizeProjectPath lowercased unconditionally, so this
-  // config would wrongly report /home/A/proj as trusted too.
+  // Lowercasing unconditionally would wrongly report /home/A/proj as trusted
+  // too.
   const config = { projects: { '/home/a/proj': { hasTrustDialogAccepted: true } } };
   assert.equal(isFolderTrusted('/home/A/proj', config, 'linux'), false);
   assert.equal(isFolderTrusted('/home/a/proj', config, 'linux'), true);
@@ -130,12 +127,10 @@ test('defaultClaudeConfigPath points at .claude.json under the home directory wh
   }
 });
 
-test('defaultClaudeConfigPath honours CLAUDE_CONFIG_DIR (#8) - the CLI relocates .claude.json there too, verified by reading its own bundle', () => {
-  // The CLI resolves the file as `path.join(process.env.CLAUDE_CONFIG_DIR ||
-  // <homedir-fallback>, '.claude.json')` - CLAUDE_CONFIG_DIR replaces
-  // homedir() wholesale for this file, the same as it does for ~/.claude
-  // itself. Left unhonoured, a scheduled resume reads no config, treats
-  // every folder as untrusted, and warns wrongly on every single fire.
+test('defaultClaudeConfigPath honours CLAUDE_CONFIG_DIR - the CLI relocates .claude.json there too', () => {
+  // The CLI resolves the file as `path.join(CLAUDE_CONFIG_DIR || homedir,
+  // '.claude.json')`; unhonoured, every folder would read as untrusted and warn
+  // on every fire.
   const saved = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'clb-custom-claude-home');
   try {
@@ -179,4 +174,63 @@ test('only an explicit true counts as trusted, never a merely truthy value', () 
       `hasTrustDialogAccepted: ${JSON.stringify(value)} must not count as trusted`,
     );
   }
+});
+
+// Two spellings of one folder with different answers.
+// ~/.claude.json can hold both `c:/x` (written by the panel, since VS Code
+// reports a lower-case drive) and `C:/x` (written when trusted from a
+// terminal). The CLI looks its key up exactly, with no case folding, so these
+// are two records; taking the first match answers "untrusted" for a folder the
+// user trusted.
+
+const twoSpellings = (lower: boolean, upper: boolean) => ({
+  projects: {
+    'c:/Users/thegr/proj': { hasTrustDialogAccepted: lower },
+    'C:/Users/thegr/proj': { hasTrustDialogAccepted: upper },
+  },
+});
+
+test('a folder trusted under one drive-letter spelling counts as trusted', () => {
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'), true);
+  assert.equal(isFolderTrusted('C:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'), true);
+});
+
+test('the order the spellings appear in does not decide the answer', () => {
+  const reversed = {
+    projects: {
+      'C:/Users/thegr/proj': { hasTrustDialogAccepted: true },
+      'c:/Users/thegr/proj': { hasTrustDialogAccepted: false },
+    },
+  };
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', reversed, 'win32'), true);
+});
+
+test('neither spelling trusted is still untrusted', () => {
+  assert.equal(isFolderTrusted('c:\\Users\\thegr\\proj', twoSpellings(false, false), 'win32'), false);
+});
+
+test('trustedSpelling returns the exact spelling the CLI has on record as trusted', () => {
+  // The resume launches with this as its cwd, so the CLI's own exact lookup
+  // finds the record the user created instead of the one the panel did.
+  assert.equal(
+    trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(false, true), 'win32'),
+    'C:\\Users\\thegr\\proj',
+  );
+});
+
+test('trustedSpelling keeps the given spelling when that one is already trusted', () => {
+  assert.equal(
+    trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(true, true), 'win32'),
+    'c:\\Users\\thegr\\proj',
+  );
+});
+
+test('trustedSpelling finds nothing when no spelling is trusted', () => {
+  assert.equal(trustedSpelling('c:\\Users\\thegr\\proj', twoSpellings(false, false), 'win32'), undefined);
+});
+
+test('on linux a differently-cased path is a different folder, not another spelling', () => {
+  const config = { projects: { '/home/A/proj': { hasTrustDialogAccepted: true } } };
+  assert.equal(trustedSpelling('/home/a/proj', config, 'linux'), undefined);
+  assert.equal(isFolderTrusted('/home/a/proj', config, 'linux'), false);
 });

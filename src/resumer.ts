@@ -19,19 +19,11 @@ export interface TerminalOptionsLike {
 }
 
 /**
- * Variables a running Claude Code session sets for the processes it starts,
- * read off a shell spawned by one. They describe that session - its id, its
- * messaging socket and token, that it is the parent of whatever runs next.
+ * Variables a running Claude Code session sets for the processes it starts (its id, messaging socket and token, parent marker).
  *
- * VS Code starts the resume terminal from the window's environment, and a
- * window opened from inside a Claude session (`code .` typed into one) carries
- * all of them. The resumed `claude` is a different process resuming a
- * different session, so it must not start out as that session's child (#9).
+ * VS Code starts the resume terminal from the window's environment, and a window opened from inside a Claude session (`code .`) carries all of them. The resumed `claude` resumes a different session, so it must not start out as that session's child.
  *
- * Deliberately a named list rather than a prefix. People export CLAUDE_CODE_*
- * settings on purpose - CLAUDE_CODE_USE_BEDROCK, for one - and the Claude Code
- * extension injects CLAUDE_CODE_SSE_PORT into integrated terminals so the CLI
- * can find the editor. Clearing those would change what the resume does.
+ * A named list, not a prefix: people export CLAUDE_CODE_* settings on purpose (CLAUDE_CODE_USE_BEDROCK), and the Claude Code extension injects CLAUDE_CODE_SSE_PORT so the CLI can find the editor. Clearing those would change what the resume does.
  */
 export const PARENT_SESSION_VARIABLES = [
   'CLAUDECODE',
@@ -50,29 +42,20 @@ export const PARENT_SESSION_VARIABLES = [
 /**
  * Arguments for an interactive resume.
  *
- * The prompt is one array element. Nothing quotes it, because nothing parses
- * it: VS Code hands shellArgs to the child process as argv. Upstream built a
- * command string instead and double-quoted it on Windows, where PowerShell
- * expands $(...) inside double quotes - $(1+41) reached Claude as 42.
+ * The prompt is one array element and is never quoted: VS Code hands shellArgs to the child as argv. Building a command string and double-quoting it breaks on Windows, where PowerShell expands $(...) inside double quotes.
  *
- * No --permission-mode: an interactive resume already runs at the user's own
- * autonomy level, so the flag could only ever escalate it.
+ * No --permission-mode: an interactive resume already runs at the user's own autonomy level, so the flag could only escalate it.
  *
- * No --continue: it resumes "the most recent interactive session", skipping -p,
- * SDK, background and /loop sessions. We know the id, so we name it.
+ * No --continue: it resumes "the most recent interactive session", skipping -p, SDK, background and /loop sessions. We know the id, so we name it.
  */
 export function buildResumeArgs(sessionId: string, prompt: string): string[] {
   return ['--resume', sessionId, prompt];
 }
 
 /**
- * Arguments for opt-in headless mode. `--output-format json` returns a `usage`
- * block for post-flight accounting and structured `permission_denials`.
+ * Arguments for opt-in headless mode. `--output-format json` returns a `usage` block for post-flight accounting and structured `permission_denials`.
  *
- * Headless does NOT inherit the session's permission mode (verified: an
- * acceptEdits session resumed with -p was denied a Write), so an explicit mode
- * is required for it to do tool work. That is exactly why the setting is
- * machine-scoped and off by default.
+ * Headless does NOT inherit the session's permission mode, so an explicit mode is required for tool work. That is why the setting is machine-scoped and off by default.
  */
 export function buildHeadlessArgs(sessionId: string, prompt: string, permissionMode: string): string[] {
   const args = ['-p', '--resume', sessionId, prompt, '--output-format', 'json'];
@@ -85,17 +68,9 @@ export function buildHeadlessArgs(sessionId: string, prompt: string, permissionM
 /**
  * Whether `cwd` is safe to hand to vscode.window.createTerminal.
  *
- * createTerminal does not throw on a missing directory - VS Code reports
- * "Starting directory (cwd) ... does not exist" asynchronously, inside the
- * terminal process, well after a caller that logs success right after calling
- * it would already have done so. Checking first turns that into a result the
- * caller can act on - keep the job, tell the user, name the transcript -
- * before anything is launched.
+ * createTerminal does not throw on a missing directory; VS Code reports it asynchronously, after a caller would already have logged success. Checking first gives the caller a result to act on before anything launches.
  *
- * No cwd at all is fine: VS Code falls back to its own default, same as
- * always. `exists` is injected rather than importing node:fs directly so this
- * stays a pure function callable without a filesystem, matching
- * buildTerminalOptions below.
+ * No cwd is fine: VS Code uses its own default. `exists` is injected so this stays a pure function.
  */
 export function cwdExists(cwd: string | undefined, exists: (p: string) => boolean): boolean {
   return cwd === undefined || exists(cwd);
@@ -105,16 +80,11 @@ export function buildTerminalOptions(
   session: ResolvedSession,
   prompt: string,
   launcher: Launcher,
-  /**
-   * The claude arguments to run. Defaults to an interactive resume; the caller
-   * passes buildHeadlessArgs instead when resumeMode is headless. Injected
-   * rather than branched on a mode flag here so this stays one shape with one
-   * reason to change, and so the argument builders keep their own tests.
-   */
+  /** The claude arguments to run. Defaults to an interactive resume; the caller passes buildHeadlessArgs when resumeMode is headless. */
   claudeArgs: string[] = buildResumeArgs(session.sessionId, prompt),
 ): TerminalOptionsLike {
   return {
-    name: `Limit Buster: ${session.sessionId.slice(0, 8)}`,
+    name: `Limit Break: ${session.sessionId.slice(0, 8)}`,
     cwd: session.cwd,
     shellPath: launcher.file,
     shellArgs: [...launcher.args, ...claudeArgs],
@@ -124,21 +94,32 @@ export function buildTerminalOptions(
 }
 
 /**
- * Matches the shim-directory variables npm's generated launchers set to their
- * own directory: %dp0% / %~dp0% in a .cmd shim (computed by its :find_dp0
- * routine), $basedir in a .ps1 shim (computed from $PSScriptRoot). All three
- * are expanded to path.dirname(found) before the entry point is resolved.
+ * Terminal options for a plain `claude` launch in `cwd`, with no `--resume` and no prompt (Trust hotlink).
+ *
+ * This terminal exists only so a human can answer Claude's own trust dialog: the extension must not answer it or write `~/.claude.json`, so nothing here sends any input into the terminal. The environment is stripped exactly as buildTerminalOptions strips it.
+ *
+ * Not built via buildTerminalOptions: its name embeds a session id this launch does not have.
+ */
+export function buildTrustTerminalOptions(cwd: string, launcher: Launcher): TerminalOptionsLike {
+  return {
+    name: `Limit Break: Trust ${path.basename(cwd)}`,
+    cwd,
+    shellPath: launcher.file,
+    shellArgs: [...launcher.args],
+    isTransient: true,
+    env: Object.fromEntries(PARENT_SESSION_VARIABLES.map((name) => [name, null])),
+  };
+}
+
+/**
+ * Matches the shim-directory variables npm's generated launchers set to their own directory: %dp0% / %~dp0% in a .cmd shim, $basedir in a .ps1 shim. All three are expanded to path.dirname(found) before the entry point is resolved.
  */
 const SHIM_DIR_VAR = /%~?dp0%?|\$basedir/gi;
 
 /**
  * Find something spawnable for `claude`.
  *
- * On Windows the PATH entry is usually `claude.cmd`, an npm shim. A .cmd is not
- * a PE image, so it cannot be spawned directly - and running it through cmd.exe
- * would reintroduce a command-line parser, which is the thing this module
- * exists to avoid. So the shim is read and its cli.js extracted, and node runs
- * that directly.
+ * On Windows the PATH entry is usually `claude.cmd`, an npm shim, which is not a PE image and cannot be spawned directly; running it through cmd.exe would reintroduce a command-line parser. So the shim is read, its cli.js extracted, and node runs that directly.
  */
 export function resolveClaudeLauncher(
   configured: string,
@@ -148,12 +129,7 @@ export function resolveClaudeLauncher(
 ): Launcher | undefined {
   const p = platform === 'win32' ? path.win32 : path.posix;
   const trimmed = configured.trim();
-  // A configured bare name has to go through PATH like an unset one does.
-  // "claude" on Windows is claude.cmd, an npm shim - the exact case this
-  // module exists to unwrap - and handing VS Code shellPath: "claude" spawns
-  // nothing. A value with a separator in it is already a path; use it as
-  // given. A name that PATH does not know fails closed rather than quietly
-  // becoming "claude", which is not the program that was asked for.
+  // A configured bare name goes through PATH like an unset one: "claude" on Windows is claude.cmd, an npm shim, and shellPath: "claude" spawns nothing. A value with a separator is already a path. A name PATH does not know fails closed rather than becoming "claude".
   const found = trimmed ? (/[\\/]/.test(trimmed) ? trimmed : which(trimmed)) : which('claude');
   if (!found) {
     return undefined;

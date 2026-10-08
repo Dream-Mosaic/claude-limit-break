@@ -4,8 +4,10 @@ import {
   buildResumeArgs,
   buildHeadlessArgs,
   buildTerminalOptions,
+  buildTrustTerminalOptions,
   resolveClaudeLauncher,
   cwdExists,
+  PARENT_SESSION_VARIABLES,
 } from '../src/resumer';
 import type { ResolvedSession } from '../src/sessionResolver';
 
@@ -57,8 +59,36 @@ test('terminal options launch claude directly, with no shell', () => {
   assert.equal(opts.shellPath, '/usr/bin/claude');
   assert.deepEqual(opts.shellArgs, ['--resume', ID, 'go']);
   assert.equal(opts.cwd, '/projects/example');
-  assert.match(opts.name, /Limit Buster/);
+  assert.match(opts.name, /Limit Break/);
   assert.ok(opts.name.includes(ID.slice(0, 8)));
+});
+
+test('the trust terminal runs plain claude: no --resume, no prompt argument', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  assert.equal(opts.shellPath, '/usr/bin/claude');
+  assert.deepEqual(opts.shellArgs, [], 'no resume args and no prompt - just plain claude');
+  assert.equal(opts.cwd, '/projects/example');
+});
+
+test('the trust terminal name uses the existing "Limit Break: " prefix', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  assert.match(opts.name, /^Limit Break: /);
+});
+
+test('the trust terminal strips every parent-session variable, same as a resume terminal', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', { file: '/usr/bin/claude', args: [] });
+  for (const name of PARENT_SESSION_VARIABLES) {
+    assert.equal(opts.env[name], null, `${name} must be nulled out`);
+  }
+  assert.equal(Object.keys(opts.env).length, PARENT_SESSION_VARIABLES.length, 'no extra env entries');
+});
+
+test('a node-shim launcher is still prefixed in the trust terminal', () => {
+  const opts = buildTrustTerminalOptions('/projects/example', {
+    file: 'C:\\Program Files\\nodejs\\node.exe',
+    args: ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'],
+  });
+  assert.deepEqual(opts.shellArgs, ['C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js']);
 });
 
 test('a node-shim launcher prepends its own args before the resume args', () => {
@@ -80,8 +110,8 @@ test('an explicitly configured binary is used as-is', () => {
 });
 
 test('a configured bare name is resolved on PATH, so a windows shim is still unwrapped', () => {
-  // claudeCommand: "claude" is the obvious thing to type, and before this it
-  // produced shellPath: "claude" - a .cmd shim name that cannot be spawned.
+  // A bare "claude" must not become shellPath "claude", a .cmd shim name that
+  // cannot be spawned.
   const shim = '@ECHO off\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n';
   const l = resolveClaudeLauncher(
     'claude',
@@ -172,13 +202,9 @@ test('no cwd at all is fine: VS Code applies its own default, same as always', (
   assert.equal(cwdExists(undefined, () => false), true);
 });
 
-// --- Environment (#9) ------------------------------------------------------
-//
-// VS Code starts the resume terminal from the window's environment. When that
-// window was itself opened from inside a Claude session - `code .` typed into
-// one - it carries the variables that session sets for its own children, and
-// the resumed `claude` would start out believing it is that other session's
-// child. These names were read off a shell spawned by a live session.
+// --- Environment ---
+// A window opened from inside a Claude session carries that session's
+// variables, and the resumed `claude` would think it is that session's child.
 
 test('the resume terminal clears the identity of any Claude session it was launched from', () => {
   const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
@@ -200,8 +226,8 @@ test('the resume terminal clears the identity of any Claude session it was launc
 
 test("a user's own Claude configuration is left alone", () => {
   // Settings a person exports on purpose, and the port the Claude Code
-  // extension deliberately injects into integrated terminals for IDE
-  // integration. Clearing any of these would change what the resume does.
+  // extension injects for IDE integration; clearing them would change the
+  // resume.
   const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
   for (const name of [
     'ANTHROPIC_API_KEY',
@@ -216,9 +242,8 @@ test("a user's own Claude configuration is left alone", () => {
 });
 
 test('the resume terminal is transient, so a window reload does not launch the resume again', () => {
-  // The API documents isTransient as opting a terminal out of the default
-  // persistence on restart and reload (when enablePersistentSessions is on).
-  // A resume is a one-off launch, not a terminal the window should keep.
+  // isTransient opts a terminal out of default persistence on restart and
+  // reload; a resume is a one-off launch.
   const opts = buildTerminalOptions(session, 'go', { file: '/usr/bin/claude', args: [] });
   assert.equal(opts.isTransient, true);
 });
