@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # Decides whether the change can affect the code. A change that touches only
-  # Markdown files or docs/ skips the steps of the unit and integration jobs,
+  # Markdown files or docs/, other than README.md, skips the steps of the unit and integration jobs,
   # but the jobs still run and report, so the required checks pass. The package
   # job always runs: README, CHANGELOG and THIRDPARTY ship inside the .vsix, and
   # an edit to one of them can break packaging or the vsix check. A skipped matrix job
@@ -36,7 +36,10 @@ jobs:
           set -uo pipefail
           code=true
           if files="$(git diff --name-only "$BASE...$HEAD" 2>/dev/null)" && [ -n "$files" ]; then
-            if ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
+            # README.md counts as code: a unit test checks its settings table
+            # against package.json.
+            if ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)' \
+              && ! printf '%s\n' "$files" | grep -qxF README.md; then
               code=false
             fi
           else
