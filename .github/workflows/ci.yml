@@ -10,20 +10,23 @@ permissions:
 
 jobs:
   # Decides whether the change can affect the code. A change that touches only
-  # Markdown files or docs/, other than README.md, skips the steps of the unit and integration jobs,
-  # but the jobs still run and report, so the required checks pass. The package
-  # job always runs: README, CHANGELOG and THIRDPARTY ship inside the .vsix, and
-  # an edit to one of them can break packaging or the vsix check. A skipped matrix job
-  # would report under an unexpanded name and leave the required
-  # "test (ubuntu-latest)" check waiting forever, which is why the skip is per
-  # step and not per job. Anything unclear counts as a code change.
+  # Markdown files or docs/ skips the steps of the unit and integration jobs,
+  # but the jobs still run and report, so the required checks pass. README.md
+  # is the exception for the unit tests: one of them checks its settings table
+  # against package.json. The package job always runs: README, CHANGELOG and
+  # THIRDPARTY ship inside the .vsix, and an edit to one of them can break
+  # packaging or the vsix check. A skipped matrix job would report under an
+  # unexpanded name and leave the required "test (ubuntu-latest)" check waiting
+  # forever, which is why the skip is per step and not per job. Anything
+  # unclear counts as a code change.
   #
-  # A pass that skipped the tests says so: a notice on the run and the checks,
+  # A pass that skipped tests says so: a notice on the run and the checks,
   # and the decision with the changed files in this job's summary.
   changes:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      unit: ${{ steps.diff.outputs.unit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,18 +38,22 @@ jobs:
         run: |
           set -uo pipefail
           code=true
+          unit=true
           if files="$(git diff --name-only "$BASE...$HEAD" 2>/dev/null)" && [ -n "$files" ]; then
-            # README.md counts as code: a unit test checks its settings table
-            # against package.json.
-            if ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)' \
-              && ! printf '%s\n' "$files" | grep -qxF README.md; then
+            if ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
               code=false
+              if ! printf '%s\n' "$files" | grep -qxF README.md; then
+                unit=false
+              fi
             fi
           else
             files='(could not list the changed files; treated as a code change)'
           fi
           if [ "$code" = true ]; then
             verdict='Code change: the unit and integration tests run in full.'
+          elif [ "$unit" = true ]; then
+            verdict='Only Markdown or docs/ changed, README.md among them: the unit tests run, the integration job passes WITHOUT running its tests. The package job still runs.'
+            echo "::notice title=Integration tests skipped::$verdict"
           else
             verdict='Only Markdown or docs/ changed: the unit and integration jobs pass WITHOUT running their tests. The package job still runs.'
             echo "::notice title=Tests skipped::$verdict"
@@ -60,7 +67,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$verdict"
-          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          printf 'code=%s\nunit=%s\n' "$code" "$unit" | tee -a "$GITHUB_OUTPUT"
 
   test:
     runs-on: ${{ matrix.os }}
@@ -69,17 +76,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - if: needs.changes.outputs.code != 'true'
+      - if: needs.changes.outputs.unit != 'true'
         run: echo "::notice title=Unit tests skipped::Only Markdown or docs/ changed; this job passes without running the unit tests."
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.unit == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.unit == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.unit == 'true'
         run: npm ci
-      - if: needs.changes.outputs.code == 'true'
+      - if: needs.changes.outputs.unit == 'true'
         run: npm test
 
   # Boots a real VS Code and activates the extension inside it. The unit suite
