@@ -349,6 +349,11 @@ Behaviours 1.0 ships as they are, to be looked at again.
   nothing about which conversation it is. Show something recognisable instead,
   such as the session's title or first prompt and its folder, keeping the ID
   in the log.
+- **Cancel one session.** "Cancel Pending Resume" cancels every pending job at
+  once; there is no way to drop a single session's resume and keep the rest.
+- **"more than 1 hours away".** The offer-only notice (`src/extension.ts`, the
+  "won't resume automatically" message) always pluralises `maxWaitHours`, so
+  it reads wrong at exactly 1.
 - **Gave-up handling.** The marker clears on the session's next finished turn
   or from "Dismiss gave-up notices"; a turn that did not fix the cause clears it
   too. Revisit.
