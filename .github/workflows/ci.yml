@@ -9,18 +9,75 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether the change can affect the code. A change that touches only
+  # Markdown files or docs/ skips the steps of the unit and integration jobs,
+  # but the jobs still run and report, so the required checks pass. The package
+  # job always runs: README, CHANGELOG and THIRDPARTY ship inside the .vsix, and
+  # an edit to one of them can break packaging or the vsix check. A skipped matrix job
+  # would report under an unexpanded name and leave the required
+  # "test (ubuntu-latest)" check waiting forever, which is why the skip is per
+  # step and not per job. Anything unclear counts as a code change.
+  #
+  # A pass that skipped the tests says so: a notice on the run and the checks,
+  # and the decision with the changed files in this job's summary.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -uo pipefail
+          code=true
+          if files="$(git diff --name-only "$BASE...$HEAD" 2>/dev/null)" && [ -n "$files" ]; then
+            if ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/)'; then
+              code=false
+            fi
+          else
+            files='(could not list the changed files; treated as a code change)'
+          fi
+          if [ "$code" = true ]; then
+            verdict='Code change: the unit and integration tests run in full.'
+          else
+            verdict='Only Markdown or docs/ changed: the unit and integration jobs pass WITHOUT running their tests. The package job still runs.'
+            echo "::notice title=Tests skipped::$verdict"
+          fi
+          {
+            echo "### $verdict"
+            echo
+            echo 'Changed files:'
+            echo '```'
+            printf '%s\n' "$files"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$verdict"
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   test:
     runs-on: ${{ matrix.os }}
+    needs: changes
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - if: needs.changes.outputs.code != 'true'
+        run: echo "::notice title=Unit tests skipped::Only Markdown or docs/ changed; this job passes without running the unit tests."
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm ci
-      - run: npm test
+      - if: needs.changes.outputs.code == 'true'
+        run: npm ci
+      - if: needs.changes.outputs.code == 'true'
+        run: npm test
 
   # Boots a real VS Code and activates the extension inside it. The unit suite
   # runs against a hand-written fake `vscode`, which cannot tell whether the
@@ -29,14 +86,20 @@ jobs:
   integration:
     name: Integration (real VS Code)
     runs-on: ubuntu-latest
-    needs: test
+    needs: [changes, test]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - if: needs.changes.outputs.code != 'true'
+        run: echo "::notice title=Integration tests skipped::Only Markdown or docs/ changed; this job passes without running the integration tests."
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm ci
-      - run: xvfb-run -a npm run test:integration
+      - if: needs.changes.outputs.code == 'true'
+        run: npm ci
+      - if: needs.changes.outputs.code == 'true'
+        run: xvfb-run -a npm run test:integration
 
   package:
     runs-on: ubuntu-latest

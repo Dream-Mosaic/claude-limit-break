@@ -78,9 +78,11 @@ jobs:
       # Before anything expensive, and before the tag exists. A version whose
       # changes were never written down is the way a changelog rots.
       - name: The version being released needs a changelog section
+        # The same exact-version match the release notes use, so a heading for
+        # 0.1.10 cannot satisfy 0.1.1.
         run: |
           set -euo pipefail
-          if ! grep -qE "^## \[?${VERSION//./\\.}\]?( |\$)" CHANGELOG.md; then
+          if ! bash scripts/changelog-section.sh "$VERSION" > /dev/null; then
             echo "::error::CHANGELOG.md has no '## [$VERSION]' section. Move the Unreleased notes under it before releasing."
             exit 1
           fi
@@ -118,7 +120,10 @@ jobs:
             echo "A draft for v$VERSION already exists - an earlier run failed part way. Reusing it."
             exit 0
           fi
-          args=(--draft --title "v$VERSION" --generate-notes)
+          # The release notes are this version's CHANGELOG section, not GitHub's
+          # generated PR list.
+          bash scripts/changelog-section.sh "$VERSION" > release-notes.md
+          args=(--draft --title "v$VERSION" --notes-file release-notes.md)
           # Everything below 1.0.0 goes out marked pre-release.
           case "$VERSION" in
             0.*) args+=(--prerelease) ;;
