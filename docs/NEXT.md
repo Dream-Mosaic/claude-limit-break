@@ -349,8 +349,11 @@ Behaviours 1.0 ships as they are, to be looked at again.
   nothing about which conversation it is. Show something recognisable instead,
   such as the session's title or first prompt and its folder, keeping the ID
   in the log.
-- **Cancel one session.** "Cancel Pending Resume" cancels every pending job at
-  once; there is no way to drop a single session's resume and keep the rest.
+- **Cancel or resume one session.** "Cancel Pending Resume" cancels every
+  pending job at once, and the Resume Now command takes whichever job is first
+  in line; neither lets you pick a session. Offer both per session (a pick list
+  from the status-bar menu, say). A notice's own Resume Now button already acts
+  on its session.
 - **"more than 1 hours away".** The offer-only notice (`src/extension.ts`, the
   "won't resume automatically" message) always pluralises `maxWaitHours`, so
   it reads wrong at exactly 1.
