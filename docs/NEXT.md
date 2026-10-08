@@ -2,8 +2,7 @@
 
 State as of 2026-10-01, after the Limit Break 1.0 plan (both lanes), its
 final review fix wave, and the two field-report fix waves (A and B) landed on
-`fix/1.0-field-reports`. Read
-[design](design/2026-09-01-design.md) and [UPSTREAM.md](UPSTREAM.md) first.
+`fix/1.0-field-reports`. Read [UPSTREAM.md](UPSTREAM.md) first.
 
 ## Settled (unlikely to need revisiting)
 
