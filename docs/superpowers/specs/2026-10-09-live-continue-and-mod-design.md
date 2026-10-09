@@ -109,12 +109,35 @@ tentatively both [decided, pending research]:
    the message ends with a question, or asks for approval ("go ahead",
    "confirm", "should I").
 
-**Research before building.** The user saw a CLI session report "blocked",
-"paused" on their prompt with something queued, and no permission prompt. So
-some conditions aren't covered yet. The plan's first task records real
-`claude agents --json` rows for each condition we can reproduce, including
-`dialog open` and a queued message. It confirms what each `waitingFor` value
-looks like, and whether anything else is reported.
+**The "blocked" session the user saw was a background session.** Read from
+`~/.claude/jobs/7a00d6c0/` on 2026-10-09 (Claude Code 2.1.295):
+- `state.json` had `template: "bg"`, `backend: "daemon"`, and the 1.0 resume
+  prompt as its `intent`.
+- At 11:52:49Z it went from `working` to `state: "blocked"`, with `detail`
+  "paused after Task 3 (1d647b0); awaiting go to review", a `needs` line, a
+  `suggestedReply` of "go ahead, continue", and
+  `inFlight: {tasks: 0, queued: 1}`. `firstTerminalAt` stayed `null`, so
+  `blocked` is a live state, not a final one.
+- The user had asked it to stop there for their go. So for a background
+  session, "finished its turn by asking you" is reported as `blocked`, which
+  the docs don't say.
+- A second job, `~/.claude/jobs/ffcb2ab0/`, is our own probe from 2026-09-10.
+  It is also `blocked`, but because of a usage limit: `needs` is "rate limited —
+  wait and retry · API Error: Request rejected (429) · Claude AI usage limit
+  reached|1789010981", which ends in the reset time.
+- `claude agents --json --all` gives background rows only `id`, `cwd`, `kind`,
+  `startedAt`, `sessionId`, `name` and `state`. The `detail`, `needs` and
+  `suggestedReply` fields are only in `state.json`, which is undocumented.
+
+Two examples with two causes share one value, so `blocked` alone can't tell
+"waiting for you" from "hit a limit"; `needs` can. `parseAgentRows` drops
+background rows today (they have no `pid`), so 1.0 neither resumes nor reports
+background sessions. Whether 1.1 should is an open question.
+
+**Still to record.** The plan's first task records real `claude agents --json`
+rows for the interactive conditions we can reproduce, including `dialog open`
+and a queued message. It confirms what each `waitingFor` value looks like, and
+whether anything else is reported.
 
 A small model call through the mod (`$.model.classify`) is left out of 1.1. It
 can come later if the heuristic proves noisy.
@@ -292,3 +315,6 @@ The extension uses the mod only on a matching major version.
 3. **D9's detection.** Tentatively the `waiting` status plus the text
    heuristic, pending the status research in the plan's first task.
 4. **The bridged-panel grace.** 3 minutes after the reset?
+5. **Background sessions.** 1.0 ignores them. Should 1.1 resume a background
+   session that is `blocked` on a limit, report one that is `blocked` waiting
+   for the user, both, or leave them for later?
