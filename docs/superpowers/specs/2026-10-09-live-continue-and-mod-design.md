@@ -1,8 +1,8 @@
 # 1.1: continue live sessions in place, with a Claude Code mod
 
 Status: **draft for review.** The decisions marked **[decided]** were made by the
-user on 2026-10-08. Everything marked **[proposed]** is open; the questions are
-collected at the end.
+user on 2026-10-08 and 2026-10-09. Everything marked **[proposed]** is open; the
+questions are collected at the end.
 
 Evidence for every mechanism used here is in
 [docs/research/2026-10-08-socket-and-mod-spikes.md](../../research/2026-10-08-socket-and-mod-spikes.md)
@@ -42,11 +42,12 @@ second process.
 | D3 | **Install:** the extension offers to install the mod, and the README documents a manual install from a marketplace in this repo. User scope. | [decided] |
 | D4 | **Sensor channel:** per-session status files written by the mod and watched by the extension. The other direction (extension to mod) is a control message through the session's inbox socket, which the mod consumes. | [decided] |
 | D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [decided] |
+| D6 | A control message carries a single-use, expiring **nonce** from a file only the extension writes. This guards against **accidents and replays**: quoted marker text, a pasted control message, a peer told to send the marker, or a second continue for one job. It does not protect against a process that runs as the user and sets out to read the file; nothing file-based can. | [decided] |
+| D7 | The files live in a fixed folder, **`~/.limit-break/`** (the user's home directory, not Claude's config folder), not in a path handed over at install. That needs no handoff, works for manual installs, and can't disagree about `CLAUDE_CONFIG_DIR` (#33). | [decided] |
 | D8 | **Idle terminals (#29) are continued in place in 1.1,** not only panels. | [decided] |
 | D9 | **A session `waiting` at the reset gets a notice** with an open-session button, instead of a silent drop (#29). Nothing follows a resume: a session that stops afterwards loses nothing. | [decided] |
 | D10 | **A late fire is dropped with a log line.** A fire more than 10 minutes past its scheduled time means nothing was running on schedule (VS Code closed, or the machine asleep), and the person who just opened or woke it is there. | [decided] |
-| D6 | A control message carries a single-use, expiring **nonce** from a file only the extension writes. This guards against **accidents and replays**: quoted marker text, a pasted control message, a peer told to send the marker, or a second continue for one job. It does not protect against a process that runs as the user and sets out to read the file; nothing file-based can. | [decided] |
-| D7 | The files live in a fixed folder, **`~/.limit-break/`** (the user's home directory, not Claude's config folder), not in a path handed over at install. That needs no handoff, works for manual installs, and can't disagree about `CLAUDE_CONFIG_DIR` (#33). | [decided] |
+| D11 | **Bridged panels** are shown as bridged, and get a 5-minute head start for the web client before Limit Break continues them. | [decided] |
 
 ## What happens at fire time
 
@@ -57,7 +58,7 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 | Holder at fire | 1.0 | 1.1 [proposed] |
 |---|---|---|
 | None, or the listing failed | Launch a terminal | Unchanged |
-| Idle panel | Launch a terminal, then offer to reopen the stale tab | **Continue in place.** Use the mod if the session has it, otherwise the socket. If both fail, fall back to 1.0's launch. |
+| Idle panel | Launch a terminal, then offer to reopen the stale tab | **Continue in place.** Use the mod if the session has it, otherwise the socket. If both fail, fall back to 1.0's launch. A bridged panel waits its head start first (D11). |
 | Idle terminal, five-hour (or unknown) limit, native auto-continue on | Stand down, then check that native continued | Unchanged, but with the mod present its native auto-continue notices answer "did native continue?" directly, instead of the transcript check |
 | Idle terminal, any other case (another limit type, an overload, native off) | Offer "Resume in Terminal Anyway" | **Continue in place,** by mod or socket. This closes #29. |
 | Busy | Drop silently | Unchanged |
@@ -104,6 +105,8 @@ remembered. The log says "Resume for X came due while VS Code wasn't running
 - One rule covers startup and wake from sleep; no startup bookkeeping.
 - A VS Code opened less than 10 minutes after the deadline still resumes.
 - Applies to automatic fires only. Resume Now is unaffected.
+- Open: whether a late fire that would only offer (autoResume off, or a reset
+  beyond `maxWaitHours`) is dropped too. See the questions at the end.
 
 ## A session waiting at the reset (D9)
 
@@ -159,7 +162,7 @@ Two examples with two causes share one value, so `blocked` alone can't tell
 background rows today (they have no `pid`), so 1.0 neither resumes nor reports
 background sessions. They aren't resume targets (the parent manages them).
 
-## Bridged panels
+## Bridged panels (D11)
 
 A panel bridged to Remote Control (`bridgeSessionId` in its session record) can
 be continued by the Claude Code web client at the reset. That was seen twice,
@@ -337,7 +340,9 @@ The extension uses the mod only on a matching major version.
   - the envelope and payload builders;
   - status-file parsing, including partial and corrupt writes;
   - nonce issue, expiry and single use;
-  - install command lines.
+  - install command lines;
+  - the late-fire rule (D10) at 9 and 11 minutes late;
+  - the waiting notice (D9) and the bridged head start (D11).
 - **The mod's own tests:** `mod/hooks/*.test.ts`, run with
   `claude plugin test`. That needs the `claude` CLI, so they run locally and
   in the smoke kit, not in CI. The mod's control-message parsing and nonce
@@ -375,4 +380,11 @@ The extension uses the mod only on a matching major version.
    reset.)*
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
    parent session manages its background sessions.)* Still open: what to do
-   about a session a background job holds; see that section.
+   about a session a background job holds; see that section. Not blocking 1.1.
+6. **A late offer.** Should D10 also drop a late fire that would only offer
+   (autoResume off, or a reset beyond `maxWaitHours`)? Recommended: no. An offer
+   already leaves it to the user, and for a weekly limit with VS Code closed
+   for days, it's the only reminder left.
+7. **Still marked [proposed]:** the 1.1 column of the fire-time table (it
+   follows from D5, D8 and D9), the 30-second confirm before falling back to a
+   launch, and the testing plan. Confirm them in review.
