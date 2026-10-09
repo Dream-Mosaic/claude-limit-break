@@ -43,7 +43,7 @@ second process.
 | D4 | **Sensor channel:** per-session status files written by the mod and watched by the extension. The other direction (extension to mod) is a control message through the session's inbox socket, which the mod consumes. | [decided] |
 | D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [decided] |
 | D8 | **Idle terminals (#29) are continued in place in 1.1,** not only panels. | [decided] |
-| D9 | **1.1 reports a resume that stopped to wait for the user,** rather than counting it as done. | [decided] |
+| D9 | **A session `waiting` at the reset gets a notice** with an open-session button, instead of a silent drop (#29). Nothing follows a resume: a session that stops afterwards loses nothing. | [decided] |
 | D6 | A control message carries a single-use, expiring **nonce** from a file only the extension writes. This guards against **accidents and replays**: quoted marker text, a pasted control message, a peer told to send the marker, or a second continue for one job. It does not protect against a process that runs as the user and sets out to read the file; nothing file-based can. | [decided] |
 | D7 | The files live in a fixed folder, **`~/.limit-break/`** (the user's home directory, not Claude's config folder), not in a path handed over at install. That needs no handoff, works for manual installs, and can't disagree about `CLAUDE_CONFIG_DIR` (#33). | [decided] |
 
@@ -59,7 +59,8 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 | Idle panel | Launch a terminal, then offer to reopen the stale tab | **Continue in place.** Use the mod if the session has it, otherwise the socket. If both fail, fall back to 1.0's launch. |
 | Idle terminal, five-hour (or unknown) limit, native auto-continue on | Stand down, then check that native continued | Unchanged, but with the mod present its native auto-continue notices answer "did native continue?" directly, instead of the transcript check |
 | Idle terminal, any other case (another limit type, an overload, native off) | Offer "Resume in Terminal Anyway" | **Continue in place,** by mod or socket. This closes #29. |
-| Busy, or waiting on a prompt | Drop silently | Unchanged |
+| Busy | Drop silently | Unchanged |
+| Waiting on a prompt | Drop silently | **Notify** that it's waiting, with an open-session button (D9) |
 
 **Continuing in place** is a new `continueInPlace(job, holder)` beside
 `resume()`:
@@ -84,30 +85,34 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 `continueInPlace` for an idle holder too, so a click doesn't create a fork.
 The modal warnings for busy holders stay.
 
-## Reporting a resume that stopped to wait (D9)
+## A session waiting at the reset (D9)
 
-After any continue or launch, the extension follows the resumed session until it
-is `waiting`, or `idle` after a new assistant turn. There are two signals,
-tentatively both [decided, pending research]:
+**At fire time, a holder that is `waiting` gets a notice instead of a silent
+drop** [decided 2026-10-09]. This is #29's third item. The notice says "Session
+X is waiting for your input; the limit has reset", with the open-session button
+below, and no resume. It uses the `status` that `parseAgentRows` already reads.
+Busy stays a silent drop.
 
-1. **Structured: the `waiting` status.** `claude agents --json` reports
-   `status: waiting` with a `waitingFor` field. The documented values
-   ([agent view](https://code.claude.com/docs/en/agent-view)) are:
-   - `permission prompt`
-   - `input needed`, for a question from Claude or an MCP server
-   - `sandbox request`
-   - `worker request`
-   - `dialog open`
+**Nothing follows a resume** [decided 2026-10-09]. A resumed session that later
+stops, whether idle after asking something in prose or waiting on a prompt,
+loses nothing: the transcript holds the question, and the user picks it up when
+they return. Getting the user's attention while they're away is #36's
+territory, not 1.1's. This drops the earlier draft's post-resume following,
+text heuristic, `waitingFor` parsing and status research task.
 
-   A message sent to a session while a dialog is open waits in its queue.
-   `liveSessions.ts` doesn't parse `waitingFor` today. Notify: "Session X
-   resumed and is waiting for you (`<waitingFor>`)."
-2. **Heuristic: idle, but the reply asks something.** The turn ended normally,
-   but the last assistant message asks the user, for example "reply go ahead".
-   The docs say a session that finished its turn reads as done or idle, not
-   blocked, so no status covers this case. Notify, worded as "may be waiting":
-   the message ends with a question, or asks for approval ("go ahead",
-   "confirm", "should I").
+**The notice gets a button that opens the session** [decided, if feasible]:
+- **Panel:** `claude-vscode.editor.open` takes a session id as its first
+  argument. The minified source of Claude Code extension 2.1.295 checks
+  `hasPanelForSession(<arg>)`. It's a private command, checked for at runtime
+  the way `reopenOffer.ts` already checks `claude-vscode.reopenClosedSession`.
+  It only reaches panels in this window. Not yet smoke-tested.
+- **Terminal:** match `vscode.window.terminals` by process tree (the terminal's
+  shell pid is the parent of the `claude` pid), then call `terminal.show()`. It
+  only reaches terminals in this window.
+
+## What a background job reports
+
+Recorded while working out D9; kept for the background-holder question below.
 
 **The "blocked" session the user saw was a background session.** Read from
 `~/.claude/jobs/7a00d6c0/` on 2026-10-09 (Claude Code 2.1.295):
@@ -132,25 +137,7 @@ tentatively both [decided, pending research]:
 Two examples with two causes share one value, so `blocked` alone can't tell
 "waiting for you" from "hit a limit"; `needs` can. `parseAgentRows` drops
 background rows today (they have no `pid`), so 1.0 neither resumes nor reports
-background sessions. Whether 1.1 should is an open question.
-
-**Still to record.** The plan's first task records real `claude agents --json`
-rows for the interactive conditions we can reproduce, including `dialog open`
-and a queued message. It confirms what each `waitingFor` value looks like, and
-whether anything else is reported.
-
-A small model call through the mod (`$.model.classify`) is left out of 1.1. It
-can come later if the heuristic proves noisy.
-
-**The notice gets a button that opens the session** [decided, if feasible]:
-- **Panel:** `claude-vscode.editor.open` takes a session id as its first
-  argument. The minified source of Claude Code extension 2.1.295 checks
-  `hasPanelForSession(<arg>)`. It's a private command, checked for at runtime
-  the way `reopenOffer.ts` already checks `claude-vscode.reopenClosedSession`.
-  It only reaches panels in this window. Not yet smoke-tested.
-- **Terminal:** match `vscode.window.terminals` by process tree (the terminal's
-  shell pid is the parent of the `claude` pid), then call `terminal.show()`. It
-  only reaches terminals in this window.
+background sessions. They aren't resume targets (the parent manages them).
 
 ## Bridged panels
 
@@ -362,8 +349,8 @@ The extension uses the mod only on a matching major version.
 1. *(Answered 2026-10-09: D5 through D9 are decided.)*
 2. *(Answered 2026-10-09: one `continueInPlace` setting, plus the docs and
    code changes for existing settings above.)*
-3. **D9's detection.** Tentatively the `waiting` status plus the text
-   heuristic, pending the status research in the plan's first task.
+3. *(Answered 2026-10-09: D9 is a notice for a session `waiting` at the reset;
+   nothing follows a resume.)*
 4. *(Answered 2026-10-09: the bridged-panel grace is 5 minutes after the
    reset.)*
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
