@@ -176,6 +176,42 @@ This is the same shape as the existing native auto-continue check
 difference is that the follow-up continues the session instead of only
 offering to.
 
+## Sessions a background job holds
+
+Background sessions aren't resumed: the parent session manages them [decided
+2026-10-09]. But one can own a session the user also has open in a panel, and
+then anything that starts a process on that session fails.
+
+**What happened** (session 7a00d6c0 on 2026-10-09; times in UTC):
+- At 11:44:59, a background job forked from session 73525ca3 into 7a00d6c0.
+  73525ca3's transcript got a `continued-in` record pointing at 7a00d6c0.
+- At 11:48:37 the panel tried to open 7a00d6c0 and its CLI exited with code 1:
+  "That session is running in the background (7a00d6c0). Run `claude attach
+  7a00d6c0` … or `claude stop 7a00d6c0` first to resume it here. Add
+  `--fork-session` to branch off a copy instead." That log line was reported
+  by the other session; the log itself is gone. The refusal's pieces ("first
+  to resume it here", "Add --fork-session to branch off a copy instead.") are
+  in the 2.1.295 `claude.exe`, so the check is in the CLI, not the panel.
+- After `claude stop` (12:04:12), the panel opened the session normally
+  (12:04:30).
+
+The job's `intent` is Limit Break's resume prompt, but that doesn't show Limit
+Break started the job. 73525ca3's transcript repeats that prompt in its
+`last-prompt` records, which is where the job's seed most likely came from
+(inferred). What created the job isn't recorded.
+
+**What it means for Limit Break.** `claude --resume` is the same CLI, so a
+launch for a session a background job holds would also exit with code 1. The
+same goes for the stale-tab reopen and the open-session button.
+`parseAgentRows` drops background rows today, so `classifyHolder` reports
+`none` and the extension would go ahead.
+
+**1.1 [proposed]:** count a background row in `claude agents --json` (same
+`sessionId`, `kind: "background"`, not stopped) as a holder.
+- At fire time: don't launch, continue in place or reopen. Notify: "Session X
+  is running in the background. Open it with `claude attach <id>`."
+- The reopen offer and the open-session button check for it the same way.
+
 ## The mod
 
 The mod lives in a new top-level `mod/` folder. It's a Claude Code plugin with
@@ -328,7 +364,5 @@ The extension uses the mod only on a matching major version.
 4. *(Answered 2026-10-09: the bridged-panel grace is 5 minutes after the
    reset.)*
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
-   parent session manages its background sessions.)* Still open: the user hit
-   one when reopening a panel, so the question may be how a panel reopen
-   handles a session a background job holds. Context requested from the session
-   that read `~/.claude/jobs/7a00d6c0/`.
+   parent session manages its background sessions.)* Still open: approve the
+   proposal in "Sessions a background job holds".
