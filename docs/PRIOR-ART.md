@@ -334,6 +334,54 @@ directories became "appears nowhere in the repository", and an empty task output
 file became "the report is lost". Both would have been caught by looking in one
 more place. Neither looked like a guess when it was written.
 
+## claude-standby's cockpit, 2026-10-08
+
+The earlier passes cited claude-standby's daemon and notes but not its
+`vscode-extension/`. That folder is now read too, at `fb4d334` (2026-07-27), and
+nothing has been committed since. *(Derived.)* It is a thin UI: it reads the
+state file and writes through the CLI, and the user arms every resume by hand.
+What bears on this project went to #30. Their parser also misses resets on the
+hour (`resets 1am`) and any wording but `hit your session limit` *(Derived — ran
+their `lib.sh`)*, and both are already handled here.
+
+## Fresh search, 2026-10-08
+
+The search turned up four more tools that resume a session in the VS Code panel:
+
+- **[plakidan/claude-auto-resume](https://github.com/plakidan/claude-auto-resume)**,
+  a VS Code extension for macOS only.
+- **[Agent Rewake](https://github.com/codizelabs/agent-rewake)**, a Claude Code
+  plugin that runs inside the session. Its panel support was merged on
+  2026-10-07.
+- **[Claude Code Nonstop](https://marketplace.visualstudio.com/items?itemName=OrBenozio.claude-code-nonstop)**,
+  which patches the Claude Code extension's webview.
+- **[unsnooze](https://unsnooze.dev/)**, which runs `claude --resume` in a fresh
+  terminal pane. Its panel support is experimental and off by default.
+
+plakidan and
+[NaturalPsi/claude-auto-resume](https://github.com/NaturalPsi/claude-auto-resume)
+continue a stuck session in place. They write to the cross-session inbox that
+each live process advertises as `messagingSocketPath` in
+`~/.claude/sessions/<pid>.json`. That avoids the second writer behind #6, #7
+and #29. It is now smoked here on Windows, in a VS Code panel session. Posting
+from outside needs the session's `peerToken` as an auth line, and the panel
+names the sender only when the text is wrapped in a `<cross-session-message>`
+envelope. See
+[research/2026-10-08-socket-and-mod-spikes.md](research/2026-10-08-socket-and-mod-spikes.md),
+which also covers a mod running in the panel. Tracked in #52.
+
+**How it was missed.** `src/sessionRegistry.ts` has read that very file since
+2026-09-22, for one field: `entrypoint`, to tell a panel from a terminal.
+`messagingSocketPath` sits beside it in the same record. The question asked of
+the file set which fields were looked at. Also, every project in the earlier
+reviews resumed by launching a process or typing into one, so the prior art
+reinforced the assumption that a resume means a new process. Cross-session
+messaging has existed since Claude Code 2.1.224, and on Windows since 2.1.239
+*(Derived — Claude Code `CHANGELOG.md`)*. plakidan and NaturalPsi were last
+pushed on 2026-09-06 and 2026-09-04, before both September reviews. The queries
+those reviews used are not recorded, so why they missed both projects is not
+known.
+
 ## Worth adopting, in order
 
 1. **Clear the launcher's session identity before spawning `claude`.** Done
@@ -359,6 +407,9 @@ more place. Neither looked like a guess when it was written.
    The check is cheap: break the line the test is meant to be pinning and confirm
    the test goes red.
 6. **Concluding absence from a search that could not have found it.** Also ours.
+7. **Reading one field from a record you already parse.** Also ours. When code
+   opens a file from another tool, list every field in it once, not just the
+   one the current question needs.
 
 ## What is still unverified
 
