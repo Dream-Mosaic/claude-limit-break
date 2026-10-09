@@ -164,9 +164,9 @@ for an idle bridged panel: it resumes straight away.
 follow up if its continue doesn't come.**
 - The status bar and the "resuming at" notice say the session is bridged to
   Remote Control.
-- At fire time an idle bridged panel waits a grace period [proposed: 3
-  minutes after the reset, twice the one observed delay], then checks
-  continued-since.
+- At fire time an idle bridged panel waits a grace period [decided: 5
+  minutes after the reset; the two continues seen came about 90 s after it],
+  then checks continued-since.
   - **If the web client continued it:** stand down, and log "Remote Control
     continued it".
   - **If not:** continue in place, by mod or socket.
@@ -247,11 +247,21 @@ existing ones:
 
 `holderPolicy.ts` gains the new outcomes. Its existing tests are the template.
 
-**Settings [proposed]:** one setting, `claudeLimitBreak.continueInPlace`.
+**Settings [decided]:** one new setting, `claudeLimitBreak.continueInPlace`.
 - `on` (the default) uses the mod or the socket.
 - `off` keeps 1.0's terminal launch.
 
 The install offer's "Never" choice is stored as state, not as a setting.
+
+No existing setting changes, but some now cover less, or apply to the new path:
+
+| Existing setting | In 1.1 |
+|---|---|
+| `resumePrompt` | The same text goes out on all three paths: the mod's submit, the socket post and the launch. Docs only. |
+| `resumeMode` and `headlessPermissionMode` | Apply only to a launch, which now happens only when no live process holds the session. Docs only. |
+| `onStale` | Applies only when a continue in place fails and falls back to a launch. Docs only. |
+| `maxResumeTokens` | Gates a continue in place too, since it costs the same. A code change. |
+| `watchScope` | `workspace` filters the mod's status files by folder, the way transcripts are filtered. A code change. |
 
 ## The protocol
 
@@ -311,10 +321,14 @@ The extension uses the mod only on a matching major version.
 ## Open questions for the user
 
 1. *(Answered 2026-10-09: D5 through D9 are decided.)*
-2. **Settings.** Is one `continueInPlace` setting with `on`/`off` enough?
+2. *(Answered 2026-10-09: one `continueInPlace` setting, plus the docs and
+   code changes for existing settings above.)*
 3. **D9's detection.** Tentatively the `waiting` status plus the text
    heuristic, pending the status research in the plan's first task.
-4. **The bridged-panel grace.** 3 minutes after the reset?
-5. **Background sessions.** 1.0 ignores them. Should 1.1 resume a background
-   session that is `blocked` on a limit, report one that is `blocked` waiting
-   for the user, both, or leave them for later?
+4. *(Answered 2026-10-09: the bridged-panel grace is 5 minutes after the
+   reset.)*
+5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
+   parent session manages its background sessions.)* Still open: the user hit
+   one when reopening a panel, so the question may be how a panel reopen
+   handles a session a background job holds. Context requested from the session
+   that read `~/.claude/jobs/7a00d6c0/`.
