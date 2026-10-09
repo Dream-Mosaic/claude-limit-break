@@ -9,6 +9,10 @@ re-deriving them is expensive.
   abandoned branch is the one holding the resumed turn. Settles [#6] and turns
   [#7] into loss prevention. Includes the confound that killed a plausible-looking
   provenance signal.
+- [Field observations, September 2026](2026-09-field-observations.md) — who else
+  continues a session at a reset (Claude Code's terminal UI, Remote Control),
+  why the default resume prompt is neutral, and incidents from running 0.1.x on
+  this repo.
 - [Socket and mod spikes](2026-10-08-socket-and-mod-spikes.md) — an outside
   process can continue a live VS Code panel session in place through its
   cross-session inbox, on Windows, and a mod loads in the panel and can submit as
