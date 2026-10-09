@@ -1037,7 +1037,19 @@ test('an unflagged entry with a top-level error string or a 529 status does not 
 // `<local-command-stderr>Error during compaction: You've hit your ...`. Only Claude
 // Code writes `system` entries, so admitting exactly this shape is safe.
 
-const COMPACT_TEXT = "You've hit your session limit · resets 8:30pm (America/Chicago)";
+/**
+ * A Chicago wall-clock time two hours from now, in the notice's form ("8:30pm"). A fixed
+ * time made the fixture fail for about fifteen minutes after that time each day, while the
+ * reset sat inside RESET_GRACE_MS.
+ */
+const clockInTwoHours = (): string => {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true })
+    .formatToParts(new Date(Date.now() + 2 * 3_600_000));
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${part('hour')}:${part('minute')}${part('dayPeriod').toLowerCase()}`;
+};
+
+const COMPACT_TEXT = `You've hit your session limit · resets ${clockInTwoHours()} (America/Chicago)`;
 const compactContent = (text = COMPACT_TEXT) => `<local-command-stderr>Error during compaction: ${text}</local-command-stderr>`;
 
 /** The real entry shape, with a fresh timestamp so its reset is live. */
@@ -1086,7 +1098,7 @@ test('an unrecognised limit label leaves rateLimitType undefined', () => {
 });
 
 test('a fork copy of an old compaction failure is history, not a limit (stale-reset rule)', () => {
-  // Stale timestamp: that 8:30pm reset passed long ago.
+  // Stale timestamp: whatever time of day the reset names, it passed long ago.
   const out = make().inspectLine(entry(compactionEntry({}, '2026-09-11T21:49:45.839Z')), FILE);
   assert.equal(out.limit, undefined);
 });
