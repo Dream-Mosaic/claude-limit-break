@@ -44,6 +44,7 @@ second process.
 | D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [decided] |
 | D8 | **Idle terminals (#29) are continued in place in 1.1,** not only panels. | [decided] |
 | D9 | **A session `waiting` at the reset gets a notice** with an open-session button, instead of a silent drop (#29). Nothing follows a resume: a session that stops afterwards loses nothing. | [decided] |
+| D10 | **A late fire is dropped with a log line.** A fire more than 10 minutes past its scheduled time means nothing was running on schedule (VS Code closed, or the machine asleep), and the person who just opened or woke it is there. | [decided] |
 | D6 | A control message carries a single-use, expiring **nonce** from a file only the extension writes. This guards against **accidents and replays**: quoted marker text, a pasted control message, a peer told to send the marker, or a second continue for one job. It does not protect against a process that runs as the user and sets out to read the file; nothing file-based can. | [decided] |
 | D7 | The files live in a fixed folder, **`~/.limit-break/`** (the user's home directory, not Claude's config folder), not in a path handed over at install. That needs no handoff, works for manual installs, and can't disagree about `CLAUDE_CONFIG_DIR` (#33). | [decided] |
 
@@ -84,6 +85,25 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 **Manual paths**, meaning Resume Now and the offers: these use
 `continueInPlace` for an idle holder too, so a click doesn't create a fork.
 The modal warnings for busy holders stay.
+
+## A late fire (D10)
+
+**The problem** (seen on another machine): a resume saved from an earlier VS
+Code run fired as soon as VS Code was opened, though the person opening it was
+right there. Derived from the code: the scheduler restores pending jobs on
+activation, and its one-second tick fires any job whose `resumeAtMs` has passed
+(`scheduler.ts`, `tick`). The only guard is continued-since, which can't help
+before the user has typed anything. A machine that sleeps through the deadline
+with VS Code open fires the same way on wake.
+
+**1.1** [decided 2026-10-09]: in `onFire`, right after the claim (which is
+kept, so other windows drop their copies too), a job firing more than 10
+minutes after its `resumeAtMs` is dropped. Nothing is resumed, offered or
+remembered. The log says "Resume for X came due while VS Code wasn't running
+(N min late); leaving it to you."
+- One rule covers startup and wake from sleep; no startup bookkeeping.
+- A VS Code opened less than 10 minutes after the deadline still resumes.
+- Applies to automatic fires only. Resume Now is unaffected.
 
 ## A session waiting at the reset (D9)
 
