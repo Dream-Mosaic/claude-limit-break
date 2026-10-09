@@ -206,11 +206,14 @@ same goes for the stale-tab reopen and the open-session button.
 `parseAgentRows` drops background rows today, so `classifyHolder` reports
 `none` and the extension would go ahead.
 
-**1.1 [proposed]:** count a background row in `claude agents --json` (same
-`sessionId`, `kind: "background"`, not stopped) as a holder.
-- At fire time: don't launch, continue in place or reopen. Notify: "Session X
-  is running in the background. Open it with `claude attach <id>`."
-- The reopen offer and the open-session button check for it the same way.
+**Not designed yet** [user, 2026-10-09: a safety of this kind sounds right, but
+not before the problem is understood]. To understand first:
+- How often a resume meets a background holder. If the parent session going
+  down also takes its background jobs down, it may be rare. But the job here
+  ran under a daemon (`backend: "daemon"`, with its own supervisor pid), so
+  whether it outlives the parent is untested.
+- What the panel's reopen and `claude-vscode.editor.open` do when the CLI
+  refuses: whether the user sees an error or nothing.
 
 ## The mod
 
@@ -364,5 +367,5 @@ The extension uses the mod only on a matching major version.
 4. *(Answered 2026-10-09: the bridged-panel grace is 5 minutes after the
    reset.)*
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
-   parent session manages its background sessions.)* Still open: approve the
-   proposal in "Sessions a background job holds".
+   parent session manages its background sessions.)* Still open: what to do
+   about a session a background job holds; see that section.
