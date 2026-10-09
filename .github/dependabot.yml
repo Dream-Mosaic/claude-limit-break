@@ -21,3 +21,11 @@ updates:
       # with engines.vscode.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # vsce refuses to package when @types/vscode is newer than
+      # engines.vscode, so any bump here has to move engines.vscode with it.
+      # Bump both by hand.
+      - dependency-name: "@types/vscode"
+      # TypeScript 7 no longer picks up @types/node on its own and fails the
+      # build as is; moving to it is its own piece of work (#44).
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
