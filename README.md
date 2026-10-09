@@ -372,7 +372,8 @@ The parser suites in [test/parsers](test/parsers), together with the
 entry-level cases in
 [test/transcriptWatcher.test.ts](test/transcriptWatcher.test.ts), are the
 regression gate for detection. See [docs/UPSTREAM.md](docs/UPSTREAM.md) for how
-detection is built and [docs/NEXT.md](docs/NEXT.md) for current state.
+detection is built and the [open issues](https://github.com/Dream-Mosaic/claude-limit-break/issues)
+for what is planned next.
 
 `npm run test:integration` runs the extension inside a real VS Code
 (`xvfb-run -a npm run test:integration` on Linux without a display).

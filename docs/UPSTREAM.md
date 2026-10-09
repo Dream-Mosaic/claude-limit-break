@@ -105,7 +105,8 @@ Handled entirely at the repository root: `LICENSE` covers this project's code,
 notice travels with the distribution, which is what MIT requires.
 
 The one hard constraint is that both files must ship **inside the `.vsix`**, not
-just in the repo. See the packaging gate in [NEXT.md](NEXT.md).
+just in the repo. `scripts/check-vsix.sh`, run in CI on every package, checks that
+they do.
 
 ## Also worth reading
 
