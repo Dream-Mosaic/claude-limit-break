@@ -44,8 +44,8 @@ second process.
 | D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [decided] |
 | D8 | **Idle terminals (#29) are continued in place in 1.1,** not only panels. | [decided] |
 | D9 | **1.1 reports a resume that stopped to wait for the user,** rather than counting it as done. | [decided] |
-| D6 | A control message carries a single-use **nonce** from a file only the extension writes, so a peer session can't trigger an `asUser` continue. | [proposed] |
-| D7 | The files live in a fixed folder, `<claudeHome>/limit-break/`, not in a path handed over at install. | [proposed] |
+| D6 | A control message carries a single-use, expiring **nonce** from a file only the extension writes. This guards against **accidents and replays**: quoted marker text, a pasted control message, a peer told to send the marker, or a second continue for one job. It does not protect against a process that runs as the user and sets out to read the file; nothing file-based can. | [decided] |
+| D7 | The files live in a fixed folder, **`~/.limit-break/`** (the user's home directory, not Claude's config folder), not in a path handed over at install. That needs no handoff, works for manual installs, and can't disagree about `CLAUDE_CONFIG_DIR` (#33). | [decided] |
 
 ## What happens at fire time
 
@@ -107,7 +107,9 @@ both]
 The mod lives in a new top-level `mod/` folder. It's a Claude Code plugin with
 `hooks/hooks.json` → `register.js`, and it's shipped inside the VSIX.
 
-**Sensor.** The mod writes `<dir>/sessions/<sessionId>.json` as one whole JSON
+**Sensor.** In this section, `<dir>` means `~/.limit-break` (D7). The mod
+finds it from `$.env.get('USERPROFILE')` on Windows, or `HOME` elsewhere. The
+mod writes `<dir>/sessions/<sessionId>.json` as one whole JSON
 object, rewritten on each event:
 
 | Field | Source |
@@ -234,12 +236,7 @@ The extension uses the mod only on a matching major version.
 
 ## Open questions for the user
 
-1. *(Answered 2026-10-09: D5, D8 and D9 decided. The socket fallback stays,
-   idle terminals are in scope, and stopped resumes are reported.)*
-2. **D6.** Is a nonce file the right guard against peer sessions triggering an
-   `asUser` continue, or is it overkill?
-3. **D7.** A fixed `<claudeHome>/limit-break/` folder, or a path the installer
-   writes, as Agent Rewake does?
-4. **Settings.** Is one `continueInPlace` setting with `on`/`off` enough?
-5. **D9's detection.** A heuristic, a `$.model.classify` call in the mod, or
+1. *(Answered 2026-10-09: D5 through D9 are decided.)*
+2. **Settings.** Is one `continueInPlace` setting with `on`/`off` enough?
+3. **D9's detection.** A heuristic, a `$.model.classify` call in the mod, or
    both?
