@@ -334,6 +334,16 @@ directories became "appears nowhere in the repository", and an empty task output
 file became "the report is lost". Both would have been caught by looking in one
 more place. Neither looked like a guess when it was written.
 
+## claude-standby's cockpit, 2026-10-08
+
+The earlier passes cited claude-standby's daemon and notes but not its
+`vscode-extension/`. That folder is now read too, at `fb4d334` (2026-07-27), and
+nothing has been committed since. *(Derived.)* It is a thin UI: it reads the
+state file and writes through the CLI, and the user arms every resume by hand.
+What bears on this project went to #30. Their parser also misses resets on the
+hour (`resets 1am`) and any wording but `hit your session limit` *(Derived — ran
+their `lib.sh`)*, and both are already handled here.
+
 ## Worth adopting, in order
 
 1. **Clear the launcher's session identity before spawning `claude`.** Done
