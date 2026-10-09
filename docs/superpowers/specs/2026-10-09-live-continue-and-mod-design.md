@@ -41,7 +41,9 @@ second process.
 | D2 | The mod's continue is `$.prompt.submit({ asUser: true })`, using the existing `resumePrompt`. That's the same authority 1.0's terminal launch already has. | [decided] |
 | D3 | **Install:** the extension offers to install the mod, and the README documents a manual install from a marketplace in this repo. User scope. | [decided] |
 | D4 | **Sensor channel:** per-session status files written by the mod and watched by the extension. The other direction (extension to mod) is a control message through the session's inbox socket, which the mod consumes. | [decided] |
-| D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [proposed] |
+| D5 | **The socket is the fallback** when a live session has no mod: post an enveloped `resumePrompt` as a peer message. | [decided] |
+| D8 | **Idle terminals (#29) are continued in place in 1.1,** not only panels. | [decided] |
+| D9 | **1.1 reports a resume that stopped to wait for the user,** rather than counting it as done. | [decided] |
 | D6 | A control message carries a single-use **nonce** from a file only the extension writes, so a peer session can't trigger an `asUser` continue. | [proposed] |
 | D7 | The files live in a fixed folder, `<claudeHome>/limit-break/`, not in a path handed over at install. | [proposed] |
 
@@ -81,6 +83,24 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 **Manual paths**, meaning Resume Now and the offers: these use
 `continueInPlace` for an idle holder too, so a click doesn't create a fork.
 The modal warnings for busy holders stay.
+
+## Reporting a resume that stopped to wait (D9)
+
+After any continue or launch, the extension follows the resumed turn until it
+ends. The mod reports the end through `turn.complete`. Without the mod, the
+transcript shows it with the `stop_hook_summary` system entry after a new
+assistant entry. The extension then looks at the last assistant message:
+
+- **It asks the user something**, or the turn ended without a tool call after
+  the continue: notify "Limit Break: session X resumed and stopped. It may be
+  waiting for you." [proposed heuristic: the message ends with a question, or
+  contains a request for approval such as "reply", "go ahead" or "confirm".]
+- **Otherwise:** log "resumed and working", as today's stall check does.
+
+The heuristic is the weak point. A sturdier alternative uses the mod: on
+`turn.complete`, ask `$.model.classify` whether the reply waits on the user.
+That costs a small model call per resume. [open: heuristic, classifier, or
+both]
 
 ## The mod
 
@@ -214,16 +234,12 @@ The extension uses the mod only on a matching major version.
 
 ## Open questions for the user
 
-1. **D5.** Should the socket fallback (peer authority) be used at all? The
-   alternative is to fall straight back to 1.0's launch when there's no mod.
-   The socket avoids the fork. The launch has user authority but forks the
-   session.
+1. *(Answered 2026-10-09: D5, D8 and D9 decided. The socket fallback stays,
+   idle terminals are in scope, and stopped resumes are reported.)*
 2. **D6.** Is a nonce file the right guard against peer sessions triggering an
    `asUser` continue, or is it overkill?
 3. **D7.** A fixed `<claudeHome>/limit-break/` folder, or a path the installer
    writes, as Agent Rewake does?
 4. **Settings.** Is one `continueInPlace` setting with `on`/`off` enough?
-5. **Idle terminals (#29).** Should they also be continued in place in 1.1, or
-   should 1.1 stay with panels only?
-6. **Reporting a resume that stops to wait for the user.** Should this be in
-   1.1, or later? It mostly applies to the socket path.
+5. **D9's detection.** A heuristic, a `$.model.classify` call in the mod, or
+   both?
