@@ -86,21 +86,72 @@ The modal warnings for busy holders stay.
 
 ## Reporting a resume that stopped to wait (D9)
 
-After any continue or launch, the extension follows the resumed turn until it
-ends. The mod reports the end through `turn.complete`. Without the mod, the
-transcript shows it with the `stop_hook_summary` system entry after a new
-assistant entry. The extension then looks at the last assistant message:
+After any continue or launch, the extension follows the resumed session until it
+is `waiting`, or `idle` after a new assistant turn. There are two signals,
+tentatively both [decided, pending research]:
 
-- **It asks the user something**, or the turn ended without a tool call after
-  the continue: notify "Limit Break: session X resumed and stopped. It may be
-  waiting for you." [proposed heuristic: the message ends with a question, or
-  contains a request for approval such as "reply", "go ahead" or "confirm".]
-- **Otherwise:** log "resumed and working", as today's stall check does.
+1. **Structured: the `waiting` status.** `claude agents --json` reports
+   `status: waiting` with a `waitingFor` field. The documented values
+   ([agent view](https://code.claude.com/docs/en/agent-view)) are:
+   - `permission prompt`
+   - `input needed`, for a question from Claude or an MCP server
+   - `sandbox request`
+   - `worker request`
+   - `dialog open`
 
-The heuristic is the weak point. A sturdier alternative uses the mod: on
-`turn.complete`, ask `$.model.classify` whether the reply waits on the user.
-That costs a small model call per resume. [open: heuristic, classifier, or
-both]
+   A message sent to a session while a dialog is open waits in its queue.
+   `liveSessions.ts` doesn't parse `waitingFor` today. Notify: "Session X
+   resumed and is waiting for you (`<waitingFor>`)."
+2. **Heuristic: idle, but the reply asks something.** The turn ended normally,
+   but the last assistant message asks the user, for example "reply go ahead".
+   The docs say a session that finished its turn reads as done or idle, not
+   blocked, so no status covers this case. Notify, worded as "may be waiting":
+   the message ends with a question, or asks for approval ("go ahead",
+   "confirm", "should I").
+
+**Research before building.** The user saw a CLI session report "blocked",
+"paused" on their prompt with something queued, and no permission prompt. So
+some conditions aren't covered yet. The plan's first task records real
+`claude agents --json` rows for each condition we can reproduce, including
+`dialog open` and a queued message. It confirms what each `waitingFor` value
+looks like, and whether anything else is reported.
+
+A small model call through the mod (`$.model.classify`) is left out of 1.1. It
+can come later if the heuristic proves noisy.
+
+**The notice gets a button that opens the session** [decided, if feasible]:
+- **Panel:** `claude-vscode.editor.open` takes a session id as its first
+  argument. The minified source of Claude Code extension 2.1.295 checks
+  `hasPanelForSession(<arg>)`. It's a private command, checked for at runtime
+  the way `reopenOffer.ts` already checks `claude-vscode.reopenClosedSession`.
+  It only reaches panels in this window. Not yet smoke-tested.
+- **Terminal:** match `vscode.window.terminals` by process tree (the terminal's
+  shell pid is the parent of the `claude` pid), then call `terminal.show()`. It
+  only reaches terminals in this window.
+
+## Bridged panels
+
+A panel bridged to Remote Control (`bridgeSessionId` in its session record) can
+be continued by the Claude Code web client at the reset. That was seen twice,
+both about 90 seconds after the reset (`docs/research/2026-09-field-observations.md`).
+The user reports the web client is sometimes flaky. 1.0 has no special handling
+for an idle bridged panel: it resumes straight away.
+
+1.1 [decided in outline]: **indicate it, give the web client a head start, and
+follow up if its continue doesn't come.**
+- The status bar and the "resuming at" notice say the session is bridged to
+  Remote Control.
+- At fire time an idle bridged panel waits a grace period [proposed: 3
+  minutes after the reset, twice the one observed delay], then checks
+  continued-since.
+  - **If the web client continued it:** stand down, and log "Remote Control
+    continued it".
+  - **If not:** continue in place, by mod or socket.
+
+This is the same shape as the existing native auto-continue check
+(`awaitNativeContinue`, then the stall-watch grace, then an offer). The
+difference is that the follow-up continues the session instead of only
+offering to.
 
 ## The mod
 
@@ -238,5 +289,6 @@ The extension uses the mod only on a matching major version.
 
 1. *(Answered 2026-10-09: D5 through D9 are decided.)*
 2. **Settings.** Is one `continueInPlace` setting with `on`/`off` enough?
-3. **D9's detection.** A heuristic, a `$.model.classify` call in the mod, or
-   both?
+3. **D9's detection.** Tentatively the `waiting` status plus the text
+   heuristic, pending the status research in the plan's first task.
+4. **The bridged-panel grace.** 3 minutes after the reset?
