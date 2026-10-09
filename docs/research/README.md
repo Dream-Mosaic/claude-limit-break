@@ -9,6 +9,11 @@ re-deriving them is expensive.
   abandoned branch is the one holding the resumed turn. Settles [#6] and turns
   [#7] into loss prevention. Includes the confound that killed a plausible-looking
   provenance signal.
+- [Socket and mod spikes](2026-10-08-socket-and-mod-spikes.md) — an outside
+  process can continue a live VS Code panel session in place through its
+  cross-session inbox, on Windows, and a mod loads in the panel and can submit as
+  the user. What the model does with a continue it didn't get from you. Tracks
+  [#52].
 - [Release tooling](2026-09-09-release-tooling.md) — release-please, changesets,
   semantic-release and plain `npm version`, judged against this repo's
   zero-dependency and no-registry constraints.
@@ -27,3 +32,4 @@ not adopt, the report is the record of the argument, not of the outcome.
 
 [#6]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/6
 [#7]: https://github.com/Dream-Mosaic/claude-limit-buster/issues/7
+[#52]: https://github.com/Dream-Mosaic/claude-limit-break/issues/52

@@ -362,9 +362,13 @@ plakidan and
 [NaturalPsi/claude-auto-resume](https://github.com/NaturalPsi/claude-auto-resume)
 continue a stuck session in place. They write to the cross-session inbox that
 each live process advertises as `messagingSocketPath` in
-`~/.claude/sessions/<pid>.json`. *(Derived from reading their source; not run
-here.)* That would avoid the second writer behind #6, #7 and #29. Issue #52
-holds the experiment.
+`~/.claude/sessions/<pid>.json`. That avoids the second writer behind #6, #7
+and #29. It is now smoked here on Windows, in a VS Code panel session. Posting
+from outside needs the session's `peerToken` as an auth line, and the panel
+names the sender only when the text is wrapped in a `<cross-session-message>`
+envelope. See
+[research/2026-10-08-socket-and-mod-spikes.md](research/2026-10-08-socket-and-mod-spikes.md),
+which also covers a mod running in the panel. Tracked in #52.
 
 **How it was missed.** `src/sessionRegistry.ts` has read that very file since
 2026-09-22, for one field: `entrypoint`, to tell a panel from a terminal.
