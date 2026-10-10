@@ -105,8 +105,9 @@ remembered. The log says "Resume for X came due while VS Code wasn't running
 - One rule covers startup and wake from sleep; no startup bookkeeping.
 - A VS Code opened less than 10 minutes after the deadline still resumes.
 - Applies to automatic fires only. Resume Now is unaffected.
-- Open: whether a late fire that would only offer (autoResume off, or a reset
-  beyond `maxWaitHours`) is dropped too. See the questions at the end.
+- A late fire that would only offer (autoResume off, or a reset beyond
+  `maxWaitHours`) is dropped too, silently with the log line [decided
+  2026-10-10]. Someone at the prompt resumes it themselves.
 
 ## A session waiting at the reset (D9)
 
@@ -381,10 +382,13 @@ The extension uses the mod only on a matching major version.
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
    parent session manages its background sessions.)* Still open: what to do
    about a session a background job holds; see that section. Not blocking 1.1.
-6. **A late offer.** Should D10 also drop a late fire that would only offer
-   (autoResume off, or a reset beyond `maxWaitHours`)? Recommended: no. An offer
-   already leaves it to the user, and for a weekly limit with VS Code closed
-   for days, it's the only reminder left.
+6. *(Answered 2026-10-10: a late fire that would only offer is dropped too.)*
+   Still to confirm: the user said "anything after max wait should just drop
+   and log silently, that's what the max wait is for". If that also means an
+   on-time fire for a reset beyond `maxWaitHours` drops instead of offering,
+   1.0's offer-only path goes: the detection notice that promises an offer,
+   and the upgrade to automatic on a nearer re-detection, would need rewording
+   or removal.
 7. **Still marked [proposed]:** the 1.1 column of the fire-time table (it
    follows from D5, D8 and D9), the 30-second confirm before falling back to a
    launch, and the testing plan. Confirm them in review.
