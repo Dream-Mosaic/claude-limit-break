@@ -49,7 +49,7 @@ node inject.js overload     # B hits a server overload now
 | L2 | Idle panel, mod | Leave A's panel open and idle at the injected limit. At the reset: no new terminal; the log says `Continued session <A> in place by mod (confirmed after N ms)`; the transcript has no branch points. Record N. |
 | L3 | Idle panel, socket | Remove the mod (command), restart the panel, repeat L2: `by socket`; the panel shows "Message from @limit-break". Record N. |
 | L4 | Idle terminal (#29) | A open in a terminal instead, native auto-continue off: continued in place, no second terminal. |
-| L5 | Fallback | Point `messagingSocketPath` at nothing (close the panel right after the listing; or edit the record): falls back to a launch after the send fails. |
+| L5 | Fallback | Point `messagingSocketPath` at nothing (close the panel right after the listing; or edit the record): the send fails, and it falls back to a launch at once. |
 | L6 | Waiting | Leave A at a permission prompt at the reset: the waiting notice; Open Session focuses the panel. |
 | L7 | Late fire | Close VS Code before A's reset; reopen more than 10 minutes after it: nothing resumes; the log says it came due while VS Code wasn't running. |
 | L8 | Open button, terminal | As L6 with A in a terminal: Open Session shows that terminal. |

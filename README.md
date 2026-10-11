@@ -116,8 +116,9 @@ two things:
 
 **It never acts on its own.** Without Limit Break telling it to, the mod only
 writes status files. A control message must carry a single-use, expiring code
-from a file only Limit Break writes; a replayed, pasted or expired one is
-refused (and not shown to Claude either). That guards against accidents and replays. It is not protection against a
+from a file only Limit Break writes; a replayed or expired one is
+refused and not shown to Claude. A control message pasted into a prompt is just
+text: the mod doesn't act on it. That guards against accidents and replays. It is not protection against a
 program running as you that is set on reading Limit Break's files; nothing
 file-based can be.
 
