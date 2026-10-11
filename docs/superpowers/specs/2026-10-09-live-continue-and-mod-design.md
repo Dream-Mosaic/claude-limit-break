@@ -48,6 +48,7 @@ second process.
 | D9 | **A session `waiting` at the reset gets a notice** with an open-session button, instead of a silent drop (#29). Nothing follows a resume: a session that stops afterwards loses nothing. | [decided] |
 | D10 | **A late fire is dropped with a log line.** A fire more than 10 minutes past its scheduled time means nothing was running on schedule (VS Code closed, or the machine asleep), and the person who just opened or woke it is there. | [decided] |
 | D11 | **Bridged panels** are shown as bridged, and get a 5-minute head start for the web client before Limit Break continues them. | [decided] |
+| D12 | **The offer-only route goes.** A limit resetting beyond `maxWaitHours` gets one notice at detection and nothing is scheduled. | [decided] |
 
 ## What happens at fire time
 
@@ -105,9 +106,41 @@ remembered. The log says "Resume for X came due while VS Code wasn't running
 - One rule covers startup and wake from sleep; no startup bookkeeping.
 - A VS Code opened less than 10 minutes after the deadline still resumes.
 - Applies to automatic fires only. Resume Now is unaffected.
-- A late fire that would only offer (autoResume off, or a reset beyond
-  `maxWaitHours`) is dropped too, silently with the log line [decided
-  2026-10-10]. Someone at the prompt resumes it themselves.
+- A late fire that would only offer (autoResume off) is dropped too, silently
+  with the log line [decided 2026-10-10]. Someone at the prompt resumes it
+  themselves. (A reset beyond `maxWaitHours` is no longer scheduled at all;
+  see D12.)
+
+## No offer-only route (D12)
+
+**1.0:** a limit resetting beyond `maxWaitHours` (a weekly limit, say) is
+scheduled as an offer-only job. It shows "(manual)" in the status bar, and at
+the reset it offers Resume Now and joins the Resume Now list. A later
+detection of the same reset within `maxWaitHours` upgrades it to automatic.
+
+**Why it goes** [decided 2026-10-10]:
+- The user already knows when it resets: the limit message carries the time
+  (that's where Limit Break reads it), and the detection notice repeats it.
+- The offer arrives days later, mid other work, and "continue from where you
+  left off" no longer fits a session the user has moved on from.
+- A ready entry is only cleared by hand, so it lingers after the user has
+  continued the session themselves.
+- It's the same call as D10: someone at the prompt resumes it themselves.
+- The one useful case survives: hitting the limit again within `maxWaitHours`
+  is an ordinary detection, which schedules an ordinary automatic resume.
+
+**1.1:**
+- At detection, one notice (when `notify` is on) and a log line: "Session X hit
+  a weekly limit that resets `<time>`. That's more than `<maxWaitHours>` hours
+  away, so it won't resume automatically." Nothing is scheduled.
+- Removed: the `offerOnly` job flag, the "(manual)" status-bar mark, the offer
+  at the reset, the upgrade-to-automatic path (`onUpgrade`) and its notice.
+  `restoreJob` drops a stored offer-only job from 1.0 with a log line.
+- Unchanged: autoResume off still offers Resume Now at every on-time reset,
+  and a reset more than 8 days out is still taken as a misread.
+- Docs: the README section "Limits that reset more than a day out" and the
+  `maxWaitHours` description in `package.json` and the README's settings
+  table are rewritten.
 
 ## A session waiting at the reset (D9)
 
@@ -310,6 +343,7 @@ No existing setting changes, but some now cover less, or apply to the new path:
 | `resumePrompt` | The same text goes out on all three paths: the mod's submit, the socket post and the launch. Docs only. |
 | `resumeMode` and `headlessPermissionMode` | Apply only to a launch, which now happens only when no live process holds the session. Docs only. |
 | `onStale` | Applies only when a continue in place fails and falls back to a launch. Docs only. |
+| `maxWaitHours` | A reset beyond it is told once and never scheduled (D12). Description rewritten. |
 | `maxResumeTokens` | Gates a continue in place too, since it costs the same. A code change. |
 | `watchScope` | `workspace` filters the mod's status files by folder, the way transcripts are filtered. A code change. |
 
@@ -343,7 +377,9 @@ The extension uses the mod only on a matching major version.
   - nonce issue, expiry and single use;
   - install command lines;
   - the late-fire rule (D10) at 9 and 11 minutes late;
-  - the waiting notice (D9) and the bridged head start (D11).
+  - the waiting notice (D9) and the bridged head start (D11);
+  - a reset beyond `maxWaitHours` scheduling nothing, and a stored 1.0
+    offer-only job being dropped on restore (D12).
 - **The mod's own tests:** `mod/hooks/*.test.ts`, run with
   `claude plugin test`. That needs the `claude` CLI, so they run locally and
   in the smoke kit, not in CI. The mod's control-message parsing and nonce
@@ -382,13 +418,8 @@ The extension uses the mod only on a matching major version.
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
    parent session manages its background sessions.)* Still open: what to do
    about a session a background job holds; see that section. Not blocking 1.1.
-6. *(Answered 2026-10-10: a late fire that would only offer is dropped too.)*
-   Still to confirm: the user said "anything after max wait should just drop
-   and log silently, that's what the max wait is for". If that also means an
-   on-time fire for a reset beyond `maxWaitHours` drops instead of offering,
-   1.0's offer-only path goes: the detection notice that promises an offer,
-   and the upgrade to automatic on a nearer re-detection, would need rewording
-   or removal.
+6. *(Answered 2026-10-10: a late fire that would only offer is dropped too,
+   and the offer-only route goes entirely; see D12.)*
 7. **Still marked [proposed]:** the 1.1 column of the fire-time table (it
    follows from D5, D8 and D9), the 30-second confirm before falling back to a
    launch, and the testing plan. Confirm them in review.
