@@ -50,6 +50,14 @@
       {
         "command": "claudeLimitBreak.openClaudeToTrust",
         "title": "Limit Break: Open Claude to Trust"
+      },
+      {
+        "command": "claudeLimitBreak.installMod",
+        "title": "Limit Break: Install Claude Code mod"
+      },
+      {
+        "command": "claudeLimitBreak.removeMod",
+        "title": "Limit Break: Remove Claude Code mod"
       }
     ],
     "menus": {

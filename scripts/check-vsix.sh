@@ -80,6 +80,24 @@ else
   failed=1
 fi
 
+# The Claude Code mod is copied out of the installed extension folder at install
+# time, so its files must ship; its test must not (register.test.ts is excluded
+# by .vscodeignore's **/*.ts).
+for f in .claude-plugin/plugin.json hooks/hooks.json hooks/register.mjs hooks/control.mjs; do
+  if printf '%s\n' "$names" | grep -qE "^extension/mod/${f//./\\.}$"; then
+    echo "ok: mod/$f ships inside the .vsix"
+  else
+    echo "::error::mod/$f is missing from the .vsix"
+    failed=1
+  fi
+done
+if printf '%s\n' "$names" | grep -qE "^extension/mod/.*\.test\.ts$"; then
+  echo "::error::a mod test file is present in the .vsix"
+  failed=1
+else
+  echo "ok: no mod test files in the .vsix"
+fi
+
 # The other brand assets (high-res logo, README banner, mono variants) are not
 # needed inside the package: the README banner is pulled from its GitHub URL,
 # and the mono assets are for a future status-bar icon font and a v1.1

@@ -280,6 +280,15 @@ stubModule('./continueInPlace', {
   },
 });
 
+/** Whether the fake modInstall says the mod should be offered during one test; default false so activation never offers it. */
+let offerMod = false;
+// listInstalledPlugins is stubbed so activation never runs `claude`.
+stubModule('./modInstall', {
+  ...(require('../src/modInstall') as Record<string, unknown>),
+  shouldOfferInstall: () => offerMod,
+  listInstalledPlugins: async () => '[]',
+});
+
 // Required, not imported: the stubs above must be registered first, and a
 // compiled `import` would hoist its require() above them.
 const { activate, isInsideWorkspace } =
@@ -305,11 +314,17 @@ interface FakeContext {
     get<T>(key: string): T | undefined;
     update(key: string, value: unknown): Thenable<void>;
   };
+  globalStorageUri: { fsPath: string };
+  extensionPath: string;
+  extension: { packageJSON: { version: string } };
 }
 
 function contextOver(store: Map<string, unknown>): FakeContext {
   return {
     subscriptions: [],
+    globalStorageUri: { fsPath: path.join(os.tmpdir(), 'clb-global') },
+    extensionPath: process.cwd(),
+    extension: { packageJSON: { version: '1.1.0' } },
     globalState: {
       get: <T>(k: string) => store.get(k) as T | undefined,
       update: (k, v) => {
@@ -2213,6 +2228,27 @@ test('the first run offers the update check once, and enabling it writes the set
     await flush();
     assert.equal(vscodeFake.configUpdates.get('checkForUpdates'), true, 'Enable must turn it on');
   } finally {
+    teardown(ctx);
+  }
+});
+
+test('the mod offer is shown when it can help, and Never is remembered', async () => {
+  resetVscodeFake();
+  vscodeFake.config = {};
+  offerMod = true;
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await flush();
+    const offer = vscodeFake.info.find((m) => m.message.includes('Claude Code mod'));
+    assert.ok(offer, `expected the mod offer; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
+    assert.deepEqual(offer.items, ['Install', 'Not now', 'Never']);
+    offer.answer('Never');
+    await flush();
+    assert.equal(store.get('claudeLimitBreak.modOffer'), 'never');
+  } finally {
+    offerMod = false;
     teardown(ctx);
   }
 });
