@@ -40,13 +40,33 @@ import {
   classifyHolder,
   busyFolderPeers,
   type HolderRecord,
+  type AgentRow,
 } from './liveSessions';
-import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice } from './holderPolicy';
+import {
+  decideOnFire,
+  manualResumeWarning,
+  buildResumePrompt,
+  peerLabel,
+  busyAtClickNotice,
+  isIdleStatus,
+} from './holderPolicy';
+import {
+  continueInPlace,
+  transcriptContains,
+  BRIDGED_GRACE_MS,
+  CONFIRM_WINDOW_MS,
+  type ContinueDeps,
+  type ContinueOutcome,
+} from './continueInPlace';
+import { findPeerToken, sendToInbox } from './inbox';
+import { limitBreakDir, statusFile, controlFile, parseModStatus } from './modStatus';
+import { openSession, parentPidCommand } from './sessionOpener';
+import { randomUUID } from 'node:crypto';
 import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
 import { selectClaudePanelTab, type WebviewTab } from './panelTab';
 import { buildReopenOffer, chooseReopenCommand } from './reopenOffer';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import {
   claimsDir,
   claimKeyFor,
@@ -593,6 +613,74 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const detectAgentRows = agentRowsDetector(runAgentsListing);
 
+  /** The real IO behind continueInPlace (continueInPlace.ts). */
+  const continueDeps: ContinueDeps = {
+    platform: process.platform,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    newId: () => randomUUID(),
+    readHolderRecord,
+    readModStatus: (sessionId) => {
+      try {
+        return parseModStatus(fs.readFileSync(statusFile(limitBreakDir(), sessionId), 'utf8'));
+      } catch {
+        return undefined;
+      }
+    },
+    peerToken: (pid) => findPeerToken(sessionRegistryDir(), pid, (d) => fs.readdirSync(d), (f) => fs.readFileSync(f, 'utf8')),
+    writeControlFile: (sessionId, text) => {
+      const file = controlFile(limitBreakDir(), sessionId);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, text);
+    },
+    send: (socketPath, lines) => sendToInbox(socketPath, lines),
+    transcriptBytes,
+    transcriptContains: (t, needle, from) => transcriptContains(t, needle, from, fs),
+    continuedSince: (t, bytes) => continuedSince(t, bytes),
+  };
+
+  /** `pid`'s parent pid, or undefined when it cannot be read (never rejects, never NaN). */
+  const readParentPid = (pid: number): Promise<number | undefined> =>
+    new Promise((resolve) => {
+      const cmd = parentPidCommand(pid, process.platform);
+      if (!cmd) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        execFile(cmd.file, cmd.args, { timeout: 5_000, windowsHide: true }, (err, stdout) => {
+          const n = Number.parseInt(String(stdout).trim(), 10);
+          resolve(err || !Number.isInteger(n) ? undefined : n);
+        });
+      } catch {
+        resolve(undefined);
+      }
+    });
+
+  /** The job with the coordination sentence when a DIFFERENT session is busy in its folder (holderPolicy.ts buildResumePrompt); notified once. */
+  const coordinated = (job: PendingJob, rows: AgentRow[] | 'unknown'): PendingJob => {
+    // A DIFFERENT session may be busy or waiting in the same folder. The
+    // extension never writes into a session it did not create, so it tells the
+    // session it is about to create: buildResumePrompt names the peer(s) and asks
+    // the resumed model to coordinate via SendMessage. This never blocks the
+    // resume; only the prompt changes. A failed listing (rows 'unknown') cannot
+    // name peers, so it is skipped.
+    if (rows === 'unknown' || !job.cwd) {
+      return job;
+    }
+    const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
+    if (peers.length === 0) {
+      return job;
+    }
+    const names = peers.map(peerLabel).join(', ');
+    log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
+    void vscode.window.showInformationMessage(
+      `Limit Break: another Claude session (${names}) is working in this folder. ` +
+        `The resumed session has been told to coordinate with it.`,
+    );
+    return { ...job, prompt: buildResumePrompt(job.prompt, peers) };
+  };
+
   /**
    * Record that a resume of `job` failed for `cause` and notify through
    * `show` (each site keeps its own severity) the first time that cause is seen
@@ -790,7 +878,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const rows = detectAgentRows();
     const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
-    const warning = manualResumeWarning(holder, job.sessionId.slice(0, 8));
+    const warning = manualResumeWarning(holder, job.sessionId.slice(0, 8), settings().continueInPlace);
     if (!warning) {
       return true;
     }
@@ -798,6 +886,46 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showWarningMessage(warning.message, { modal: true }, warning.button),
     );
     return pick === warning.button;
+  };
+
+  /**
+   * Continue `job` in its live holder (continueInPlace.ts). Resolves whether the job is discharged: continued, landed late, or launched after a fallback. False only when the fallback launch itself could not start.
+   */
+  const continueHolder = async (job: PendingJob, pid: number, manual: boolean): Promise<boolean> => {
+    const id8 = job.sessionId.slice(0, 8);
+    if (settings().notify) {
+      void vscode.window.showInformationMessage(`Limit Break: continuing session ${id8} in place.`);
+    }
+    const outcome: ContinueOutcome = await continueInPlace(
+      { sessionId: job.sessionId, transcript: job.transcript, prompt: job.prompt, jobId: claimKeyFor(job) },
+      pid,
+      continueDeps,
+    );
+    if (outcome.kind === 'continued') {
+      log.info(`Continued session ${id8} in place by ${outcome.transport} (confirmed after ${outcome.elapsedMs} ms).`);
+      if (gaveUp.launched(job.sessionId)) {
+        render();
+      }
+      return true;
+    }
+    if (outcome.kind === 'landed-late') {
+      log.info(`Session ${id8}'s continue by ${outcome.transport} landed after the ${CONFIRM_WINDOW_MS / 1000} s window; not launching a second process.`);
+      return true;
+    }
+    log.warn(`Could not continue session ${id8} in place (${outcome.reason}); launching a terminal instead.`);
+    return resume(job, manual);
+  };
+
+  /** A manual resume: continue an idle live holder in place when the setting is on, otherwise launch (resume()). */
+  const resumeOrContinue = async (job: PendingJob): Promise<boolean> => {
+    if (settings().continueInPlace) {
+      const rows = detectAgentRows();
+      const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
+      if (holder !== 'unknown' && holder.kind !== 'none' && isIdleStatus(holder.status)) {
+        return continueHolder(job, holder.pid, true);
+      }
+    }
+    return resume(job, true);
   };
 
   /**
@@ -831,7 +959,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // (explicit user intent) but release only a claim this call won ('claimed'),
       // never one 'taken' by someone else.
       const notifyClaim = claim(claimKey);
-      if (!resume(job, true)) {
+      if (!(await resumeOrContinue(job))) {
         rememberReady(job);
         if (notifyClaim === 'claimed') {
           releaseClaim(claimsDir(), claimKey, fs, log);
@@ -877,6 +1005,16 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const nativeChecks = new Set<NodeJS.Timeout>();
 
+  /** A tracked wait for the bridged head start. Cancel and dispose clear nativeChecks, and a cleared wait never resolves, which drops the continue: that is what Cancel means. */
+  const wait = (ms: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const t = setTimeout(() => {
+        nativeChecks.delete(t);
+        resolve(true);
+      }, ms);
+      nativeChecks.add(t);
+    });
+
   /**
    * Check back on a session left to Claude Code's own auto-continue.
    * decideOnFire stands down for it (five-hour or unknown-type limits, setting on
@@ -897,6 +1035,12 @@ export function activate(context: vscode.ExtensionContext): void {
     const baseline = job.transcriptBytesAtDetection ?? transcriptBytes(job.transcript);
     const check = setTimeout(() => {
       nativeChecks.delete(check);
+      const seen = continueDeps.readModStatus(job.sessionId)?.nativeContinue;
+      if (seen) {
+        log.info(
+          `The Limit Break mod saw Claude Code's auto-continue notice "${seen.type}" for ${job.sessionId.slice(0, 8)} at ${new Date(seen.atMs).toISOString()}.`,
+        );
+      }
       if (continuedSince(job.transcript, baseline)) {
         log.info(`Claude Code continued ${job.sessionId} on its own; a new turn follows the limit in its transcript.`);
         return;
@@ -1230,7 +1374,7 @@ export function activate(context: vscode.ExtensionContext): void {
         job.sessionId.slice(0, 8),
         job.reason,
         job.rateLimitType,
-        false,
+        s.continueInPlace,
       );
       if (decision.logMessage) {
         (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);
@@ -1238,14 +1382,51 @@ export function activate(context: vscode.ExtensionContext): void {
       if (decision.remember) {
         rememberReady(job);
       }
+      if (decision.continueInPlace) {
+        const target = decision.continueInPlace;
+        void (async () => {
+          if (target.bridged) {
+            const headStartMs = job.baseResumeAtMs + BRIDGED_GRACE_MS - Date.now();
+            if (headStartMs > 0) {
+              log.info(
+                `Session ${job.sessionId.slice(0, 8)} is bridged to Remote Control; giving the web client until ` +
+                  `${new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString()} to continue it.`,
+              );
+              await wait(headStartMs);
+            }
+            if (hasContinued(job)) {
+              log.info(`Remote Control continued session ${job.sessionId.slice(0, 8)}; not continuing it here.`);
+              return;
+            }
+          }
+          if (!(await continueHolder(coordinated(job, rows), target.pid, false))) {
+            rememberReady(job);
+            releaseClaim(claimsDir(), claimKey, fs, log);
+          }
+        })();
+        return;
+      }
       if (decision.notice) {
         const notice = decision.notice;
         void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then(async (choice) => {
           if (choice !== notice.button) {
             return;
           }
-          // Task 10 wires the open-session button.
           if (decision.openSession) {
+            const opened = await openSession(
+              { ...decision.openSession, sessionId: job.sessionId },
+              {
+                commands: () => Promise.resolve(vscode.commands.getCommands(true)),
+                executeCommand: (id, ...args) => Promise.resolve(vscode.commands.executeCommand(id, ...args)),
+                terminals: () => [...vscode.window.terminals],
+                parentPid: (pid) => readParentPid(pid),
+              },
+            );
+            if (!opened) {
+              void vscode.window.showInformationMessage(
+                `Limit Break: couldn't find session ${job.sessionId.slice(0, 8)} in this window.`,
+              );
+            }
             return;
           }
           // The offer used the holder snapshot from this fire and the notice does not
@@ -1297,25 +1478,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // manual path bypasses claims, and the claim ages out after STALE_MS.
         return;
       }
-      // A DIFFERENT session may be busy or waiting in the same folder. The
-      // extension never writes into a session it did not create, so it tells the
-      // session it is about to create: buildResumePrompt names the peer(s) and asks
-      // the resumed model to coordinate via SendMessage. This never blocks the
-      // resume; only the prompt changes. A failed listing (rows 'unknown') cannot
-      // name peers, so it is skipped.
-      let resumeJob = job;
-      if (rows !== 'unknown' && decision.resume && job.cwd) {
-        const peers = busyFolderPeers(rows, job.sessionId, job.cwd, process.platform);
-        if (peers.length > 0) {
-          const names = peers.map(peerLabel).join(', ');
-          log.info(`Another Claude session is working in ${job.cwd} (${names}); telling the resumed session to coordinate with it.`);
-          void vscode.window.showInformationMessage(
-            `Limit Break: another Claude session (${names}) is working in this folder. ` +
-              `The resumed session has been told to coordinate with it.`,
-          );
-          resumeJob = { ...job, prompt: buildResumePrompt(job.prompt, peers) };
-        }
-      }
+      const resumeJob = coordinated(job, rows);
       if (s.notify) {
         void vscode.window.showInformationMessage(
           `Limit Break: resuming session ${job.sessionId.slice(0, 8)}.`,
@@ -1363,7 +1526,7 @@ export function activate(context: vscode.ExtensionContext): void {
             log,
             vscode.env.sessionId,
           );
-          if (resume(counting, true)) {
+          if (await resumeOrContinue(counting)) {
             scheduler.cancel(counting.sessionId);
           } else if (countingClaim === 'claimed') {
             releaseClaim(claimsDir(), key, fs, log);
@@ -1380,7 +1543,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (await confirmManualResume(ready)) {
         const key = claimKeyFor(ready);
         const readyClaim = claim(key);
-        if (resume(ready, true)) {
+        if (await resumeOrContinue(ready)) {
           forgetReady(ready.sessionId);
         } else if (readyClaim === 'claimed') {
           releaseClaim(claimsDir(), key, fs, log);

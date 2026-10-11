@@ -171,6 +171,9 @@ const fakeVscode = {
   },
   Uri: { parse: (value: string) => ({ value }) },
   window: {
+    get terminals() {
+      return vscodeFake.terminals;
+    },
     tabGroups: {
       get all() {
         return [{ tabs: vscodeFake.tabs }];

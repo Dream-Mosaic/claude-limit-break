@@ -15,6 +15,7 @@ import {
   type FakeTab,
 } from './helpers/vscode';
 import type { AgentRow, HolderRecord } from '../src/liveSessions';
+import type { ContinueOutcome } from '../src/continueInPlace';
 
 installVscodeStub();
 
@@ -260,6 +261,18 @@ stubModule('./claims', {
     return fakeClaimResume(dir, key, nowMs, fsArg, log, owner);
   },
   cleanupStaleClaims: () => {},
+});
+
+/** What the fake continueInPlace answers during one test; default: fall back, so 1.0's launch tests keep launching. */
+let continueOutcome: ContinueOutcome = { kind: 'fallback', reason: 'test default' };
+const continueCalls: { sessionId: string; prompt: string; jobId: string; pid: number }[] = [];
+stubModule('./continueInPlace', {
+  ...(require('../src/continueInPlace') as Record<string, unknown>),
+  BRIDGED_GRACE_MS: 3_000,
+  continueInPlace: async (job: { sessionId: string; prompt: string; jobId: string }, pid: number) => {
+    continueCalls.push({ sessionId: job.sessionId, prompt: job.prompt, jobId: job.jobId, pid });
+    return continueOutcome;
+  },
 });
 
 // Required, not imported: the stubs above must be registered first, and a
@@ -2407,7 +2420,7 @@ test('scheduler.onFire leaves an IDLE terminal alone when Claude Code auto-conti
 
 test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an OVERLOAD in an IDLE terminal, even with auto-continue on', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
   holderRow('cli', 'idle');
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', { ...pastJob(), reason: 'overload' as const }]]));
@@ -2480,7 +2493,7 @@ const untilStoodDown = async (): Promise<void> => {
 
 test('standing down for native auto-continue, then no transcript growth since detection: remembered and offered', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = true;
   holderRow('cli', 'idle');
   const { dir, file } = transcriptOf(500);
@@ -2865,7 +2878,7 @@ test('resumeNow on a counting job holds its claim to the reset plus the longest 
 
 test('scheduler.onFire remembers and offers Resume in Terminal Anyway for an IDLE terminal when auto-continue is off', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
@@ -2901,7 +2914,7 @@ const terminalOffer = async () => {
 for (const status of ['busy', 'waiting']) {
   test(`"Resume in Terminal Anyway" does not resume when the terminal is now ${status}`, async () => {
     resetVscodeFake();
-    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     autoContinueOn = false;
     holderRow('cli', 'idle');
     const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
@@ -2940,7 +2953,7 @@ for (const [label, set] of [
 ] as const) {
   test(`"Resume in Terminal Anyway" resumes when the terminal is ${label} at click time`, async () => {
     resetVscodeFake();
-    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     autoContinueOn = false;
     holderRow('cli', 'idle');
     const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob()]]));
@@ -2962,7 +2975,7 @@ for (const [label, set] of [
 
 test('"Resume in Terminal Anyway" on a session that continued since detection asks first', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
   const { dir, file } = transcriptOf(500);
@@ -3289,7 +3302,7 @@ test('the holder decision dropping a resume for a busy holder keeps the claim', 
 
 test('an idle-terminal offer keeps its claim, and a second window firing the same reset drops it as taken', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-claims-i2-'));
@@ -3480,7 +3493,7 @@ test('the off-autoResume "Resume Now" notification button writes/refreshes its o
 
 test('"Resume in Terminal Anyway" writes a fresh claim before resuming, exactly as manual Resume Now does', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
   claimCalls.length = 0;
   autoContinueOn = false;
@@ -3508,7 +3521,7 @@ test('"Resume in Terminal Anyway" writes a fresh claim before resuming, exactly 
 
 test('"Resume in Terminal Anyway" releases its own claim if the launch fails', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   fakeClaimResult = 'claimed';
   autoContinueOn = false;
   holderRow('cli', 'idle');
@@ -3709,7 +3722,7 @@ test('a fire whose claim a different window holds is still logged as another win
 
 test('"Resume in Terminal Anyway" does not release a claim it does not own (its own bypassed call reported "taken")', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
   // The first call is onFire's own claim (must succeed, or the notice is never
@@ -4237,7 +4250,7 @@ test('gave up: the Resume Now notification button is answered even when the same
 
 test('gave up: "Resume in Terminal Anyway" is answered even when the same failure was already notified', async () => {
   resetVscodeFake();
-  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
   autoContinueOn = false;
   holderRow('cli', 'idle');
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]));
@@ -4475,7 +4488,7 @@ for (const [type, offered] of [
     const persisted = storedJobs(store).map((j) => ({ ...j, resumeAtMs: Date.now() - 1000, baseResumeAtMs: Date.now() - 1000 }));
     teardown(first);
     resetVscodeFake();
-    vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+    vscodeFake.config = { claudeCommand: LAUNCHER, continueInPlace: false, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
     const ctx = contextOver(new Map([['claudeLimitBreak.pending', persisted]]));
     start(ctx);
     try {
@@ -5624,4 +5637,136 @@ test('D10: a fire nine minutes late still resumes', async () => {
   } finally {
     teardown(ctx);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Continue in place (live-continue 1.1): `continueOutcome` / `continueCalls`
+// stand in for continueInPlace.ts; holder pid 77.
+// ---------------------------------------------------------------------------
+
+const resetContinue = () => {
+  continueOutcome = { kind: 'fallback', reason: 'test default' };
+  continueCalls.length = 0;
+  clearHolders();
+};
+
+const idlePanel = (bridged = false) => {
+  fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, status: 'idle', cwd: REAL_CWD }];
+  sessionRecordFor.set(77, { sessionId: SESSION, entrypoint: 'claude-vscode', ...(bridged ? { bridgeSessionId: 'b' } : {}) });
+};
+const liveConfig = () => ({ claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 });
+
+test('an idle panel at the reset is continued in place, not launched', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 1200 };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.deepEqual(continueCalls.map((c) => [c.sessionId, c.pid]), [[SESSION, 77]]);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Continued session 0b3d1f66 in place by socket (confirmed after 1200 ms)')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a continue that falls back launches a terminal, as 1.0 did', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'fallback', reason: 'not confirmed within 60 s' };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Could not continue session 0b3d1f66 in place (not confirmed within 60 s); launching a terminal instead.')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a continue that landed late launches nothing', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'landed-late', transport: 'mod' };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('with continueInPlace off, an idle panel launches and nothing is sent', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  vscodeFake.config = { ...liveConfig(), continueInPlace: false };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(continueCalls.length, 0);
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a waiting panel at the reset gets the waiting notice, and its button opens the panel (D9)', async () => {
+  resetVscodeFake(); resetContinue();
+  fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, status: 'waiting', cwd: REAL_CWD }];
+  sessionRecordFor.set(77, { sessionId: SESSION, entrypoint: 'claude-vscode' });
+  const opened: unknown[] = [];
+  vscodeFake.commands.set('claude-vscode.editor.open', (...args: unknown[]) => { opened.push(args); });
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const notice = vscodeFake.info.find((m) => m.items.includes('Open Session'));
+    assert.ok(notice, JSON.stringify(vscodeFake.info));
+    notice.answer('Open Session'); await flush(); await flush();
+    assert.deepEqual(opened, [[SESSION]]);
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.equal(continueCalls.length, 0);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a bridged panel waits its head start, then is continued if the web client did not (D11)', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(true); continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 5 };
+  vscodeFake.config = liveConfig();
+  const job = { ...pastJob(), baseResumeAtMs: Date.now() };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(continueCalls.length, 0, 'still inside the head start');
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.equal(continueCalls.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a bridged panel whose transcript gets a real turn during the head start is not continued (D11)', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(true); continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 5 };
+  vscodeFake.config = liveConfig();
+  const { dir, file } = transcriptOf(500);
+  const job = { ...nativeContinueJob(file, 500), baseResumeAtMs: Date.now() };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(continueCalls.length, 0, 'still inside the head start');
+    fs.appendFileSync(file, USER_TURN);
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.equal(continueCalls.length, 0, 'the web client continued it');
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Remote Control continued session 0b3d1f66')));
+  } finally { resetContinue(); teardown(ctx); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Resume Now on a session whose idle panel is open continues it in place', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'continued', transport: 'mod', elapsedMs: 5 };
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.equal(continueCalls.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
 });

@@ -23,7 +23,7 @@ Tick a task's box here when its commit lands, and commit this file with it, so a
 - [x] Task 7: `modStatus.ts`, the extension's half of the mod protocol
 - [x] Task 8: `continueInPlace.ts`
 - [x] Task 9: `sessionOpener.ts`, the open-session button
-- [ ] Task 10: Wire continue-in-place, the waiting notice and the bridged head start into `extension.ts`
+- [x] Task 10: Wire continue-in-place, the waiting notice and the bridged head start into `extension.ts`
 - [ ] Task 11: Show bridged sessions (D11 indicator)
 - [ ] Task 12: Install the mod (`modInstall.ts`, commands, packaging)
 - [ ] Task 13: Docs, version 1.1.0, smoke kit
