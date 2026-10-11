@@ -116,6 +116,10 @@ export interface HolderRecord {
   sessionId: string;
   entrypoint: string | undefined;
   bridgeSessionId?: string;
+  /** When the process started, ms since the epoch; a mod status file older than this belongs to an earlier process (modStatus.ts). */
+  startedAtMs?: number;
+  /** The session's cross-session inbox: a Unix socket, or a named pipe on Windows (inbox.ts). */
+  messagingSocketPath?: string;
 }
 
 export type SessionHolder =

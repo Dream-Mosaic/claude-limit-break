@@ -16,6 +16,10 @@ export interface SessionRecord {
   entrypoint: string | undefined;
   /** Present only when Remote Control has bridged this session, i.e. Claude Code web can drive it too. Omitted, not `undefined`, when absent. */
   bridgeSessionId?: string;
+  /** When the process started, ms since the epoch; a mod status file older than this belongs to an earlier process (modStatus.ts). Omitted, not `undefined`, when absent. */
+  startedAtMs?: number;
+  /** The session's cross-session inbox: a Unix socket, or a named pipe on Windows (inbox.ts). Omitted, not `undefined`, when absent. */
+  messagingSocketPath?: string;
 }
 
 export function sessionRegistryDir(): string {
@@ -44,6 +48,12 @@ export function readSessionRecord(
   };
   if (typeof parsed.bridgeSessionId === 'string' && parsed.bridgeSessionId.length > 0) {
     record.bridgeSessionId = parsed.bridgeSessionId;
+  }
+  if (typeof parsed.startedAt === 'number' && Number.isFinite(parsed.startedAt)) {
+    record.startedAtMs = parsed.startedAt;
+  }
+  if (typeof parsed.messagingSocketPath === 'string' && parsed.messagingSocketPath.length > 0) {
+    record.messagingSocketPath = parsed.messagingSocketPath;
   }
   return record;
 }

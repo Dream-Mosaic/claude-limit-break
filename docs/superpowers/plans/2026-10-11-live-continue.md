@@ -17,7 +17,7 @@ Tick a task's box here when its commit lands, and commit this file with it, so a
 - [x] Task 1: Late fire (D10)
 - [x] Task 2: No offer-only route (D12)
 - [x] Task 3: The `continueInPlace` setting and the new fire-time outcomes (D8, D9)
-- [ ] Task 4: Session record fields for the inbox
+- [x] Task 4: Session record fields for the inbox
 - [ ] Task 5: `inbox.ts`, the socket transport
 - [ ] Task 6: The mod
 - [ ] Task 7: `modStatus.ts`, the extension's half of the mod protocol

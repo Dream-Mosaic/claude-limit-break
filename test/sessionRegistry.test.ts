@@ -130,3 +130,42 @@ test('readSessionRecord omits bridgeSessionId when the record has none, rather t
   );
   assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'cli' });
 });
+
+test('readSessionRecord carries startedAtMs and messagingSocketPath for the inbox', () => {
+  const record = readSessionRecord(
+    DIR,
+    9624,
+    reader({
+      '/fake/.claude/sessions/9624.json': JSON.stringify({
+        pid: 9624,
+        sessionId: SESSION,
+        entrypoint: 'cli',
+        startedAt: 1791549836625,
+        messagingSocketPath: '\\\\.\\pipe\\LOCAL\\cc-msg-abc',
+      }),
+    }),
+  );
+  assert.deepEqual(record, {
+    sessionId: SESSION,
+    entrypoint: 'cli',
+    startedAtMs: 1791549836625,
+    messagingSocketPath: '\\\\.\\pipe\\LOCAL\\cc-msg-abc',
+  });
+});
+
+test('readSessionRecord omits startedAtMs and messagingSocketPath when they are malformed', () => {
+  const record = readSessionRecord(
+    DIR,
+    9624,
+    reader({
+      '/fake/.claude/sessions/9624.json': JSON.stringify({
+        pid: 9624,
+        sessionId: SESSION,
+        entrypoint: 'cli',
+        startedAt: 'x',
+        messagingSocketPath: '',
+      }),
+    }),
+  );
+  assert.deepEqual(record, { sessionId: SESSION, entrypoint: 'cli' });
+});
