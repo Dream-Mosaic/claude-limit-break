@@ -465,3 +465,19 @@ test('a manual resume into an idle holder needs no warning when continuing in pl
   assert.ok(manualResumeWarning(terminal('idle'), 'x', false));
   assert.ok(manualResumeWarning(terminal('busy'), 'x', true));
 });
+
+test('an idle terminal at a limit of unknown type with native on stands down for native even with the setting on', () => {
+  const d = decideOnFire(terminal('idle'), true, 'x', 'limit', undefined, true);
+  assert.equal(d.awaitNativeContinue, true);
+  assert.equal(d.continueInPlace, undefined);
+});
+
+for (const [name, holder] of [['panel', panel('waiting')], ['terminal', terminal('waiting')]] as const) {
+  test(`a waiting ${name} still gets the D9 notice with the setting on and native auto-continue off`, () => {
+    const d = decideOnFire(holder, false, 'abcd1234', 'limit', 'five_hour', true);
+    assert.equal(d.resume, false);
+    assert.equal(d.notice?.button, 'Open Session');
+    assert.deepEqual(d.openSession, { pid: holder.pid, kind: holder.kind });
+    assert.equal(d.continueInPlace, undefined);
+  });
+}

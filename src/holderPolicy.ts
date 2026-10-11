@@ -41,11 +41,12 @@ export function isIdleStatus(status: string | undefined): boolean {
  * Decide what `scheduler.onFire` does with a fired job, given who (if anyone) already holds the session. Resuming into a session a panel or terminal still holds forks the conversation.
  *
  * `status` ("idle" | "busy" | "waiting") decides the outcome:
- *   - an IDLE panel resumes as normal (someone left a panel idle at a limit and walked away); stale-tab handling runs after the resume.
- *   - a busy or waiting panel or terminal means the session is already being continued (by the person, or by Remote Control's auto-continue on a bridged panel), so the job is silently dropped: no spawn, no rememberReady, no notification, just a log line.
- *   - an idle terminal defers to autoContinueOn for a FIVE-HOUR usage LIMIT, or one of unknown type (treated as five-hour: the follow-up native-continue check offers the job back if nothing grew). When it is OFF the job is remembered and "Resume in Terminal Anyway" is offered. Any OTHER limit type, and any OVERLOAD (`reason`), is never continued natively, so it gets the offer whatever the setting says. Neither case auto-spawns: an idle terminal is a live second writer.
+ *   - a WAITING panel or terminal (on a permission or a question), whatever the settings, gets a notice with an "Open Session" button and `openSession` (D9): no spawn, no rememberReady.
+ *   - a BUSY panel or terminal means the session is already being continued (by the person, or by Remote Control's auto-continue on a bridged panel), so the job is silently dropped: no spawn, no rememberReady, no notification, just a log line.
+ *   - an IDLE panel is continued in place (`continueInPlace`) when `continueInPlaceOn`, else launched as in 1.0 (someone left a panel idle at a limit and walked away); stale-tab handling runs after the resume.
+ *   - an idle terminal at a FIVE-HOUR usage LIMIT, or one of unknown type (treated as five-hour: the follow-up native-continue check offers the job back if nothing grew), with autoContinueOn stands down for Claude Code's own auto-continue (`awaitNativeContinue`), whatever `continueInPlaceOn` says. In every other case (any OTHER limit type, any OVERLOAD (`reason`), or autoContinueOn off) the terminal is continued in place when `continueInPlaceOn`, else remembered and "Resume in Terminal Anyway" is offered. Neither case auto-spawns: an idle terminal is a live second writer.
  *
- * `resume: true` is reserved for 'none', a listing failure ('unknown', which must still resume rather than fail closed and stop every resume where `claude agents` misbehaves), and an idle panel (see {@link isIdleStatus}).
+ * `resume: true` is reserved for 'none', a listing failure ('unknown', which must still resume rather than fail closed and stop every resume where `claude agents` misbehaves), and an idle panel with `continueInPlaceOn` off (see {@link isIdleStatus}).
  *
  * A DIFFERENT busy session in the same folder does not block: see {@link buildResumePrompt}.
  */
