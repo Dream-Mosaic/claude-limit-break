@@ -2264,6 +2264,8 @@ test('the mod offer is shown when it can help, and Never is remembered', async (
     const offer = vscodeFake.info.find((m) => m.message.includes('Claude Code mod'));
     assert.ok(offer, `expected the mod offer; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
     assert.deepEqual(offer.items, ['Install', 'Not now', 'Never']);
+    assert.ok(offer.message.startsWith('Limit Break: '), offer.message);
+    assert.ok(!/exactly/.test(offer.message), 'no promise of limit sensing 1.1 does not do');
     offer.answer('Never');
     await flush();
     assert.equal(store.get('claudeLimitBreak.modOffer'), 'never');
@@ -6115,4 +6117,133 @@ test('Resume Now on an idle terminal whose continue falls back shows the fork mo
     await confirmed;
     assert.equal(vscodeFake.terminals.length, 1);
   } finally { resetContinue(); teardown(ctx); }
+});
+
+// ---------------------------------------------------------------------------
+// The log marks every fire and ends it with one `Outcome for` line.
+// ---------------------------------------------------------------------------
+
+const FIRE_LINE = /Resume due for 0b3d1f66 \(reset \d{4}-\d\d-\d\dT[\d:.]+Z, scheduled \d{4}-\d\d-\d\dT[\d:.]+Z\)\.$/;
+const outcomeLines = () => vscodeFake.outputLines.filter((l) => l.includes('Outcome for '));
+
+test('a launch is logged as a fire and an outcome', async () => {
+  resetVscodeFake(); resetContinue();
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.equal(vscodeFake.outputLines.filter((l) => FIRE_LINE.test(l)).length, 1, vscodeFake.outputLines.join('\n'));
+    assert.equal(outcomeLines().length, 1, outcomeLines().join('\n'));
+    assert.ok(outcomeLines()[0]!.endsWith('Outcome for 0b3d1f66: launched a terminal.'));
+    const fireAt = vscodeFake.outputLines.findIndex((l) => FIRE_LINE.test(l));
+    assert.ok(fireAt < vscodeFake.outputLines.findIndex((l) => l.includes('Outcome for ')), 'the fire line comes first');
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a drop for having continued since the stop is logged as an outcome', async () => {
+  resetVscodeFake(); resetContinue();
+  vscodeFake.config = liveConfig();
+  const { dir, file } = transcriptOf(500);
+  fs.appendFileSync(file, USER_TURN);
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', nativeContinueJob(file, 500)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.outputLines.filter((l) => FIRE_LINE.test(l)).length, 1);
+    assert.deepEqual(outcomeLines().map((l) => l.slice(l.indexOf('Outcome'))), ['Outcome for 0b3d1f66: dropped: has continued since it stopped.']);
+  } finally { resetContinue(); teardown(ctx); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a drop for another window\'s claim is logged as an outcome', async () => {
+  resetVscodeFake(); resetContinue();
+  vscodeFake.config = liveConfig();
+  fakeClaimResult = 'taken';
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.equal(vscodeFake.outputLines.filter((l) => FIRE_LINE.test(l)).length, 1);
+    assert.deepEqual(outcomeLines().map((l) => l.slice(l.indexOf('Outcome'))), ['Outcome for 0b3d1f66: dropped: claimed by another window.']);
+  } finally { fakeClaimResult = 'claimed'; resetContinue(); teardown(ctx); }
+});
+
+test('a continue in place is logged as a fire and an outcome', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'continued', transport: 'mod', elapsedMs: 1200 };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(vscodeFake.outputLines.filter((l) => FIRE_LINE.test(l)).length, 1);
+    assert.deepEqual(outcomeLines().map((l) => l.slice(l.indexOf('Outcome'))), ['Outcome for 0b3d1f66: continued in place by mod (confirmed after 1200 ms).']);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a terminal offer and a busy holder each end in an outcome', async () => {
+  resetVscodeFake(); resetContinue(); idleTerminal();
+  vscodeFake.config = { ...liveConfig(), continueInPlace: false };
+  autoContinueOn = false;
+  let ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.deepEqual(outcomeLines().map((l) => l.slice(l.indexOf('Outcome'))), ['Outcome for 0b3d1f66: offered Resume in Terminal Anyway.']);
+  } finally { autoContinueOn = true; resetContinue(); teardown(ctx); }
+
+  resetVscodeFake(); resetContinue();
+  fakeAgentRows = [{ pid: 88, kind: 'interactive', sessionId: SESSION, status: 'busy', cwd: REAL_CWD }];
+  sessionRecordFor.set(88, { sessionId: SESSION, entrypoint: 'cli' });
+  vscodeFake.config = liveConfig();
+  ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.deepEqual(outcomeLines().map((l) => l.slice(l.indexOf('Outcome'))), ['Outcome for 0b3d1f66: dropped: busy in a terminal.']);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+// ---------------------------------------------------------------------------
+// Final-wave minors.
+// ---------------------------------------------------------------------------
+
+test('the bridged note in the "resuming at" notice appears only when something will wait for the web client', async () => {
+  for (const [config, expected] of [
+    [{}, true],
+    [{ continueInPlace: false }, false],
+    [{ autoResume: false }, false],
+  ] as const) {
+    resetVscodeFake(); resetContinue(); idlePanel(true);
+    vscodeFake.config = { ...liveConfig(), ...config };
+    const ctx = contextOver(new Map<string, unknown>());
+    start(ctx);
+    try {
+      FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+      await flush();
+      const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+      assert.ok(notice, JSON.stringify(vscodeFake.info));
+      assert.equal(notice.message.includes('bridged'), expected, `${JSON.stringify(config)}: ${notice.message}`);
+    } finally { resetContinue(); teardown(ctx); }
+  }
+});
+
+test('D10: a late drop keeps the claim, so another window\'s attempt afterwards is refused', async () => {
+  resetVscodeFake(); resetContinue();
+  vscodeFake.config = liveConfig();
+  const dir = realClaimsSetup();
+  const job = lateJob(11);
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes("came due while VS Code wasn't running")), 'setup: the late drop happened');
+    assert.deepEqual(releasedKeys, [], 'a late drop does not release the claim');
+    assert.equal(realClaims.claimResume(dir, realClaims.claimKeyFor(job), Date.now(), fs), 'taken');
+  } finally {
+    fakeClaimResult = 'claimed';
+    resetContinue(); teardown(ctx);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

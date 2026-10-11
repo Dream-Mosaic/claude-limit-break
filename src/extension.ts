@@ -321,7 +321,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
-      const bridgedNote = bridged
+      // The head start is only waited when the fire continues in place on its own: with either setting off nothing waits.
+      const bridgedNote = bridged && s.continueInPlace && s.autoResume
         ? ` It's bridged to Remote Control, so the web client gets until ${new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString()} to continue it first.`
         : '';
       showResumeNotice(
@@ -658,8 +659,9 @@ export function activate(context: vscode.ExtensionContext): void {
     peerToken: (pid) => findPeerToken(sessionRegistryDir(), pid, (d) => fs.readdirSync(d), (f) => fs.readFileSync(f, 'utf8')),
     writeControlFile: (sessionId, text) => {
       const file = controlFile(limitBreakDir(), sessionId);
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, text);
+      // Private to the user: the entry's nonce is what lets a control message through.
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(file, text, { mode: 0o600 });
     },
     send: (socketPath, lines) => sendToInbox(socketPath, lines),
     transcriptBytes,
@@ -862,6 +864,9 @@ export function activate(context: vscode.ExtensionContext): void {
     return true;
   };
 
+  /** The one line that ends a fire: what Limit Break did about the stop (D, "Outcome for"). */
+  const logOutcome = (job: PendingJob, what: string): void => log.info(`Outcome for ${job.sessionId.slice(0, 8)}: ${what}.`);
+
   /**
    * The session has moved on since its stop was detected: a real user or
    * assistant entry appended after the job's detection-time size
@@ -939,6 +944,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     if (outcome.kind === 'continued') {
       log.info(`Continued session ${id8} in place by ${outcome.transport} (confirmed after ${outcome.elapsedMs} ms).`);
+      logOutcome(job, `continued in place by ${outcome.transport} (confirmed after ${outcome.elapsedMs} ms)`);
       if (gaveUp.launched(job.sessionId)) {
         render();
       }
@@ -946,10 +952,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (outcome.kind === 'landed-late') {
       log.info(`Session ${id8}'s continue by ${outcome.transport} landed after the ${CONFIRM_WINDOW_MS / 1000} s window; not launching a second process.`);
+      logOutcome(job, 'continue landed late; nothing launched');
       return true;
     }
     if (generation !== cancelGeneration) {
       log.info(`Cancelled; not launching a terminal for session ${id8} after its in-place continue fell back.`);
+      logOutcome(job, 'cancelled; nothing launched');
       return true;
     }
     if (kind === 'terminal') {
@@ -959,19 +967,28 @@ export function activate(context: vscode.ExtensionContext): void {
         if (warning) {
           const pick = await Promise.resolve(vscode.window.showWarningMessage(warning.message, { modal: true }, warning.button));
           if (pick !== warning.button) {
+            logOutcome(job, 'fell back, but the fork warning was declined; nothing launched');
             return false;
           }
         }
-        return resume(job, true);
+        return launchedAfterFallback(job, true);
       }
       const offer = terminalOffer(pid, id8, job.reason, job.rateLimitType);
       log.warn(`Could not continue session ${id8} in place (${outcome.reason}). ${offer.logMessage}`);
       rememberReady(job);
       showHolderNotice(job, claimKeyFor(job), offer.notice);
+      logOutcome(job, 'offered Resume in Terminal Anyway');
       return true;
     }
     log.warn(`Could not continue session ${id8} in place (${outcome.reason}); launching a terminal instead.`);
-    return resume(job, manual);
+    return launchedAfterFallback(job, manual);
+  };
+
+  /** The terminal launch after a continue in place fell back, with its outcome line. */
+  const launchedAfterFallback = (job: PendingJob, manual: boolean): boolean => {
+    const launched = resume(job, manual);
+    logOutcome(job, launched ? 'fell back to a terminal launch' : 'fell back, but the terminal could not be launched; kept for Resume Now');
+    return launched;
   };
 
   /** A manual resume: continue an idle live holder in place when the setting is on, otherwise launch (resume()). */
@@ -1134,6 +1151,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const id8 = job.sessionId.slice(0, 8);
     rememberReady(job);
     log.info(`Session ${id8}: Claude Code's auto-continue was cancelled (${cancel}); not resuming here.`);
+    logOutcome(job, "Claude Code's auto-continue was cancelled; offered Resume Now");
     offerResumeNow(
       job,
       claimKey,
@@ -1410,6 +1428,18 @@ export function activate(context: vscode.ExtensionContext): void {
     storeVersion: (v) => Promise.resolve(context.globalState.update(INSTALLED_VERSION_KEY, v)),
     notify: (m, level) => void (level === 'warn' ? vscode.window.showWarningMessage(m) : vscode.window.showInformationMessage(m)),
     log: (m) => log.info(m),
+    clearStatusFiles: () => {
+      const dir = path.join(limitBreakDir(), 'sessions');
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          if (name.endsWith('.json')) {
+            fs.rmSync(path.join(dir, name), { force: true });
+          }
+        }
+      } catch {
+        // nothing to clear, or not ours to clear
+      }
+    },
   });
 
   /**
@@ -1419,6 +1449,9 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const maybeOfferMod = async (): Promise<void> => {
     const installed = isModInstalled(await listInstalledPlugins(runClaude));
+    if (installed === undefined) {
+      throw new Error('the plugin list could not be read');
+    }
     const current = extensionVersion();
     if (installed && context.globalState.get<string>(INSTALLED_VERSION_KEY) !== current) {
       await updateMod(modDeps());
@@ -1437,7 +1470,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const choice = await Promise.resolve(
       vscode.window.showInformationMessage(
-        'Limit Break can install a small Claude Code mod. It lets Limit Break continue a session as you, and read limits exactly. Without it, Limit Break uses each session\'s inbox.',
+        'Limit Break: a small Claude Code mod reports each session\'s limits and lets Limit Break continue a session as you, privately. Without it, Limit Break uses each session\'s inbox.',
         'Install',
         'Not now',
         'Never',
@@ -1526,9 +1559,14 @@ export function activate(context: vscode.ExtensionContext): void {
       // turned off. Kept for Resume Now, and checked BEFORE the claim so another
       // enabled window stays free to handle the reset.
       const s = settings();
+      // Every fire is marked, and every branch below ends in an `Outcome for` line, so the log says what Limit Break did about a stop and when.
+      log.info(
+        `Resume due for ${job.sessionId.slice(0, 8)} (reset ${new Date(job.baseResumeAtMs).toISOString()}, scheduled ${new Date(job.resumeAtMs).toISOString()}).`,
+      );
       if (!s.enabled) {
         rememberReady(job);
         log.info(`Limit Break is disabled; kept session ${job.sessionId.slice(0, 8)} for Resume Now instead of resuming.`);
+        logOutcome(job, 'disabled; kept for Resume Now');
         return;
       }
       // Claim this reset first. Every window watching this account can detect and
@@ -1552,6 +1590,7 @@ export function activate(context: vscode.ExtensionContext): void {
             ? 'already claimed by this window'
             : 'claimed by another window';
         log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
+        logOutcome(job, holder === 'claimed by another window' ? 'dropped: claimed by another window' : 'dropped: already claimed by this window');
         return;
       }
       // D10: a fire well past its time means nothing was running on schedule (VS
@@ -1563,6 +1602,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log.info(
           `Resume for ${job.sessionId.slice(0, 8)} came due while VS Code wasn't running (${lateMin} min late); leaving it to you.`,
         );
+        logOutcome(job, `dropped: came due while VS Code wasn't running (${lateMin} min late)`);
         return;
       }
       // A resume is only for a stop still unhandled. A real turn since detection
@@ -1573,6 +1613,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // shown, and the claim is KEPT so every other window drops its copy too.
       if (hasContinued(job)) {
         log.info(`Session ${job.sessionId.slice(0, 8)} has continued since it stopped; not resuming.`);
+        logOutcome(job, 'dropped: has continued since it stopped');
         return;
       }
       // After continued-since (a moved-on session is silent), before the
@@ -1590,6 +1631,7 @@ export function activate(context: vscode.ExtensionContext): void {
           claimKey,
           `Limit Break: the cooldown has elapsed for session ${job.sessionId.slice(0, 8)}.`,
         );
+        logOutcome(job, 'autoResume off; offered Resume Now');
         return;
       }
       // Before spawning a second `claude --resume`, find out who holds this
@@ -1619,14 +1661,16 @@ export function activate(context: vscode.ExtensionContext): void {
           if (target.bridged) {
             const headStartMs = job.baseResumeAtMs + BRIDGED_GRACE_MS - Date.now();
             if (headStartMs > 0) {
+              const until = new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString();
               log.info(
-                `Session ${job.sessionId.slice(0, 8)} is bridged to Remote Control; giving the web client until ` +
-                  `${new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString()} to continue it.`,
+                `Session ${job.sessionId.slice(0, 8)} is bridged to Remote Control; giving the web client until ${until} to continue it.`,
               );
+              logOutcome(job, `bridged; waiting for the web client until ${until}`);
               await wait(headStartMs);
             }
             if (hasContinued(job)) {
               log.info(`Remote Control continued session ${job.sessionId.slice(0, 8)}; not continuing it here.`);
+              logOutcome(job, 'Remote Control continued it');
               return;
             }
           }
@@ -1644,6 +1688,15 @@ export function activate(context: vscode.ExtensionContext): void {
         armNativeContinueCheck(job, claimKey);
       }
       if (!decision.resume) {
+        if (decision.openSession) {
+          logOutcome(job, 'waiting for input; notice shown');
+        } else if (decision.notice) {
+          logOutcome(job, 'offered Resume in Terminal Anyway');
+        } else if (decision.awaitNativeContinue) {
+          logOutcome(job, "left to Claude Code's auto-continue");
+        } else {
+          logOutcome(job, `dropped: busy in a ${holder !== 'unknown' && holder.kind === 'panel' ? 'panel' : 'terminal'}`);
+        }
         // The claim is KEPT: releasing it would let every other window (watchScope
         // machine) fire later, find the key free and show the same "Resume in Terminal
         // Anyway" offer, so two clicks would be two writers on a held session. Every
@@ -1665,7 +1718,10 @@ export function activate(context: vscode.ExtensionContext): void {
         // A resume that never launched must not hold the claim, or a later automatic
         // attempt (this window's or another's) is blocked.
         releaseClaim(claimsDir(), claimKey, fs, log);
+        logOutcome(job, 'could not launch a terminal; kept for Resume Now');
+        return;
       }
+      logOutcome(job, 'launched a terminal');
     }),
     vscode.commands.registerCommand(`${NS}.resumeNow`, async () => {
       // Exactly one job moves, and only its own source is touched: cancelling the

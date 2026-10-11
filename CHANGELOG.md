@@ -41,6 +41,12 @@ launching a second copy of it.
 - `resumeMode`, `headlessPermissionMode` and `onStale` now apply only to a
   launch. `resumePrompt` is used on all three paths.
 - The "reopen the tab" offer follows a launch only.
+- A background task finishing, or a message from another session, queued into a
+  stopped session no longer counts as the session having moved on, so its resume
+  is no longer skipped as "continued".
+- Every fire is logged: "Resume due for …", then one "Outcome for …" line.
+- Open Session for a panel held by another VS Code window says so instead of
+  opening a second panel.
 
 ### Removed
 

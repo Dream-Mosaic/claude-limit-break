@@ -110,8 +110,9 @@ two things:
 
 - **It reports.** Each session it is loaded in writes a status file in
   `~/.limit-break/sessions/` (the usage numbers Claude Code shows, the last
-  failure, whether Claude Code's own auto-continue fired), so Limit Break sees
-  limits exactly instead of inferring them.
+  failure, whether Claude Code's own auto-continue fired). Limit Break does not
+  act on those limit readings yet; the mod's sighting of an auto-continue
+  notice is written to the log.
 - **It continues, when asked.** Limit Break sends it a control message through
   the session's inbox; the mod checks it came from Limit Break, and continues
   the session as you. Claude never sees the control message.
@@ -240,7 +241,13 @@ since the stop was detected (you typed into the panel or the terminal, Claude
 Code's own auto-continue ran, another window resumed it), resuming on top of it
 would fork the conversation. So when a resume fires on its own, a session that
 has moved on is left alone: one line in the log, nothing offered, nothing
-launched.
+launched. A background task finishing, or a message from another session, queued
+into the stopped session does not count as it moving; only a turn that follows
+does.
+
+Every fire is logged: a `Resume due for …` line when it comes due, and an
+`Outcome for …` line saying what Limit Break did about it (launched, continued in
+place, offered, or why it dropped it).
 
 On the manual paths (the Resume Now command, the Resume Now notification, the
 "Claude Code did not continue" offer, and "Resume in Terminal Anyway") you are
