@@ -4,7 +4,7 @@ import {
   withRateLimits, withStopFailure, withNativeContinue, withContinued, movedTo,
 } from './control.mjs';
 
-// $ may only be passed to functions declared at the top of this file, so the helpers live here and take the process's state `s` ({ status, home }).
+// $ may only be passed to functions declared at the top of this file, so the helpers live here and take the process's state `s` ({ status, home, inFlight: job ids submitted and not yet settled }).
 
 async function homeDir($, s) {
   if (s.home === undefined) {
@@ -29,6 +29,11 @@ async function readText($, path) {
 
 async function start($, s, sessionId) {
   const h = await homeDir($, s);
+  // The process moves on (/clear, resume, fork): the old file can't be deleted, so it says where the process went. Whichever hook sees the move first does this.
+  if (s.status && s.status.sessionId !== sessionId) {
+    s.status = movedTo(s.status, sessionId);
+    await write($, s);
+  }
   const previousText = h ? await readText($, statusPath(h, sessionId)) : undefined;
   s.status = initialStatus(
     {
@@ -42,10 +47,41 @@ async function start($, s, sessionId) {
   await write($, s);
 }
 
+async function submit($, s, control, sessionId) {
+  try {
+    const result = await $.prompt.submit({ text: control.prompt, asUser: true });
+    if (typeof result.text === 'string') {
+      await recordContinued($, s, sessionId, control.jobId);
+    } else {
+      $.ui.log(`limit-break: the continue prompt did not enter: ${result.drop}`);
+    }
+  } catch (error) {
+    $.ui.log(`limit-break: the continue prompt failed: ${error}`);
+  } finally {
+    s.inFlight.delete(control.jobId);
+  }
+}
+
+/** Record a continued job on the session that was asked, which may no longer be this process's session. */
+async function recordContinued($, s, sessionId, jobId) {
+  const atMs = await $.clock.now();
+  if (s.status && s.status.sessionId === sessionId) {
+    s.status = withContinued(s.status, jobId, atMs);
+    await write($, s);
+    return;
+  }
+  const h = await homeDir($, s);
+  const text = h ? await readText($, statusPath(h, sessionId)) : undefined;
+  const old = text === undefined ? undefined : parseStatus(text);
+  if (old) {
+    await $.fs.write(statusPath(h, sessionId), JSON.stringify(withContinued(old, jobId, atMs), null, 2));
+  }
+}
+
 /** @type {import('claude-code').Register} */
 export const register = (on) => {
   /** This process's status (rewritten whole on every change) and home directory. */
-  const s = { status: undefined, home: undefined };
+  const s = { status: undefined, home: undefined, inFlight: new Set() };
 
   on('session.start', async ($, e, next) => {
     await start($, s, await $.session.id());
@@ -78,8 +114,6 @@ export const register = (on) => {
 
   on('classic.SessionStart', async ($, e, next) => {
     if (s.status && e.session_id !== s.status.sessionId && (e.source === 'clear' || e.source === 'resume' || e.source === 'fork')) {
-      s.status = movedTo(s.status, e.session_id);
-      await write($, s);
       await start($, s, e.session_id);
     }
     return next(e);
@@ -97,21 +131,21 @@ export const register = (on) => {
       $.ui.log(`limit-break: ignored a control message: ${control.kind === 'invalid' ? control.reason : 'no session status yet'}`);
       return { consumed: 'limit-break control message' };
     }
-    const verdict = acceptControl(
-      control,
-      await readText($, controlPath(await homeDir($, s), s.status.sessionId)),
-      s.status,
-      await $.clock.now(),
-    );
+    const verdict = s.inFlight.has(control.jobId)
+      ? { ok: false, reason: `job ${control.jobId} is already being continued` }
+      : acceptControl(
+        control,
+        await readText($, controlPath(await homeDir($, s), s.status.sessionId)),
+        s.status,
+        await $.clock.now(),
+      );
     if (!verdict.ok) {
       $.ui.log(`limit-break: refused a control message: ${verdict.reason}`);
       return { consumed: 'limit-break control message' };
     }
-    // Unawaited, as spike S4 ran it from session.receive: the turn starts once the session is idle.
-    void $.prompt.submit({ text: control.prompt, asUser: true }).then(async () => {
-      s.status = withContinued(s.status, control.jobId, await $.clock.now());
-      await write($, s);
-    });
+    // Unawaited, as spike S4 ran it from session.receive: the turn starts once the session is idle. The job counts as continued only once the prompt entered; until the submit settles it is in flight, so a replay is refused meanwhile.
+    s.inFlight.add(control.jobId);
+    void submit($, s, control, s.status.sessionId);
     return { consumed: 'limit-break control message' };
   });
 };
