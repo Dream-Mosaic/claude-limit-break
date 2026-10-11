@@ -297,11 +297,22 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(`Released this window's own claim on ${freshKey} so the fresh plan can fire.`);
     }
     warnIfUntrusted(job);
+    // D11: say so when the session is open in a panel bridged to Remote Control.
+    // The same listing the fire uses, run only when a new job was scheduled.
+    const rows = detectAgentRows();
+    const holderNow = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
+    const bridged = holderNow !== 'unknown' && holderNow.kind === 'panel' && holderNow.bridged;
+    if (bridged) {
+      scheduler.markBridged(job.sessionId);
+    }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
+      const bridgedNote = bridged
+        ? ` It's bridged to Remote Control, so the web client gets until ${new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString()} to continue it first.`
+        : '';
       showResumeNotice(
         job,
-        `Limit Break: resuming at ${at}${estimate === undefined ? '' : ` (~${estimate.toLocaleString()} tokens)`}.`,
+        `Limit Break: resuming at ${at}${estimate === undefined ? '' : ` (~${estimate.toLocaleString()} tokens)`}.${bridgedNote}`,
       );
     }
   };

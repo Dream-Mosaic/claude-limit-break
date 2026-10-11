@@ -386,6 +386,32 @@ test('a job persisted without rateLimitType reads back with it undefined', (t) =
   assert.equal(s.current.rateLimitType, undefined);
 });
 
+test('markBridged sets the hint, persists it, fires onChange, and says whether it changed anything (D11)', (t) => {
+  const stored = new Map<string, string>();
+  const m: MementoLike = {
+    get: <T>(k: string) => (stored.has(k) ? (JSON.parse(stored.get(k)!) as T) : undefined),
+    update: (k, v) => {
+      stored.set(k, JSON.stringify(v));
+      return Promise.resolve();
+    },
+  };
+  const s = new ResumeScheduler(m, silent);
+  t.after(() => s.dispose());
+  let changes = 0;
+  s.onChange(() => changes++);
+  s.schedule(job(Date.now() + 60_000));
+  const before = changes;
+  assert.equal(s.markBridged('0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234'), true);
+  assert.equal(s.current?.bridged, true);
+  assert.equal(changes, before + 1);
+  const reloaded = new ResumeScheduler(m, silent);
+  t.after(() => reloaded.dispose());
+  assert.equal(reloaded.current?.bridged, true, 'persisted');
+  assert.equal(s.markBridged('0b3d1f66-4c2e-4a1b-9f77-2a5d6e8c1234'), false, 'already marked');
+  assert.equal(s.markBridged('ffffffff-0000-0000-0000-000000000000'), false, 'unknown session');
+  assert.equal(changes, before + 1);
+});
+
 // The baseline refresh is logged, as limit-type adoption is, so a skip that follows
 // can be traced to it.
 test('a refreshed detection baseline is logged, once, with the old and new size; an unchanged or absent size is not', (t) => {

@@ -133,6 +133,19 @@ test('a non-string or empty rateLimitType is repaired: the field goes, the job s
   }
 });
 
+test('bridged: true is kept; any other bridged value is repaired away with the job kept (D11 hint)', () => {
+  const kept = restoreJob({ ...full(), bridged: true });
+  assert.ok('job' in kept && kept.job.bridged === true);
+  for (const bad of ['yes', false, 1, null, {}]) {
+    const result = restoreJob({ ...full(), bridged: bad });
+    assert.ok('job' in result, `bridged ${JSON.stringify(bad)} must keep the job`);
+    assert.ok(!('bridged' in result.job), 'the bad field is deleted');
+    assert.equal(result.job.rateLimitType, 'five_hour', 'a valid rateLimitType survives the same copy');
+  }
+  const both = restoreJob({ ...full(), bridged: 'yes', rateLimitType: 5 });
+  assert.ok('job' in both && !('bridged' in both.job) && !('rateLimitType' in both.job));
+});
+
 test('the scheduler restores only the valid jobs from a mixed list, one warn line per dropped job', (t) => {
   const { lines, log } = recording();
   const good = { ...valid(), sessionId: SESSION_B, transcript: `/h/p/${SESSION_B}.jsonl` };

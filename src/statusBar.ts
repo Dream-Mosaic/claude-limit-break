@@ -56,6 +56,7 @@ function buildSessionLine(entry: {
   state?: 'counting' | 'ready';
   resumeAtMs?: number;
   gaveUpCause?: GaveUpCause;
+  bridged?: true;
 }): SessionLine {
   const id = `\`${entry.sessionId.slice(0, 8)}\``;
   const folder = entry.cwd ? escapeMarkdown(folderBasename(entry.cwd)) : '_no folder recorded_';
@@ -64,6 +65,9 @@ function buildSessionLine(entry: {
     bits.push(`resuming at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
   } else if (entry.state === 'ready') {
     bits.push('**ready**');
+  }
+  if (entry.bridged) {
+    bits.push('bridged to Remote Control');
   }
   if (entry.gaveUpCause) {
     bits.push(`**Gave up**: ${REASON[entry.gaveUpCause]}`);
@@ -95,6 +99,7 @@ export function buildSessionLines(
     state?: 'counting' | 'ready';
     resumeAtMs?: number;
     gaveUpCause?: GaveUpCause;
+    bridged?: true;
   }
   const byId = new Map<string, Entry>();
   for (const job of jobs) {
@@ -104,6 +109,7 @@ export function buildSessionLines(
       folderTrusted: job.folderTrusted,
       state: 'counting',
       resumeAtMs: job.resumeAtMs,
+      bridged: job.bridged,
     });
   }
   for (const job of ready) {

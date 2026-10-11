@@ -5731,6 +5731,40 @@ test('a waiting panel at the reset gets the waiting notice, and its button opens
   } finally { resetContinue(); teardown(ctx); }
 });
 
+test('a limit detected in a bridged panel says so in the notice and marks the stored job (D11)', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(true);
+  vscodeFake.config = liveConfig();
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+    assert.ok(notice, JSON.stringify(vscodeFake.info));
+    assert.match(notice.message, / It's bridged to Remote Control, so the web client gets until \S.* to continue it first\.$/);
+    const jobs = store.get('claudeLimitBreak.pending') as { bridged?: true }[];
+    assert.equal(jobs[0]?.bridged, true);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a limit detected in an unbridged panel gets no bridged note and no hint (D11)', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(false);
+  vscodeFake.config = liveConfig();
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    FakeWatcher.latest!.limitFor(SESSION, new Date(Date.now() + 3_600_000));
+    await flush();
+    const notice = vscodeFake.info.find((m) => m.message.includes('resuming at'));
+    assert.ok(notice, JSON.stringify(vscodeFake.info));
+    assert.ok(!notice.message.includes('bridged'), notice.message);
+    const jobs = store.get('claudeLimitBreak.pending') as { bridged?: true }[];
+    assert.equal(jobs[0]?.bridged, undefined);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
 test('a bridged panel waits its head start, then is continued if the web client did not (D11)', async () => {
   resetVscodeFake(); resetContinue(); idlePanel(true); continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 5 };
   vscodeFake.config = liveConfig();

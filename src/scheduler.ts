@@ -26,6 +26,8 @@ export interface PendingJob {
   rateLimitType?: string;
   /** The overload backoff this job was planned with (overloadBackoff.ts). Already included in `baseResumeAtMs`; kept for the log. Absent for a limit and for a first overload retry. */
   backoffMs?: number;
+  /** Seen open in a panel bridged to Remote Control when scheduled (D11); a display hint. The fire decides from the live holder, not from this. */
+  bridged?: true;
 }
 
 export interface MementoLike {
@@ -43,7 +45,7 @@ const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Num
  *
  * The pending and ready lists are where a job reaches `claude --resume` without having been parsed from a transcript this run, and globalState is a JSON file anyone can edit. So nothing is trusted: the session id must pass `isSessionId` (`--resume` only ever receives a UUID), strings must be strings, times finite, and `reason` one of the two values the code branches on. A job failing any of that is dropped and the caller logs it.
  *
- * Two things are tolerated. A job saved before the random delay existed lacks `baseResumeAtMs` and `jitterMs`; they are filled in (its deadline is treated as the unpadded one). A `rateLimitType` that is not a non-empty string is only a hint, so the field is deleted and the job kept.
+ * Two things are tolerated. A job saved before the random delay existed lacks `baseResumeAtMs` and `jitterMs`; they are filled in (its deadline is treated as the unpadded one). A `rateLimitType` that is not a non-empty string, or a `bridged` that is not `true`, is only a hint, so the field is deleted and the job kept.
  *
  * Returns the very same object when nothing needed changing, so a caller holding the stored array keeps its references.
  */
@@ -84,7 +86,8 @@ export function restoreJob(raw: unknown): RestoreResult {
     return { dropped: 'it is an offer-only resume from 1.0, which this version no longer keeps' };
   }
   const badType = j.rateLimitType !== undefined && (typeof j.rateLimitType !== 'string' || j.rateLimitType === '');
-  if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType) {
+  const badBridged = j.bridged !== undefined && j.bridged !== true;
+  if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType && !badBridged) {
     return { job: j as unknown as PendingJob };
   }
   const job = {
@@ -94,6 +97,9 @@ export function restoreJob(raw: unknown): RestoreResult {
   } as unknown as PendingJob;
   if (badType) {
     delete job.rateLimitType;
+  }
+  if (badBridged) {
+    delete job.bridged;
   }
   return { job };
 }
@@ -247,6 +253,18 @@ export class ResumeScheduler {
     }
     this.startTicking();
     this.onChangeEmitter.fire(this.current);
+  }
+
+  /** D11: note that the pending job's session is open in a bridged panel, for the status bar. */
+  markBridged(sessionId: string): boolean {
+    const job = this.pending.get(sessionId);
+    if (!job || job.bridged) {
+      return false;
+    }
+    job.bridged = true;
+    this.persist();
+    this.onChangeEmitter.fire(this.current);
+    return true;
   }
 
   /** Undefined rather than an empty list when nothing is pending. */

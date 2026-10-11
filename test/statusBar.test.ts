@@ -118,6 +118,14 @@ test('a counting-down job renders its id, folder and formatted resume time', () 
   assert.equal(waitingCount, 1);
 });
 
+test('a counting job seen in a bridged panel says so after its resume time (D11)', () => {
+  const at = Date.now() + 90_000;
+  const { lines } = buildSessionLines([job({ resumeAtMs: at, bridged: true })], [], []);
+  assert.ok(lines[0]!.includes(`${new Date(at).toLocaleString()}**, bridged to Remote Control`), lines[0]);
+  const plain = buildSessionLines([job({ resumeAtMs: at })], [], []);
+  assert.ok(!plain.lines[0]!.includes('bridged'), plain.lines[0]);
+});
+
 test('a ready job says "ready", not a time', () => {
   const { lines } = buildSessionLines([], [job()], []);
   assert.equal(lines.length, 1);
