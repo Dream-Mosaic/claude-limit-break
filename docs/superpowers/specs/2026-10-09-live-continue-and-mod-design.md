@@ -1,6 +1,6 @@
 # 1.1: continue live sessions in place, with a Claude Code mod
 
-Status: **draft for review.** The decisions marked **[decided]** were made by the
+Status: **approved 2026-10-11.** The decisions marked **[decided]** were made by the
 user on 2026-10-08 and 2026-10-09. Everything marked **[proposed]** is open; the
 questions are collected at the end.
 
@@ -78,8 +78,21 @@ unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
    - **Socket:** the enveloped `resumePrompt` (see the protocol below).
 3. **Confirm.** Delivery is confirmed when the mod reports `continued` for this
    job (mod transport), or when the transcript records the `msg_id` (socket
-   transport). If neither happens within 30 seconds [proposed], fall back to
-   `resume()`. The stall check that already runs after `resume()` then applies.
+   transport). If neither happens within **60 seconds** [decided 2026-10-11],
+   fall back to `resume()`. The stall check that already runs after `resume()`
+   then applies.
+   - **Last look before falling back** [decided]: read the transcript once more
+     for the `msg_id`, and for any new turn since the send (continued-since,
+     measured from the send). If either is there, don't launch: the continue
+     landed late. This guards the costly side, since a launch after a late
+     delivery is the fork 1.1 exists to prevent; a long window only delays.
+   - **Why 60 s:** nothing documents delivery time. The spikes give only a
+     ceiling: 7 socket sends reached the transcript 3.5 to 11.5 s after the
+     command started, a figure that includes Node start-up and the user's
+     approval of the command (Windows, idle panels, 2.1.293). The mod's
+     `continued` was never timed. 60 s is about 5× the slowest.
+   - **Measure it** [decided]: the smoke kit records send-to-confirm time for
+     both transports, so the window can later rest on measurements.
 4. **What's no longer needed.** The reopen-stale-tab offer (#7) isn't needed
    after a continue in place, because there's no second process. The
    busy-folder coordination sentence is still appended to the prompt.
@@ -421,5 +434,5 @@ The extension uses the mod only on a matching major version.
 6. *(Answered 2026-10-10: a late fire that would only offer is dropped too,
    and the offer-only route goes entirely; see D12.)*
 7. *(Answered 2026-10-11: the fire-time table and the testing plan are
-   approved.)* Still open: the confirm window before falling back to a launch;
-   see "Continuing in place", step 3.
+   approved. The confirm window is 60 s, with a last look before falling back,
+   and the smoke kit measures it.)*
