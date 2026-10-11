@@ -20,7 +20,7 @@ Tick a task's box here when its commit lands, and commit this file with it, so a
 - [x] Task 4: Session record fields for the inbox
 - [x] Task 5: `inbox.ts`, the socket transport
 - [x] Task 6: The mod
-- [ ] Task 7: `modStatus.ts`, the extension's half of the mod protocol
+- [x] Task 7: `modStatus.ts`, the extension's half of the mod protocol
 - [ ] Task 8: `continueInPlace.ts`
 - [ ] Task 9: `sessionOpener.ts`, the open-session button
 - [ ] Task 10: Wire continue-in-place, the waiting notice and the bridged head start into `extension.ts`
