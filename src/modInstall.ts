@@ -28,13 +28,16 @@ export function marketplaceJson(): string {
   );
 }
 
-/** Whether `claude plugin list --json` output holds the mod. Unparseable output reads as not installed. */
-export function isModInstalled(listJson: string): boolean {
+/** Whether `claude plugin list --json` output holds the mod; undefined when the output is not a plugin list at all (can't tell, like a failed listing). */
+export function isModInstalled(listJson: string): boolean | undefined {
   try {
     const list: unknown = JSON.parse(listJson);
-    return Array.isArray(list) && list.some((e) => typeof e === 'object' && e !== null && (e as { id?: unknown }).id === MOD_ID);
+    if (!Array.isArray(list)) {
+      return undefined;
+    }
+    return list.some((e) => typeof e === 'object' && e !== null && (e as { id?: unknown }).id === MOD_ID);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -140,6 +143,8 @@ export interface ModDeps {
   storeVersion: (v: string | undefined) => Promise<void>;
   notify: (message: string, level: 'info' | 'warn') => void;
   log: (message: string) => void;
+  /** Delete the mod's status files (`~/.limit-break/sessions/*.json`), errors ignored. */
+  clearStatusFiles: () => void;
 }
 
 const stepText = (step: string[]) => `claude ${step.join(' ')}`;
@@ -184,12 +189,13 @@ export async function updateMod(d: ModDeps): Promise<void> {
 /**
  * Remove the mod. Uninstalls only when it is installed, but always tries to
  * remove the marketplace, so a half-finished install does not leave one
- * registered. The stored version is cleared once the plugin is gone.
+ * registered. The stored version and the mod's status files are cleared once the
+ * plugin is gone.
  */
 export async function removeMod(d: ModDeps): Promise<void> {
   let installed: boolean;
   try {
-    installed = isModInstalled(await listInstalledPlugins(d.run));
+    installed = isModInstalled(await listInstalledPlugins(d.run)) ?? true; // unparseable: cannot tell either
   } catch {
     installed = true; // cannot tell; let uninstall find out
   }
@@ -209,6 +215,8 @@ export async function removeMod(d: ModDeps): Promise<void> {
   }
   if (pluginGone) {
     await d.storeVersion(undefined);
+    // A stale status file would make the extension send a control message to a session that no longer has the mod.
+    d.clearStatusFiles();
   }
   const first = failures[0];
   if (!first) {

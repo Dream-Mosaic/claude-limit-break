@@ -52,6 +52,15 @@ test('a valid control message is consumed, becomes a user prompt, and is recorde
   expect(w.status('S1')!.continued.map((c) => c.jobId)).toEqual(['j1']);
 });
 
+test('a control message whose origin is peer-send-message is accepted too', async ($, on) => {
+  const w = await world($, on);
+  expect(await $.session.receive({ origin: { kind: 'peer-send-message' }, text: message(JOB) })).toEqual(CONSUMED);
+  w.open();
+  await w.clock.settle();
+  expect(w.submitted).toEqual(['[Limit Break] continue']);
+  expect(w.status('S1')!.continued.map((c) => c.jobId)).toEqual(['j1']);
+});
+
 test('the same message sent twice submits once, even while the first is still waiting', async ($, on) => {
   const w = await world($, on);
   expect(await $.session.receive({ origin: { kind: 'peer' }, text: message(JOB) })).toEqual(CONSUMED);

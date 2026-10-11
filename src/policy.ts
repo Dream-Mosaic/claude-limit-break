@@ -86,6 +86,7 @@ export function planResume(
       // Which usage limit stopped the session, when known: decideOnFire stands down for native auto-continue only for the five-hour one.
       ...(hit.detection.rateLimitType !== undefined ? { rateLimitType: hit.detection.rateLimitType } : {}),
       // The native auto-continue check's baseline. resolveSession reports 0 for an unreadable size; that is "unknown", not a baseline every transcript has grown past.
-      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),    },
+      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
+    },
   };
 }

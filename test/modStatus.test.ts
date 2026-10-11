@@ -55,6 +55,16 @@ test('the mod is used only for this session, this protocol, and this process', (
   assert.equal(modUsable(undefined, SID, 4_000), false);
 });
 
+test('a malformed nativeContinue or continued entry is dropped, not trusted', () => {
+  const good = { type: 'quota_auto_resume', atMs: 7 };
+  assert.deepEqual(parseModStatus(status({ nativeContinue: good }))?.nativeContinue, good);
+  for (const bad of [{ type: 'x', atMs: 'soon' }, { type: 'x' }, { atMs: 7 }, { type: 4, atMs: 7 }, { type: 'x', atMs: null }, 'x']) {
+    assert.equal(parseModStatus(status({ nativeContinue: bad }))?.nativeContinue, undefined, JSON.stringify(bad));
+  }
+  const kept = parseModStatus(status({ continued: [{ jobId: 'a', atMs: 1 }, { jobId: 'b' }, { jobId: 'c', atMs: 'x' }, { atMs: 2 }, 'd'] }));
+  assert.deepEqual(kept?.continued, [{ jobId: 'a', atMs: 1 }]);
+});
+
 test('a job counts as continued once the mod lists it', () => {
   assert.equal(continuedJob(parseModStatus(status({ continued: [{ jobId: 'j', atMs: 1 }] })), 'j'), true);
   assert.equal(continuedJob(parseModStatus(status()), 'j'), false);

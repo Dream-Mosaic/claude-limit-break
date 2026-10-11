@@ -78,6 +78,9 @@ async function recordContinued($, s, sessionId, jobId) {
   }
 }
 
+/** Where a message another session sent can be reported to arrive from (2.1.296 lists both). The control file's single-use nonce, not the origin, is what gates acceptance. */
+const PEER_ORIGINS = ['peer', 'peer-send-message'];
+
 /** @type {import('claude-code').Register} */
 export const register = (on) => {
   /** This process's status (rewritten whole on every change) and home directory. */
@@ -120,7 +123,7 @@ export const register = (on) => {
   });
 
   on('session.receive', async ($, e, next) => {
-    if (e.agentId !== undefined || e.origin.kind !== 'peer') {
+    if (e.agentId !== undefined || !PEER_ORIGINS.includes(e.origin.kind)) {
       return next(e);
     }
     const control = parseControl(e.text);

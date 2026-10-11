@@ -30,8 +30,9 @@ test('the marketplace lists the mod from ./mod', () => {
 test('installed means an entry with the mod id', () => {
   assert.equal(isModInstalled(JSON.stringify([{ id: 'limit-break@limit-break', enabled: true }])), true);
   assert.equal(isModInstalled(JSON.stringify([{ id: 'other@x' }])), false);
-  assert.equal(isModInstalled('not json'), false);
-  assert.equal(isModInstalled('{"id":"limit-break@limit-break"}'), false, 'not a list');
+  assert.equal(isModInstalled('[]'), false, 'a list without the mod is "not installed"');
+  assert.equal(isModInstalled('not json'), undefined, 'unparseable is "cannot tell"');
+  assert.equal(isModInstalled('{"id":"limit-break@limit-break"}'), undefined, 'not a list is "cannot tell"');
 });
 
 test('the CLI steps', () => {
@@ -116,7 +117,7 @@ const LIST_INSTALLED = JSON.stringify([{ id: 'limit-break@limit-break' }]);
 function harness(opts: { fail?: string[]; list?: string; stored?: string } = {}) {
   const ran: string[] = [];
   const notes: { m: string; level: string }[] = [];
-  const state = { version: opts.stored as string | undefined, copies: 0 };
+  const state = { version: opts.stored as string | undefined, copies: 0, cleared: 0 };
   const deps: ModDeps = {
     run: async (args) => {
       const line = args.join(' ');
@@ -133,6 +134,7 @@ function harness(opts: { fail?: string[]; list?: string; stored?: string } = {})
     storeVersion: async (v) => void (state.version = v),
     notify: (m, level) => notes.push({ m, level }),
     log: () => {},
+    clearStatusFiles: () => void (state.cleared += 1),
   };
   return { deps, ran, notes, state };
 }
@@ -189,6 +191,26 @@ test('remove when uninstall fails still removes the marketplace and keeps the ke
   assert.equal(h.state.version, '1.0.0');
   assert.equal(h.notes[0]?.level, 'warn');
   assert.match(h.notes[0]!.m, /plugin uninstall/);
+});
+
+test('remove when the plugin list cannot be read still attempts the uninstall', async () => {
+  const h = harness({ stored: '1.0.0', list: 'definitely not a plugin list' });
+  await removeMod(h.deps);
+  assert.deepEqual(h.ran, [
+    'plugin list --json',
+    'plugin uninstall limit-break@limit-break --scope user',
+    'plugin marketplace remove limit-break',
+  ]);
+  assert.equal(h.state.version, undefined);
+});
+
+test('remove clears the mod status files once the plugin is gone, and not when the uninstall failed', async () => {
+  const gone = harness({ stored: '1.0.0', list: LIST_INSTALLED });
+  await removeMod(gone.deps);
+  assert.equal(gone.state.cleared, 1);
+  const stuck = harness({ stored: '1.0.0', list: LIST_INSTALLED, fail: ['plugin uninstall'] });
+  await removeMod(stuck.deps);
+  assert.equal(stuck.state.cleared, 0, 'the mod is still there, so its status is still true');
 });
 
 test('copyMod refuses a missing source without touching the destination', () => {

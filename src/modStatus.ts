@@ -58,8 +58,17 @@ export function parseModStatus(text: string): ModStatus | undefined {
   }
   const continued = s.continued.filter(
     (c): c is { jobId: string; atMs: number } =>
-      typeof c === 'object' && c !== null && typeof (c as { jobId?: unknown }).jobId === 'string',
+      typeof c === 'object' &&
+      c !== null &&
+      typeof (c as { jobId?: unknown }).jobId === 'string' &&
+      Number.isFinite((c as { atMs?: unknown }).atMs),
   );
+  // Only a well-formed sighting: a bad `atMs` would make the native-continue check's toISOString() throw and skip its offer.
+  const seen = s.nativeContinue as { type?: unknown; atMs?: unknown } | null | undefined;
+  const nativeContinue =
+    typeof seen === 'object' && seen !== null && typeof seen.type === 'string' && Number.isFinite(seen.atMs)
+      ? { type: seen.type, atMs: seen.atMs as number }
+      : undefined;
   return {
     protocol: s.protocol,
     ...(typeof s.modVersion === 'string' ? { modVersion: s.modVersion } : {}),
@@ -67,9 +76,7 @@ export function parseModStatus(text: string): ModStatus | undefined {
     loadedAtMs: s.loadedAtMs,
     ...(typeof s.movedTo === 'string' ? { movedTo: s.movedTo } : {}),
     continued,
-    ...(typeof s.nativeContinue === 'object' && s.nativeContinue !== null
-      ? { nativeContinue: s.nativeContinue as { type: string; atMs: number } }
-      : {}),
+    ...(nativeContinue ? { nativeContinue } : {}),
   };
 }
 
