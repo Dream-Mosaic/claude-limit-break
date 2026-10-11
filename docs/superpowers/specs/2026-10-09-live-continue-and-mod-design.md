@@ -250,8 +250,8 @@ same goes for the stale-tab reopen and the open-session button.
 `parseAgentRows` drops background rows today, so `classifyHolder` reports
 `none` and the extension would go ahead.
 
-**Not designed yet** [user, 2026-10-09: a safety of this kind sounds right, but
-not before the problem is understood]. To understand first:
+**Not designed yet, and not part of 1.1: tracked in #53** [user, 2026-10-09: a
+safety of this kind sounds right, but not before the problem is understood]. To understand first:
 - How often a resume meets a background holder. If the parent session going
   down also takes its background jobs down, it may be rare. But the job here
   ran under a daemon (`backend: "daemon"`, with its own supervisor pid), so
@@ -416,8 +416,8 @@ The extension uses the mod only on a matching major version.
 4. *(Answered 2026-10-09: the bridged-panel grace is 5 minutes after the
    reset.)*
 5. **Background sessions.** *(Answered 2026-10-09: not a resume target. The
-   parent session manages its background sessions.)* Still open: what to do
-   about a session a background job holds; see that section. Not blocking 1.1.
+   parent session manages its background sessions.)* What to do about a
+   session a background job holds moved to #53; not part of 1.1.
 6. *(Answered 2026-10-10: a late fire that would only offer is dropped too,
    and the offer-only route goes entirely; see D12.)*
 7. **Still marked [proposed]:** the 1.1 column of the fire-time table (it
