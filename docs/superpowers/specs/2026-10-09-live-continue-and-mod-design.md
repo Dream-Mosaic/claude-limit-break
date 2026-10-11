@@ -56,7 +56,7 @@ This changes only the "live holder" branches of `scheduler.onFire`, the ones
 after the claim, continued-since, native-cancel and autoResume checks, which are
 unchanged. Today those branches are `holderPolicy.ts`'s `decideOnFire`.
 
-| Holder at fire | 1.0 | 1.1 [proposed] |
+| Holder at fire | 1.0 | 1.1 [decided] |
 |---|---|---|
 | None, or the listing failed | Launch a terminal | Unchanged |
 | Idle panel | Launch a terminal, then offer to reopen the stale tab | **Continue in place.** Use the mod if the session has it, otherwise the socket. If both fail, fall back to 1.0's launch. A bridged panel waits its head start first (D11). |
@@ -368,7 +368,7 @@ panel depends on it, not delivery.
 **Versioning.** The status file and the control payload both carry `protocol`.
 The extension uses the mod only on a matching major version.
 
-## Testing [proposed]
+## Testing [decided]
 
 - **Unit tests in the existing suite:**
   - transport choice and the decision table;
@@ -420,6 +420,6 @@ The extension uses the mod only on a matching major version.
    session a background job holds moved to #53; not part of 1.1.
 6. *(Answered 2026-10-10: a late fire that would only offer is dropped too,
    and the offer-only route goes entirely; see D12.)*
-7. **Still marked [proposed]:** the 1.1 column of the fire-time table (it
-   follows from D5, D8 and D9), the 30-second confirm before falling back to a
-   launch, and the testing plan. Confirm them in review.
+7. *(Answered 2026-10-11: the fire-time table and the testing plan are
+   approved.)* Still open: the confirm window before falling back to a launch;
+   see "Continuing in place", step 3.
