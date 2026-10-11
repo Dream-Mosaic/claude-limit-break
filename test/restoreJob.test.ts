@@ -175,19 +175,9 @@ test('a stored value that is not a job list at all restores nothing and does not
 });
 
 
-// offerOnly is the one persisted field whose loss would ESCALATE autonomy (an
-// offer-only weekly limit would launch on its own), so a bad value drops the
-// job rather than being repaired like rateLimitType.
-test('an offer-only job survives restoreJob with the flag intact', () => {
-  const result = restoreJob({ ...full(), offerOnly: true });
-  assert.ok('job' in result);
-  assert.equal(result.job.offerOnly, true);
-});
-
-for (const bad of [false, 'true', 1, null, {}]) {
-  test(`restoreJob drops a job whose offerOnly is ${JSON.stringify(bad)}`, () => {
-    const result = restoreJob({ ...full(), offerOnly: bad });
-    assert.ok('dropped' in result, 'an offerOnly that is not exactly true must not become an automatic resume');
-    assert.match(result.dropped, /offerOnly/);
+// 1.0 kept offer-only jobs; 1.1 keeps none, and a stored one must not become an automatic resume.
+test('restoreJob drops a stored offer-only job from 1.0', () => {
+  assert.deepEqual(restoreJob({ ...full(), offerOnly: true }), {
+    dropped: 'it is an offer-only resume from 1.0, which this version no longer keeps',
   });
-}
+});

@@ -55,16 +55,12 @@ function buildSessionLine(entry: {
   folderTrusted?: boolean;
   state?: 'counting' | 'ready';
   resumeAtMs?: number;
-  offerOnly?: true;
   gaveUpCause?: GaveUpCause;
 }): SessionLine {
   const id = `\`${entry.sessionId.slice(0, 8)}\``;
   const folder = entry.cwd ? escapeMarkdown(folderBasename(entry.cwd)) : '_no folder recorded_';
   const bits = [`${id} in ${folder}`];
-  if (entry.state === 'counting' && entry.resumeAtMs !== undefined && entry.offerOnly) {
-    // A reset beyond maxWaitHours: still waiting, but nothing launches at the deadline; Resume Now is offered then.
-    bits.push(`**manual**: Resume Now offered at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
-  } else if (entry.state === 'counting' && entry.resumeAtMs !== undefined) {
+  if (entry.state === 'counting' && entry.resumeAtMs !== undefined) {
     bits.push(`resuming at **${new Date(entry.resumeAtMs).toLocaleString()}**`);
   } else if (entry.state === 'ready') {
     bits.push('**ready**');
@@ -98,7 +94,6 @@ export function buildSessionLines(
     folderTrusted?: boolean;
     state?: 'counting' | 'ready';
     resumeAtMs?: number;
-    offerOnly?: true;
     gaveUpCause?: GaveUpCause;
   }
   const byId = new Map<string, Entry>();
@@ -109,7 +104,6 @@ export function buildSessionLines(
       folderTrusted: job.folderTrusted,
       state: 'counting',
       resumeAtMs: job.resumeAtMs,
-      ...(job.offerOnly ? { offerOnly: true as const } : {}),
     });
   }
   for (const job of ready) {
@@ -205,10 +199,7 @@ export class CountdownStatusBar {
 
     const remaining = soonest.resumeAtMs - Date.now();
     const others = waitingCount > 1 ? ` (${waitingCount} sessions)` : '';
-    // An offer-only job (a reset beyond maxWaitHours) counts down to an offer, not a resume, and the pill must not promise one.
-    this.item.text = soonest.offerOnly
-      ? `$(clock) Claude limit resets in ${formatDuration(remaining)}${others} (manual)`
-      : `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
+    this.item.text = `$(clock) Claude resumes in ${formatDuration(remaining)}${others}`;
     this.renderTooltip(lines, hasTrustLink, gaveUpCount > 0);
 
     // Nudge the colour as the deadline approaches so it reads at a glance.

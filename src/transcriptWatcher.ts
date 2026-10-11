@@ -474,7 +474,7 @@ export class TranscriptWatcher {
                                 rule: 'quota-limits',
                                 text: 'quotaLimits.resetsAt',
                                 ...(limitType !== undefined ? { rateLimitType: limitType } : {}),
-                                // Beyond maxWaitHours: offered at the reset, never resumed on its own.
+                                // Beyond maxWaitHours: announced, not scheduled.
                                 ...(verdict.kind === 'offerOnly' ? { offerOnly: true as const } : {}),
                             },
                             cwd,
@@ -508,7 +508,7 @@ export class TranscriptWatcher {
         // grace window.
         const compactionText = flagged ? undefined : compactionLimitText(entry);
         if (compactionText !== undefined) {
-            // A weekly limit during compaction is read like any other (the dated form, offer-only).
+            // A weekly limit during compaction is read like any other (the dated form, announced and not scheduled).
             const verdict = classifyLimit(compactionText, basis, maxWait, { trusted: true, readAt: now });
             if (verdict?.kind === 'detected') {
                 return { limit: { detection: verdict.detection, cwd, file } };

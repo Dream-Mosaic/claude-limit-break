@@ -57,28 +57,17 @@ Three consequences worth knowing:
 
 A weekly limit can reset days from now. Limit Break resumes automatically only
 when the reset is within `maxWaitHours` (24 hours by default), the same line
-Claude Code draws for its own auto-continue. A later reset is never resumed
-automatically:
+Claude Code draws for its own auto-continue. A later reset isn't scheduled:
 
 - When it is detected, you are told once (not once per window) when `notify`
-  is on; the output channel always logs it: "Limit Break:
-  session `<id8>` hit a weekly limit that resets `<date and time>`. That is
-  more than 24 hours away, so it won't resume automatically; Resume Now will
-  be offered when it resets." The job is kept like any other - across a
-  reload, and in the status bar, which marks it `(manual)`.
-- When it resets, Resume Now is offered - a notice with the button, and the
-  session joins the Resume Now list - exactly as with `autoResume` off.
-  Nothing is launched on its own. A session that has moved on since it
-  stopped is skipped silently, as always.
+  is on; the output channel always logs it: "Limit Break: session `<id8>` hit
+  a weekly limit that resets `<date and time>`. That's more than 24 hours away,
+  so it won't resume automatically." Nothing waits for it, so the status bar
+  doesn't show it.
+- When it resets, continue the session yourself.
 - Raising `maxWaitHours` turns a longer reset into an automatic one.
-- The latest detection decides. Each new limit hit is judged again, so if you
-  hit the same limit again once its reset is within `maxWaitHours`, the job
-  becomes automatic, and you are told once, when `notify` is on (the output
-  channel always logs it): "Limit Break: session `<id8>` hit its weekly limit
-  again. It resets within 24 hours, so it will now resume automatically at
-  `<time>`." An untrusted folder is called out in that notice, with the
-  "Open Claude to Trust" button, as for any automatic resume. It keeps the
-  resume time it already had.
+- Each new limit hit is judged again: hit the same limit once its reset is
+  within `maxWaitHours`, and it is scheduled like any other.
 - A reset more than 8 days out (or beyond `maxWaitHours`, if that is higher)
   is longer than any Claude usage limit, so it is taken as a misread and not
   picked up. Neither is one that has already
@@ -299,7 +288,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
 | `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | Passed as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
 | `maxResumeTokens` | `0` | Off by default. When set, refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. A session with no usage record is not checked. `0` never refuses; `500000` is a reasonable starting point. |
-| `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is not resumed automatically; Resume Now is offered when it resets. Each new limit hit is judged again, so a hit within this window resumes automatically even if an earlier one was only offered. A reset more than 8 days out, or beyond `maxWaitHours` if that is higher, is rejected as a misread. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
+| `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is announced once and not scheduled; continue the session yourself when it resets. Each new limit hit is judged again. A reset more than 8 days out, or beyond `maxWaitHours` if that is higher, is rejected as a misread. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
 | `transcriptPollSeconds` | `5` | Polling backstop, for when file watching is unreliable. |
 | `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |
 | `notify` | `true` | Notify on detection and on resume. |

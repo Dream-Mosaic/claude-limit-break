@@ -78,8 +78,8 @@ then run `node prepare.js stop 120 300`. `npm run compile` restores the floor.
 
 | # | What | Expect |
 |---|------|--------|
-| X1 | Weekly limit (C) | Notice says it will offer Resume Now at the reset, not resume itself |
-| X2 | Weekly offer | At C's reset (plus up to 1 min): a Resume Now offer, no terminal of its own |
+| X1 | Weekly limit (C) | Announced once at detection; nothing scheduled; no status-bar line |
+| X2 | Weekly limit (C), at its reset | Nothing happens: announced once at detection; nothing scheduled; no status-bar line |
 | X3 | Subagent limit (D) | No notice and nothing in the tooltip for D, AND the log shows `Turn ended in transcript agent-smoke.jsonl` with no `Limit detected in transcript agent-smoke.jsonl`. The turn-end line is written in the same append as D's limit, so it proves the file was read and the limit beside it skipped. A is the control: the identical limit in a main transcript is detected |
 | X4 | Cancel | Close the window, run steps 1-3 again, then status bar → "Cancel Pending Resume" (it cancels everything): the tooltip empties, nothing fires, and the log says how many were cancelled |
 | X5 | Two windows | Close all smoke windows, run step 1, `.\launch.ps1`, `.\launch.ps1 -Second` (a second VS Code instance with its own profile, titled ws-untrusted), then step 3. Both windows detect A and B; each session resumes in exactly one window, and the other window's log says `Resume for <id8> claimed by another window; dropping.` |

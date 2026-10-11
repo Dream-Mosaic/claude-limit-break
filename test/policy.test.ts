@@ -201,24 +201,16 @@ test('a first overload retry carries no backoff key', () => {
   assert.equal(Object.hasOwn(p.job, 'backoffMs'), false);
 });
 
-// A limit resetting beyond maxWaitHours is scheduled as usual (claim, status
-// bar, persistence) but marked offer-only, so the fire offers Resume Now
-// instead of launching.
-test('an offer-only detection puts offerOnly on the job', () => {
-  const at = new Date('2026-08-07T06:00:00Z');
-  const offer = { ...hit(at), detection: { ...hit(at).detection, offerOnly: true as const } };
-  const p = planResume(offer, 'limit', settings(), small, NOW, noJitter);
-  assert.equal(p.kind, 'schedule');
-  if (p.kind !== 'schedule') return;
-  assert.equal(p.job.offerOnly, true);
-  assert.equal(p.job.baseResumeAtMs, at.getTime(), 'scheduled for the stated reset, as any other limit');
-});
-
-test('an ordinary detection leaves offerOnly off the job, so a persisted job stays as it was', () => {
-  const p = planResume(hit(new Date('2026-08-03T17:00:00Z')), 'limit', settings(), small, NOW, noJitter);
-  assert.equal(p.kind, 'schedule');
-  if (p.kind !== 'schedule') return;
-  assert.equal(Object.hasOwn(p.job, 'offerOnly'), false);
+test('a reset beyond maxWaitHours plans nothing: it is announced, not scheduled (D12)', () => {
+  const resumeAt = new Date(NOW.getTime() + 3 * 24 * 3_600_000);
+  const offer = { detection: { resumeAt, text: 'weekly limit', rateLimitType: 'seven_day', offerOnly: true as const }, cwd: '/projects/example', file: FILE };
+  const expected = { kind: 'beyond', sessionId: ID, cwd: '/projects/example', resetAtMs: resumeAt.getTime(), rateLimitType: 'seven_day' };
+  assert.deepEqual(planResume(offer, 'limit', settings(), small, NOW, noJitter), expected);
+  // The budget is not consulted for a plan that is never scheduled.
+  const throwing = () => {
+    throw new Error('budget consulted');
+  };
+  assert.deepEqual(planResume(offer, 'limit', settings({ maxResumeTokens: 500_000 }), small, NOW, noJitter, throwing), expected);
 });
 
 test('a session with no usage record is unmeasured: scheduled, flagged, with no estimate', () => {

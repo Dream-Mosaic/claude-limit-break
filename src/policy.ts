@@ -7,7 +7,9 @@ export type Plan =
   | { kind: 'schedule'; job: PendingJob; estimate?: number; budgetUnmeasured?: true }
   // The session is named so a dismissed refusal can be recorded against it (gaveUp.ts).
   | { kind: 'refuse'; reason: string; sessionId: string; cwd?: string }
-  | { kind: 'ignore'; reason: string };
+  | { kind: 'ignore'; reason: string }
+  // A reset beyond maxWaitHours (D12): announced once at detection, never scheduled.
+  | { kind: 'beyond'; sessionId: string; cwd?: string; resetAtMs: number; rateLimitType?: string };
 
 export function planResume(
   hit: {
@@ -40,6 +42,15 @@ export function planResume(
     // No fallback to "the newest transcript somewhere". Resuming a session we
     // cannot name is how one project's prompt lands in another project.
     return { kind: 'ignore', reason: `Not a session transcript: ${hit.file}` };
+  }
+  if (hit.detection.offerOnly === true && hit.detection.resumeAt !== undefined) {
+    return {
+      kind: 'beyond',
+      sessionId: session.sessionId,
+      ...(session.cwd !== undefined ? { cwd: session.cwd } : {}),
+      resetAtMs: hit.detection.resumeAt.getTime(),
+      ...(hit.detection.rateLimitType !== undefined ? { rateLimitType: hit.detection.rateLimitType } : {}),
+    };
   }
   const verdict = checkBudget(settings.maxResumeTokens, readUsage?.(session.transcript));
   if (!verdict.allowed) {
@@ -75,9 +86,6 @@ export function planResume(
       // Which usage limit stopped the session, when known: decideOnFire stands down for native auto-continue only for the five-hour one.
       ...(hit.detection.rateLimitType !== undefined ? { rateLimitType: hit.detection.rateLimitType } : {}),
       // The native auto-continue check's baseline. resolveSession reports 0 for an unreadable size; that is "unknown", not a baseline every transcript has grown past.
-      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),
-      // A reset beyond maxWaitHours is scheduled like any other but only offered at fire. Absent, not false, otherwise.
-      ...(hit.detection.offerOnly === true ? { offerOnly: true as const } : {}),
-    },
+      ...(session.bytes > 0 ? { transcriptBytesAtDetection: session.bytes } : {}),    },
   };
 }

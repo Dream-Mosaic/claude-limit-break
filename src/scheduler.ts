@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import type { Logger } from './log';
 import { isSessionId } from './sessionResolver';
-import { RESET_GRACE_MS } from './parsers/limitParser';
 
 const STATE_KEY = 'claudeLimitBreak.pending';
 const TICK_MS = 1000;
@@ -27,8 +26,6 @@ export interface PendingJob {
   rateLimitType?: string;
   /** The overload backoff this job was planned with (overloadBackoff.ts). Already included in `baseResumeAtMs`; kept for the log. Absent for a limit and for a first overload retry. */
   backoffMs?: number;
-  /** The limit resets beyond maxWaitHours, so this job is never resumed automatically: scheduled like any other (claim, status bar, persistence) but its fire offers Resume Now instead of launching. Absent, never false, otherwise; restoreJob drops a stored job with any other value, since losing the flag would turn an offer into an automatic resume. */
-  offerOnly?: true;
 }
 
 export interface MementoLike {
@@ -82,9 +79,9 @@ export function restoreJob(raw: unknown): RestoreResult {
   if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
     return { dropped: 'its folderTrusted is not a boolean' };
   }
-  // Dropped, never repaired: deleting a bad offerOnly would turn a promised offer into an automatic resume.
-  if (j.offerOnly !== undefined && j.offerOnly !== true) {
-    return { dropped: 'its offerOnly is not true' };
+  // 1.0 kept a job for a reset beyond maxWaitHours and only offered it at the fire; 1.1 announces such a reset at detection and keeps nothing.
+  if (j.offerOnly !== undefined) {
+    return { dropped: 'it is an offer-only resume from 1.0, which this version no longer keeps' };
   }
   const badType = j.rateLimitType !== undefined && (typeof j.rateLimitType !== 'string' || j.rateLimitType === '');
   if (j.baseResumeAtMs !== undefined && j.jitterMs !== undefined && !badType) {
@@ -129,14 +126,11 @@ export class ResumeScheduler {
 
   private readonly onFireEmitter = new vscode.EventEmitter<PendingJob>();
   private readonly onChangeEmitter = new vscode.EventEmitter<PendingJob | undefined>();
-  private readonly onUpgradeEmitter = new vscode.EventEmitter<PendingJob>();
 
   /** Fires once for each job whose cooldown elapses. */
   readonly onFire = this.onFireEmitter.event;
   /** Fires with the soonest pending job whenever any job is set, cleared or ticks down. */
   readonly onChange = this.onChangeEmitter.event;
-  /** Fires with an offer-only job that a same-reset automatic re-detection has just made automatic, so the user can be told. */
-  readonly onUpgrade = this.onUpgradeEmitter.event;
 
   constructor(
     private readonly memento: MementoLike,
@@ -166,46 +160,10 @@ export class ResumeScheduler {
    * Arm a resume for the job's session. A later deadline never replaces an earlier one still counting down for the same session, or repeated notices for one cooldown would keep pushing the resume out. Other sessions' deadlines are never compared.
    *
    * `baseResumeAtMs` (the un-jittered reset) is compared too, not just `resumeAtMs`: planResume re-rolls jitter on every detection, so a repeat notice for the identical reset can have an EARLIER `resumeAtMs` and would replace the job. The same base means the same reset, so it is dropped either way, keeping the first schedule.
-   *
-   * For an offer-only job the latest detection decides. A re-detection of the same reset (bases within RESET_GRACE_MS, since a second read can differ by a second) is handled before any jitter comparison:
-   * - automatic (the session hit the limit again within maxWaitHours of the reset): the scheduled job is made automatic in place, keeping its fire time and base so its claim key and hold deadline do not move. `onUpgrade` fires so the user is told; the return is false, as for any re-detection that did not schedule anew.
-   * - offer-only again: nothing changes.
-   * An automatic job is never made offer-only for the same reset; a real detection cannot do that (the time left only shrinks), so it is refused and logged as unexpected.
    */
   schedule(job: PendingJob): boolean {
     const existing = this.pending.get(job.sessionId);
     if (existing && existing.resumeAtMs >= Date.now()) {
-      const sameLimitReset =
-        existing.reason === 'limit' &&
-        job.reason === 'limit' &&
-        Math.abs(existing.baseResumeAtMs - job.baseResumeAtMs) <= RESET_GRACE_MS;
-      // Each of the three offer-only branches below returns, so each first takes the newer evidence the re-detection carries, as the plain same-reset drop further down does. Only there: two automatic jobs keep that drop's exact-base rule, which tells a different reset minutes apart from a re-read.
-      const touchesOffer = sameLimitReset && (existing.offerOnly === true || job.offerOnly === true);
-      if (touchesOffer) {
-        this.adoptReDetection(existing, job);
-      }
-      if (sameLimitReset && existing.offerOnly && !job.offerOnly) {
-        delete existing.offerOnly;
-        this.persist();
-        this.log.info(
-          `Re-detection of the same reset for ${job.sessionId} falls within maxWaitHours; ` +
-            `its offer-only resume is now automatic, still at ${new Date(existing.resumeAtMs).toISOString()}.`,
-        );
-        this.onChangeEmitter.fire(this.current);
-        this.onUpgradeEmitter.fire(existing);
-        return false;
-      }
-      if (sameLimitReset && existing.offerOnly && job.offerOnly) {
-        this.log.info(`Ignoring an offer-only re-detection of the same reset for ${job.sessionId}; already waiting to offer it.`);
-        return false;
-      }
-      if (sameLimitReset && !existing.offerOnly && job.offerOnly) {
-        this.log.warn(
-          `Unexpected: an offer-only re-detection of a reset ${job.sessionId} already resumes automatically; ` +
-            'keeping the automatic resume.',
-        );
-        return false;
-      }
       const sameReset = existing.baseResumeAtMs === job.baseResumeAtMs;
       if (job.resumeAtMs > existing.resumeAtMs || (sameReset && job.resumeAtMs < existing.resumeAtMs)) {
         if (sameReset) {
@@ -349,6 +307,5 @@ export class ResumeScheduler {
     this.stopTicking();
     this.onFireEmitter.dispose();
     this.onChangeEmitter.dispose();
-    this.onUpgradeEmitter.dispose();
   }
 }

@@ -277,11 +277,6 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(`Released this window's own claim on ${freshKey} so the fresh plan can fire.`);
     }
     warnIfUntrusted(job);
-    if (job.offerOnly) {
-      // "resuming at" would be a lie for a job that only offers.
-      announceOfferOnly(job, s);
-      return;
-    }
     if (s.notify) {
       const at = new Date(job.resumeAtMs).toLocaleTimeString();
       showResumeNotice(
@@ -322,43 +317,18 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Tell the user at detection that a limit resetting beyond maxWaitHours will
-   * not resume on its own. Always logged; shown once across windows via its own
-   * claim (the fire's key plus a suffix, held to the same deadline). A same-reset
-   * re-detection in this window never gets here: the scheduler keeps the
-   * offer-only job or upgrades it in place (announceUpgrade). Honours `notify`.
-   */
-  const announceOfferOnly = (job: PendingJob, s: Settings): void => {
-    const label = limitLabel(job);
-    const message =
-      `Limit Break: session ${job.sessionId.slice(0, 8)} hit ${article(label)} ${label} limit that resets ` +
-      `${new Date(job.baseResumeAtMs).toLocaleString()}. That is more than ${s.maxWaitHours} hours away, ` +
-      `so it won't resume automatically; Resume Now will be offered when it resets.`;
-    announceOnce(job, s, 'offer-notice', message, 'offer-only');
-  };
-
-  /**
-   * An offer-only job that a same-reset re-detection made automatic
-   * (scheduler.onUpgrade). Told once across windows, on a claim of its own.
-   */
-  const announceUpgrade = (job: PendingJob, s: Settings): void => {
-    const message =
-      `Limit Break: session ${job.sessionId.slice(0, 8)} hit its ${limitLabel(job)} limit again. ` +
-      `It resets within ${s.maxWaitHours} hours, so it will now resume automatically at ` +
-      `${new Date(job.resumeAtMs).toLocaleTimeString()}.`;
-    // It now resumes unattended, so call out an untrusted folder as a fresh
-    // schedule does.
-    warnIfUntrusted(job);
-    announceOnce(job, s, 'upgrade-notice', message, 'upgrade', () => showResumeNotice(job, message));
-  };
-
-  /**
    * Log `message`, then - with `notify` on - show it unless another window
    * already has: the claim on the job's fire key plus `-<suffix>` (never the
    * fire's own claim), held to the fire claim's own deadline.
    */
   const announceOnce = (
-    job: PendingJob,
+    job: {
+      sessionId: string;
+      baseResumeAtMs: number;
+      resumeAtMs: number;
+      reason: 'limit' | 'overload';
+      entryTimestampMs?: number;
+    },
     s: Settings,
     suffix: string,
     message: string,
@@ -378,6 +348,26 @@ export function activate(context: vscode.ExtensionContext): void {
     show();
   };
 
+  /**
+   * D12: a limit that resets beyond maxWaitHours is told once (across windows,
+   * on its own claim) and never scheduled. Someone at the prompt continues it
+   * themselves; hitting it again within maxWaitHours schedules an ordinary resume.
+   */
+  const announceBeyond = (plan: { sessionId: string; resetAtMs: number; rateLimitType?: string }, s: Settings): void => {
+    const label = limitLabel(plan);
+    const message =
+      `Limit Break: session ${plan.sessionId.slice(0, 8)} hit ${article(label)} ${label} limit that resets ` +
+      `${new Date(plan.resetAtMs).toLocaleString()}. That's more than ${s.maxWaitHours} hours away, ` +
+      `so it won't resume automatically.`;
+    announceOnce(
+      { sessionId: plan.sessionId, baseResumeAtMs: plan.resetAtMs, resumeAtMs: plan.resetAtMs, reason: 'limit' },
+      s,
+      'beyond-notice',
+      message,
+      'beyond-maxWaitHours',
+    );
+  };
+
   const onDetection = (hit: Parameters<typeof planResume>[0], reason: 'limit' | 'overload') => {
     const s = settings();
     // An overload retry's backoff comes from this session's consecutive count;
@@ -388,6 +378,13 @@ export function activate(context: vscode.ExtensionContext): void {
     const plan = planResume(hit, reason, s, statBytes, new Date(), randomJitterMs, readUsage, backoffMs ?? 0);
     if (plan.kind === 'ignore') {
       log.info(plan.reason);
+      return;
+    }
+    if (plan.kind === 'beyond') {
+      if (gaveUp.detected(plan.sessionId)) {
+        render();
+      }
+      announceBeyond(plan, s);
       return;
     }
     if (backoffMs === undefined) {
@@ -442,7 +439,7 @@ export function activate(context: vscode.ExtensionContext): void {
           backoffMs,
         );
         if (forced.kind !== 'schedule') {
-          log.warn(`Could not resume ${hit.file} even with the budget lifted: ${forced.reason}`);
+          log.warn(`Could not resume ${hit.file} even with the budget lifted: ${forced.kind === 'beyond' ? 'its reset is beyond maxWaitHours' : forced.reason}`);
           return;
         }
         log.info(`Budget overridden by hand for ${forced.job.sessionId}.`);
@@ -1144,7 +1141,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void handleStalePanel(hit);
     }),
-    scheduler.onUpgrade((job) => announceUpgrade(job, settings())),
     scheduler.onChange(() => {
       // Every listed and ready session, not just the soonest; refreshTrust's mtime
       // cache keeps a tick to a bare stat per job.
@@ -1212,16 +1208,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (standDownOnNativeCancel(job, claimKey, job.transcriptBytesAtDetection)) {
         return;
       }
-      // An offer-only job (reset beyond maxWaitHours) takes this path whatever
-      // autoResume says; after the claim and continued-since checks so a moved-on
-      // session stays silent.
-      if (!s.autoResume || job.offerOnly) {
+      if (!s.autoResume) {
         rememberReady(job);
-        log.info(
-          job.offerOnly
-            ? `Cooldown elapsed for ${job.sessionId}; its limit reset beyond maxWaitHours, so it is offered, not resumed.`
-            : `Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`,
-        );
+        log.info(`Cooldown elapsed for ${job.sessionId}; autoResume is off, so it is waiting for you.`);
         offerResumeNow(
           job,
           claimKey,

@@ -20,8 +20,8 @@ export interface LimitDetection {
    */
   rateLimitType?: string;
   /**
-   * The reset lies beyond maxWaitHours but within {@link MAX_RESET_DAYS}: scheduled but never
-   * resumed automatically; Resume Now is offered at the reset. Absent (not false) otherwise.
+   * The reset lies beyond maxWaitHours but within {@link MAX_RESET_DAYS}: announced, not
+   * scheduled; the user continues the session themselves. Absent (not false) otherwise.
    */
   offerOnly?: true;
 }
@@ -55,7 +55,7 @@ export interface LimitRejection {
  */
 export type ResetVerdict = { kind: 'auto'; at: Date } | { kind: 'offerOnly'; at: Date } | LimitRejection;
 
-/** What a limit notice's text means: a detection (offer-only or not), or why it is not one. */
+/** What a limit notice's text means: a detection (announced-not-scheduled or not), or why it is not one. */
 export type LimitVerdict = { kind: 'detected'; detection: LimitDetection } | LimitRejection;
 
 /** Strip ANSI SGR/CSI/OSC sequences that terminal output is full of. */
@@ -577,7 +577,7 @@ function resolveClockTime(m: RegExpExecArray, now: Date, zone?: string): Date | 
 export const RESET_GRACE_MS = 15 * 60_000;
 
 /**
- * Scan text for a usage-limit notice. Returns the detection (offer-only or not), or undefined
+ * Scan text for a usage-limit notice. Returns the detection (announced-not-scheduled or not), or undefined
  * for both "not a notice" and "a notice that cannot be scheduled"; use {@link classifyLimit}
  * to tell those apart.
  *
@@ -585,7 +585,7 @@ export const RESET_GRACE_MS = 15 * 60_000;
  * `opts.readAt` is the real current time, used only to judge whether a passed reset is within
  * {@link RESET_GRACE_MS}; it defaults to `now`.
  *
- * `maxWaitHours` decides automatic versus offer-only; a reset beyond the larger of
+ * `maxWaitHours` decides automatic versus announced-not-scheduled; a reset beyond the larger of
  * {@link MAX_RESET_DAYS} and maxWaitHours is rejected as a misread.
  */
 export function detectLimit(
@@ -672,7 +672,7 @@ export function classifyLimit(
  * same grace and horizon rules a parsed notice gets. It wins over the text because nothing
  * can be misread; it is checked only for staleness and absurdity (beyond the larger of {@link MAX_RESET_DAYS} and maxWaitHours).
  *
- * The result says which outcome it is: automatic, offer-only, or rejected with a reason.
+ * The result says which outcome it is: automatic, announced-not-scheduled, or rejected with a reason.
  * `now` is the real time, used for both horizons and the grace check.
  */
 export function resolveStructuredReset(
