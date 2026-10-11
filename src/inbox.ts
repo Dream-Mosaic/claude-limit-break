@@ -67,22 +67,49 @@ export function findPeerToken(
 }
 
 /**
- * Connect, write `lines`, and close after `closeAfterMs` (spike S1 closed after 2 s, which is what was tested). Resolves once written; rejects if the connection fails (no such pipe: the process is gone) or errors before the write.
+ * Connect, write `lines`, and close `closeAfterMs` later (spike S1 closed after 2 s, which is what was tested). Always settles: resolves once written; rejects if the connection fails (no such pipe: the process is gone), the write fails, the socket closes before the write, or `timeoutMs` passes first (the socket is then destroyed).
  */
-export function sendToInbox(socketPath: string, lines: readonly string[], closeAfterMs = 2_000): Promise<void> {
+export function sendToInbox(
+  socketPath: string,
+  lines: readonly string[],
+  closeAfterMs = 2_000,
+  timeoutMs = 5_000,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    let written = false;
+    let settled = false;
+    let endTimer: NodeJS.Timeout | undefined;
     const socket = net.createConnection({ path: socketPath });
-    socket.on('error', (err) => {
-      if (!written) {
-        reject(err);
+    const settle = (err?: Error): void => {
+      if (settled) {
+        return;
       }
+      settled = true;
+      clearTimeout(deadline);
+      if (err) {
+        socket.destroy();
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+    const deadline = setTimeout(() => settle(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+    socket.on('error', (err) => settle(err));
+    socket.on('close', () => {
+      clearTimeout(endTimer);
+      settle(new Error('closed before the write completed'));
     });
     socket.on('connect', () => {
-      socket.write(lines.join(''), () => {
-        written = true;
-        resolve();
-        setTimeout(() => socket.end(), closeAfterMs).unref?.();
+      socket.write(lines.join(''), (err) => {
+        if (err) {
+          settle(err);
+          return;
+        }
+        settle();
+        endTimer = setTimeout(() => {
+          socket.end();
+          socket.destroy();
+        }, closeAfterMs);
+        endTimer.unref?.();
       });
     });
   });

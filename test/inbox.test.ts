@@ -61,3 +61,31 @@ test('sendToInbox writes the lines in order to a live socket', async () => {
 test('sendToInbox rejects at once when nothing listens (the process is gone)', async () => {
   await assert.rejects(sendToInbox(pipePath(), ['a\n'], 50));
 });
+
+test('sendToInbox settles when the server drops the connection on accept', async () => {
+  const where = pipePath();
+  const server = net.createServer((s) => s.destroy());
+  await new Promise<void>((r) => server.listen(where, r));
+  try {
+    await Promise.race([
+      sendToInbox(where, ['a\n'], 50, 2_000).then(() => undefined, () => undefined),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('did not settle')), 4_000)),
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
+test('sendToInbox honours a tiny deadline: it settles, and never hangs', async () => {
+  const where = pipePath();
+  const server = net.createServer(() => undefined);
+  await new Promise<void>((r) => server.listen(where, r));
+  try {
+    await Promise.race([
+      sendToInbox(where, ['a\n'], 50, 1).then(() => undefined, () => undefined),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('did not settle')), 4_000)),
+    ]);
+  } finally {
+    server.close();
+  }
+});
