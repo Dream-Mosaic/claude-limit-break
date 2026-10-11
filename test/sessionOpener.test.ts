@@ -10,7 +10,8 @@ function deps(over: Partial<OpenerDeps> = {}) {
     commands: async () => [PANEL_OPEN_COMMAND],
     executeCommand: async (...args) => { executed.push(args); },
     terminals: () => [10, 20].map((pid) => ({ processId: Promise.resolve(pid), show: () => shown.push(pid) })),
-    parentPid: async (pid) => ({ 300: 200, 200: 20 } as Record<number, number>)[pid],
+    parentPid: async (pid) => ({ 300: 200, 200: 20, 1: 5000, 5000: 6000 } as Record<number, number>)[pid],
+    hostPid: 6000,
     ...over,
   };
   return { d, executed, shown };
@@ -20,6 +21,33 @@ test('a panel opens through the Claude Code extension when it has the command', 
   const { d, executed } = deps();
   assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, d), true);
   assert.deepEqual(executed, [[PANEL_OPEN_COMMAND, SID]]);
+});
+
+test('a panel whose claude process descends from the extension host of this window opens', async () => {
+  const { d, executed } = deps({ hostPid: 6000 });
+  assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, d), true);
+  assert.deepEqual(executed, [[PANEL_OPEN_COMMAND, SID]]);
+});
+
+test('a panel held by another window is not opened, and the command is not run (it would start a second panel)', async () => {
+  const { d, executed } = deps({ hostPid: 7777 });
+  assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, d), false);
+  assert.deepEqual(executed, []);
+});
+
+test('a host four ancestors up still counts; five does not', async () => {
+  const chain: Record<number, number> = { 1: 2, 2: 3, 3: 4, 4: 5, 5: 6 };
+  const four = deps({ parentPid: async (pid) => chain[pid], hostPid: 5 });
+  assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, four.d), true);
+  const five = deps({ parentPid: async (pid) => chain[pid], hostPid: 6 });
+  assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, five.d), false);
+  assert.deepEqual(five.executed, []);
+});
+
+test('a parent-pid failure for a panel means the command is not run', async () => {
+  const { d, executed } = deps({ parentPid: async () => { throw new Error('boom'); }, hostPid: 6000 });
+  assert.equal(await openSession({ kind: 'panel', pid: 1, sessionId: SID }, d), false);
+  assert.deepEqual(executed, []);
 });
 
 test('without the command, a panel cannot be opened', async () => {

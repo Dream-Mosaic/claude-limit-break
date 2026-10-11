@@ -49,10 +49,11 @@ node inject.js overload     # B hits a server overload now
 | L2 | Idle panel, mod | Leave A's panel open and idle at the injected limit. At the reset: no new terminal; the log says `Continued session <A> in place by mod (confirmed after N ms)`; the transcript has no branch points. Record N. |
 | L3 | Idle panel, socket | Remove the mod (command), restart the panel, repeat L2: `by socket`; the panel shows "Message from @limit-break". Record N. |
 | L4 | Idle terminal (#29) | A open in a terminal instead, native auto-continue off: continued in place, no second terminal. |
-| L5 | Fallback | Point `messagingSocketPath` at nothing (close the panel right after the listing; or edit the record): the send fails, and it falls back to a launch at once. |
+| L5 | Fallback | Point `messagingSocketPath` at nothing (close the panel right after the listing; or edit the record): the send fails, and a panel falls back to a launch at once. With A in a terminal instead, nothing launches: the job is remembered and "Resume in Terminal Anyway" is offered (Resume Now shows the fork modal first). |
 | L6 | Waiting | Leave A at a permission prompt at the reset: the waiting notice; Open Session focuses the panel. |
 | L7 | Late fire | Close VS Code before A's reset; reopen more than 10 minutes after it: nothing resumes; the log says it came due while VS Code wasn't running. |
 | L8 | Open button, terminal | As L6 with A in a terminal: Open Session shows that terminal. |
+| L9 | Open button, other window | With `watchScope: machine`, as L6 but click Open Session in the window that does NOT hold A's waiting panel: nothing opens (no second panel), and the notice says the session is open in another VS Code window. |
 
 Record L2 and L3's N in `docs/research/` with the date and Claude Code version; the 60 s window should rest on these.
 

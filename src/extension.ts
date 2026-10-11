@@ -45,6 +45,7 @@ import {
 import {
   decideOnFire,
   manualResumeWarning,
+  terminalOffer,
   buildResumePrompt,
   peerLabel,
   busyAtClickNotice,
@@ -60,7 +61,7 @@ import {
 } from './continueInPlace';
 import { findPeerToken, sendToInbox } from './inbox';
 import { limitBreakDir, statusFile, controlFile, parseModStatus } from './modStatus';
-import { openSession, parentPidCommand } from './sessionOpener';
+import { openSession, panelInThisWindow, parentPidCommand } from './sessionOpener';
 import { randomUUID } from 'node:crypto';
 import { autoContinueEnabled } from './autoContinue';
 import { sessionRegistryDir, readSessionRecord } from './sessionRegistry';
@@ -916,11 +917,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /**
-   * Continue `job` in its live holder (continueInPlace.ts). Resolves whether the job is discharged: continued, landed late, or launched after a fallback. False only when the fallback launch itself could not start.
+   * Continue `job` in its live holder (continueInPlace.ts). Resolves whether the job is discharged: continued, landed late, or launched after a fallback. False only when the fallback launch itself could not start, or the user declined the fork modal.
+   *
+   * A fallback from a PANEL launches a terminal (spec-decided). A fallback from a TERMINAL never auto-launches a second writer beside a live terminal, as in 1.0: an automatic fire remembers the job and offers "Resume in Terminal Anyway" (and keeps its claim); a manual one asks the fork modal first.
    */
   const continueHolder = async (
     job: PendingJob,
     pid: number,
+    kind: 'panel' | 'terminal',
     manual: boolean,
     generation = cancelGeneration,
   ): Promise<boolean> => {
@@ -948,6 +952,24 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(`Cancelled; not launching a terminal for session ${id8} after its in-place continue fell back.`);
       return true;
     }
+    if (kind === 'terminal') {
+      if (manual) {
+        log.warn(`Could not continue session ${id8} in place (${outcome.reason}); asking before launching a terminal beside the live one.`);
+        const warning = manualResumeWarning({ kind: 'terminal', pid, status: undefined }, id8);
+        if (warning) {
+          const pick = await Promise.resolve(vscode.window.showWarningMessage(warning.message, { modal: true }, warning.button));
+          if (pick !== warning.button) {
+            return false;
+          }
+        }
+        return resume(job, true);
+      }
+      const offer = terminalOffer(pid, id8, job.reason, job.rateLimitType);
+      log.warn(`Could not continue session ${id8} in place (${outcome.reason}). ${offer.logMessage}`);
+      rememberReady(job);
+      showHolderNotice(job, claimKeyFor(job), offer.notice);
+      return true;
+    }
     log.warn(`Could not continue session ${id8} in place (${outcome.reason}); launching a terminal instead.`);
     return resume(job, manual);
   };
@@ -958,10 +980,95 @@ export function activate(context: vscode.ExtensionContext): void {
       const rows = detectAgentRows();
       const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
       if (holder !== 'unknown' && holder.kind !== 'none' && isIdleStatus(holder.status)) {
-        return continueHolder(job, holder.pid, true);
+        return continueHolder(job, holder.pid, holder.kind, true);
       }
     }
     return resume(job, true);
+  };
+
+  /**
+   * The notice a fire shows when it declines to act (decideOnFire's `notice`): "Open Session" for a holder waiting on a prompt, or "Resume in Terminal Anyway" for an idle terminal Limit Break will not launch beside. The caller has already remembered the job where it should be. Also the outcome of a continue in place into a terminal that fell back.
+   */
+  const showHolderNotice = (
+    job: PendingJob,
+    claimKey: string,
+    notice: { message: string; button: string },
+    openTarget?: { pid: number; kind: 'panel' | 'terminal' },
+  ): void => {
+    void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then(async (choice) => {
+      if (choice !== notice.button) {
+        return;
+      }
+      if (openTarget) {
+        // One click, one walk up the process tree: the verdict on "another window" reuses it.
+        const parents = new Map<number, Promise<number | undefined>>();
+        const parentPid = (pid: number): Promise<number | undefined> => {
+          let p = parents.get(pid);
+          if (!p) {
+            p = readParentPid(pid);
+            parents.set(pid, p);
+          }
+          return p;
+        };
+        const opened = await openSession(
+          { ...openTarget, sessionId: job.sessionId },
+          {
+            commands: () => Promise.resolve(vscode.commands.getCommands(true)),
+            executeCommand: (id, ...args) => Promise.resolve(vscode.commands.executeCommand(id, ...args)),
+            terminals: () => [...vscode.window.terminals],
+            parentPid,
+            hostPid: process.pid,
+          },
+        );
+        if (!opened) {
+          // A panel outside this window: opening it would start a second Claude process, so nothing was opened.
+          const elsewhere = openTarget.kind === 'panel' && !(await panelInThisWindow(openTarget.pid, process.pid, parentPid));
+          void vscode.window.showInformationMessage(
+            elsewhere
+              ? `Limit Break: session ${job.sessionId.slice(0, 8)} is open in another VS Code window.`
+              : `Limit Break: couldn't find session ${job.sessionId.slice(0, 8)} in this window.`,
+          );
+        }
+        return;
+      }
+      // The offer used the holder snapshot from this fire and the notice does not
+      // auto-dismiss: look again, so a terminal the user has since returned to gets
+      // no second writer. The job stays remembered.
+      const rowsNow = detectAgentRows();
+      const holderNow =
+        rowsNow === 'unknown' ? 'unknown' : classifyHolder(rowsNow, job.sessionId, undefined, readHolderRecord);
+      const busyNow = busyAtClickNotice(holderNow, job.sessionId.slice(0, 8));
+      if (busyNow) {
+        log.info(busyNow);
+        void vscode.window.showInformationMessage(busyNow);
+        return;
+      }
+      // Then ask about a session that has moved on, like every manual path.
+      if (!(await confirmNotContinued(job))) {
+        return;
+      }
+      // Takes ownership (forgetReady) like the off-autoResume "Resume Now"
+      // button; no holder modal, since this button IS the confirmation.
+      if (!forgetReady(job.sessionId)) {
+        void vscode.window.showInformationMessage(
+          `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
+        );
+        return;
+      }
+      // This branch is reached only after decideOnFire declined to auto-resume,
+      // which KEEPS the fire's claim; it may be stale by click time. Like resumeNow,
+      // write/refresh our own claim before launching, ignoring its answer, so another
+      // window's automatic attempt cannot also fire. Release on a failed launch only
+      // if this call won the claim ('claimed', incl. stale takeover), never one
+      // another window holds.
+      const buttonClaim = claim(claimKey);
+      if (!resume(job, true)) {
+        rememberReady(job);
+        if (buttonClaim === 'claimed') {
+          releaseClaim(claimsDir(), claimKey, fs, log);
+        }
+      }
+    });
   };
 
   /**
@@ -1523,7 +1630,7 @@ export function activate(context: vscode.ExtensionContext): void {
               return;
             }
           }
-          if (!(await continueHolder(coordinated(job, rows), target.pid, false, generation))) {
+          if (!(await continueHolder(coordinated(job, rows), target.pid, target.kind, false, generation))) {
             rememberReady(job);
             releaseClaim(claimsDir(), claimKey, fs, log);
           }
@@ -1531,66 +1638,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       if (decision.notice) {
-        const notice = decision.notice;
-        void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then(async (choice) => {
-          if (choice !== notice.button) {
-            return;
-          }
-          if (decision.openSession) {
-            const opened = await openSession(
-              { ...decision.openSession, sessionId: job.sessionId },
-              {
-                commands: () => Promise.resolve(vscode.commands.getCommands(true)),
-                executeCommand: (id, ...args) => Promise.resolve(vscode.commands.executeCommand(id, ...args)),
-                terminals: () => [...vscode.window.terminals],
-                parentPid: (pid) => readParentPid(pid),
-              },
-            );
-            if (!opened) {
-              void vscode.window.showInformationMessage(
-                `Limit Break: couldn't find session ${job.sessionId.slice(0, 8)} in this window.`,
-              );
-            }
-            return;
-          }
-          // The offer used the holder snapshot from this fire and the notice does not
-          // auto-dismiss: look again, so a terminal the user has since returned to gets
-          // no second writer. The job stays remembered.
-          const rowsNow = detectAgentRows();
-          const holderNow =
-            rowsNow === 'unknown' ? 'unknown' : classifyHolder(rowsNow, job.sessionId, undefined, readHolderRecord);
-          const busyNow = busyAtClickNotice(holderNow, job.sessionId.slice(0, 8));
-          if (busyNow) {
-            log.info(busyNow);
-            void vscode.window.showInformationMessage(busyNow);
-            return;
-          }
-          // Then ask about a session that has moved on, like every manual path.
-          if (!(await confirmNotContinued(job))) {
-            return;
-          }
-          // Takes ownership (forgetReady) like the off-autoResume "Resume Now"
-          // button; no holder modal, since this button IS the confirmation.
-          if (!forgetReady(job.sessionId)) {
-            void vscode.window.showInformationMessage(
-              `Limit Break: session ${job.sessionId.slice(0, 8)} was already resumed or cancelled.`,
-            );
-            return;
-          }
-          // This branch is reached only after decideOnFire declined to auto-resume,
-          // which KEEPS the fire's claim; it may be stale by click time. Like resumeNow,
-          // write/refresh our own claim before launching, ignoring its answer, so another
-          // window's automatic attempt cannot also fire. Release on a failed launch only
-          // if this call won the claim ('claimed', incl. stale takeover), never one
-          // another window holds.
-          const buttonClaim = claim(claimKey);
-          if (!resume(job, true)) {
-            rememberReady(job);
-            if (buttonClaim === 'claimed') {
-              releaseClaim(claimsDir(), claimKey, fs, log);
-            }
-          }
-        });
+        showHolderNotice(job, claimKey, decision.notice, decision.openSession);
       }
       if (decision.awaitNativeContinue) {
         armNativeContinueCheck(job, claimKey);

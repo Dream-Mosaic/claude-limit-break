@@ -18,8 +18,10 @@ launching a second copy of it.
   terminal, is continued in the same process: through Limit Break's Claude Code
   mod when it is loaded there, otherwise through the session's inbox (the model
   sees that as a message from another session). If nothing takes within 60
-  seconds, or the session can't be reached, it falls back to a terminal launch;
-  a continue that lands late is never followed by a launch. The
+  seconds, or the session can't be reached, a panel falls back to a terminal
+  launch; an idle terminal falls back to 1.0's offer (remembered, with a
+  "Resume in Terminal Anyway" notice) rather than a second terminal. A continue
+  that lands late is never followed by a launch. The
   `continueInPlace` setting turns it off.
 - The Claude Code mod, shipped in the extension. It reports each session's
   limits to Limit Break and carries out Limit Break's continue. It never acts

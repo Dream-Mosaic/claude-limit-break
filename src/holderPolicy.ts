@@ -130,40 +130,8 @@ export function decideOnFire(
       logMessage: `Session ${shortId} is open in an idle terminal (pid ${holder.pid}); continuing it in place.`,
     };
   }
-  if (reason === 'overload') {
-    return {
-      resume: false,
-      remember: true,
-      logMessage:
-        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and hit a server error, which ` +
-        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
-      notice: {
-        message:
-          `Limit Break: session ${shortId} was stopped by a server error, and it is open in a terminal. ` +
-          `Continue it there.${SECOND_TERMINAL}`,
-        button: RESUME_IN_TERMINAL_BUTTON,
-      },
-    };
-  }
-  // A limit type other than five_hour: native auto-continue will not run, so standing down would strand the session. Same shape as the overload offer above. The label is Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); an unknown type is named by its raw key.
-  if (rateLimitType !== undefined && rateLimitType !== 'five_hour') {
-    // Own keys only: an inherited member ('constructor', '__proto__') is not a label.
-    const label = Object.hasOwn(RATE_LIMIT_LABELS, rateLimitType)
-      ? RATE_LIMIT_LABELS[rateLimitType]
-      : rateLimitType.replace(/_/g, ' ');
-    return {
-      resume: false,
-      remember: true,
-      logMessage:
-        `Session ${shortId} is open in a terminal (pid ${holder.pid}) and hit a ${label} limit, which ` +
-        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
-      notice: {
-        message:
-          `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
-          `Continue it there.${SECOND_TERMINAL}`,
-        button: RESUME_IN_TERMINAL_BUTTON,
-      },
-    };
+  if (reason === 'overload' || (rateLimitType !== undefined && rateLimitType !== 'five_hour')) {
+    return { resume: false, remember: true, ...terminalOffer(holder.pid, shortId, reason, rateLimitType) };
   }
   if (autoContinueOn) {
     return {
@@ -176,11 +144,52 @@ export function decideOnFire(
       awaitNativeContinue: true,
     };
   }
+  return { resume: false, remember: true, ...terminalOffer(holder.pid, shortId, reason, rateLimitType) };
+}
+
+/**
+ * The 1.0 outcome for an idle terminal Limit Break will not launch a second writer beside: a log line and the "Resume in Terminal Anyway" notice, worded by why Claude Code's own auto-continue does not cover it (a server error, a limit type other than five_hour, or the setting off). Used by {@link decideOnFire}, and by the fallback of a continue in place into a terminal, which takes this outcome rather than an automatic second terminal.
+ */
+export function terminalOffer(
+  pid: number,
+  shortId: string,
+  reason: 'limit' | 'overload',
+  rateLimitType: string | undefined,
+): { logMessage: string; notice: { message: string; button: string } } {
+  if (reason === 'overload') {
+    return {
+      logMessage:
+        `Session ${shortId} is open in a terminal (pid ${pid}) and hit a server error, which ` +
+        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
+      notice: {
+        message:
+          `Limit Break: session ${shortId} was stopped by a server error, and it is open in a terminal. ` +
+          `Continue it there.${SECOND_TERMINAL}`,
+        button: RESUME_IN_TERMINAL_BUTTON,
+      },
+    };
+  }
+  // A limit type other than five_hour: native auto-continue will not run, so standing down would strand the session. The label is Claude Code's own (limitParser.ts RATE_LIMIT_LABELS); an unknown type is named by its raw key.
+  if (rateLimitType !== undefined && rateLimitType !== 'five_hour') {
+    // Own keys only: an inherited member ('constructor', '__proto__') is not a label.
+    const label = Object.hasOwn(RATE_LIMIT_LABELS, rateLimitType)
+      ? RATE_LIMIT_LABELS[rateLimitType]
+      : rateLimitType.replace(/_/g, ' ');
+    return {
+      logMessage:
+        `Session ${shortId} is open in a terminal (pid ${pid}) and hit a ${label} limit, which ` +
+        `Claude Code's own auto-continue does not cover; not starting a second writer.`,
+      notice: {
+        message:
+          `Limit Break: the limit has reset for session ${shortId}, and it is open in a terminal. ` +
+          `Continue it there.${SECOND_TERMINAL}`,
+        button: RESUME_IN_TERMINAL_BUTTON,
+      },
+    };
+  }
   return {
-    resume: false,
-    remember: true,
     logMessage:
-      `Session ${shortId} is open in a terminal (pid ${holder.pid}) and auto-continue is off; ` +
+      `Session ${shortId} is open in a terminal (pid ${pid}) and auto-continue is off; ` +
       `not starting a second writer.`,
     notice: {
       message:

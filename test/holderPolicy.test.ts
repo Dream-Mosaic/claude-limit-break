@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice } from '../src/holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice, terminalOffer } from '../src/holderPolicy';
 
 const panel = (status: string | undefined, bridged = false) => ({ kind: 'panel' as const, pid: 77, bridged, status });
 const terminal = (status: string | undefined) => ({ kind: 'terminal' as const, pid: 88, status });
@@ -481,3 +481,16 @@ for (const [name, holder] of [['panel', panel('waiting')], ['terminal', terminal
     assert.equal(d.continueInPlace, undefined);
   });
 }
+
+test('terminalOffer words the 1.0 terminal offer by why native auto-continue does not cover it', () => {
+  const overload = terminalOffer(88, '0b3d1f66', 'overload', undefined);
+  assert.match(overload.notice.message, /stopped by a server error, and it is open in a terminal/);
+  const weekly = terminalOffer(88, '0b3d1f66', 'limit', 'seven_day');
+  assert.match(weekly.logMessage, /hit a .* limit, which Claude Code's own auto-continue does not cover/);
+  const off = terminalOffer(88, '0b3d1f66', 'limit', 'five_hour');
+  assert.match(off.logMessage, /auto-continue is off; not starting a second writer\./);
+  for (const offer of [overload, weekly, off]) {
+    assert.equal(offer.notice.button, 'Resume in Terminal Anyway');
+    assert.match(offer.notice.message, /Resuming here opens a second terminal on the same conversation\.$/);
+  }
+});

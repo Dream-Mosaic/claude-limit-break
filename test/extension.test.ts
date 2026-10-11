@@ -280,6 +280,26 @@ stubModule('./continueInPlace', {
   },
 });
 
+/**
+ * Parent pids the fake process-table lookup answers with during one test (sessionOpener's powershell / ps call); an unlisted pid has no readable parent. Everything else still reaches the real child_process.
+ */
+const parentPids = new Map<number, number>();
+const realChildProcess = require('node:child_process') as typeof import('node:child_process');
+stubModule('node:child_process', {
+  ...(realChildProcess as unknown as Record<string, unknown>),
+  execFile: (file: string, args: string[], ...rest: unknown[]) => {
+    if (file !== 'powershell' && file !== 'ps') {
+      return (realChildProcess.execFile as (...a: unknown[]) => unknown)(file, args, ...rest);
+    }
+    const callback = rest[rest.length - 1] as (err: Error | null, stdout: string) => void;
+    const pid = Number(/ProcessId=(\d+)/.exec(args.join(' '))?.[1] ?? args[args.length - 1]);
+    const parent = parentPids.get(pid);
+    setImmediate(() => (parent === undefined ? callback(new Error('no such process'), '') : callback(null, `${parent}
+`)));
+    return undefined;
+  },
+});
+
 /** Whether the fake modInstall says the mod should be offered during one test; default false so activation never offers it. */
 let offerMod = false;
 // listInstalledPlugins is stubbed so activation never runs `claude`.
@@ -5753,6 +5773,7 @@ test('a waiting panel at the reset gets the waiting notice, and its button opens
   sessionRecordFor.set(77, { sessionId: SESSION, entrypoint: 'claude-vscode' });
   const opened: unknown[] = [];
   vscodeFake.commands.set('claude-vscode.editor.open', (...args: unknown[]) => { opened.push(args); });
+  parentPids.clear(); parentPids.set(77, 5555); parentPids.set(5555, process.pid);
   vscodeFake.config = liveConfig();
   const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
   start(ctx);
@@ -5764,7 +5785,31 @@ test('a waiting panel at the reset gets the waiting notice, and its button opens
     assert.deepEqual(opened, [[SESSION]]);
     assert.equal(vscodeFake.terminals.length, 0);
     assert.equal(continueCalls.length, 0);
-  } finally { resetContinue(); teardown(ctx); }
+  } finally { parentPids.clear(); resetContinue(); teardown(ctx); }
+});
+
+test('Open Session from a window that does not hold the waiting panel opens nothing and says so', async () => {
+  resetVscodeFake(); resetContinue();
+  fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, status: 'waiting', cwd: REAL_CWD }];
+  sessionRecordFor.set(77, { sessionId: SESSION, entrypoint: 'claude-vscode' });
+  const opened: unknown[] = [];
+  vscodeFake.commands.set('claude-vscode.editor.open', (...args: unknown[]) => { opened.push(args); });
+  // Another window's extension host (not this process) is the panel's ancestor.
+  parentPids.clear(); parentPids.set(77, 5555); parentPids.set(5555, process.pid + 1);
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    const notice = vscodeFake.info.find((m) => m.items.includes('Open Session'));
+    assert.ok(notice, JSON.stringify(vscodeFake.info));
+    notice.answer('Open Session'); await flush(); await flush(); await flush();
+    assert.deepEqual(opened, [], 'the command would have started a second panel');
+    assert.ok(
+      vscodeFake.info.some((m) => m.message === `Limit Break: session ${SESSION.slice(0, 8)} is open in another VS Code window.`),
+      JSON.stringify(vscodeFake.info.map((m) => m.message)),
+    );
+  } finally { parentPids.clear(); resetContinue(); teardown(ctx); }
 });
 
 test('a limit detected in a bridged panel says so in the notice and marks the stored job (D11)', async () => {
@@ -5988,4 +6033,86 @@ test('an idle terminal holder at a seven_day limit is continued in place with th
     assert.deepEqual(continueCalls.map((c) => c.pid), [88]);
     assert.equal(vscodeFake.terminals.length, 0);
   } finally { autoContinueOn = true; resetContinue(); teardown(ctx); }
+});
+
+// ---------------------------------------------------------------------------
+// A fallback from a continue in place into a TERMINAL takes 1.0's outcome, never an automatic second terminal.
+// ---------------------------------------------------------------------------
+
+const idleTerminal = () => {
+  fakeAgentRows = [{ pid: 88, kind: 'interactive', sessionId: SESSION, status: 'idle', cwd: REAL_CWD }];
+  sessionRecordFor.set(88, { sessionId: SESSION, entrypoint: 'cli' });
+};
+
+for (const [label, job, offerText] of [
+  ['a seven_day limit', { ...pastJob(), rateLimitType: 'seven_day' }, /the limit has reset for session 0b3d1f66, and it is open in a terminal/],
+  ['an overload', { ...pastJob(), reason: 'overload' as const }, /was stopped by a server error, and it is open in a terminal/],
+] as const) {
+  test(`an idle terminal whose continue falls back (${label}) is remembered and offered, not launched`, async () => {
+    resetVscodeFake(); resetContinue(); idleTerminal();
+    continueOutcome = { kind: 'fallback', reason: 'the holder has no inbox' };
+    fakeClaimResult = 'claimed';
+    releasedKeys.length = 0;
+    vscodeFake.config = liveConfig();
+    const store = new Map<string, unknown>([['claudeLimitBreak.pending', job]]);
+    const ctx = contextOver(store);
+    start(ctx);
+    try {
+      await oneTick(); await flush();
+      assert.equal(continueCalls.length, 1, 'setup: a continue was tried');
+      assert.equal(vscodeFake.terminals.length, 0, 'no second writer beside a live terminal');
+      assert.ok(JSON.stringify(store.get(READY_KEY)).includes(SESSION), 'the job is remembered for Resume Now');
+      const offer = vscodeFake.info.find((m) => m.items.includes('Resume in Terminal Anyway'));
+      assert.ok(offer, JSON.stringify(vscodeFake.info));
+      assert.match(offer.message, offerText);
+      assert.match(offer.message, /Resuming here opens a second terminal on the same conversation\./);
+      assert.deepEqual(releasedKeys, [], 'a declined fire keeps its claim');
+      offer.answer('Resume in Terminal Anyway'); await flush(); await flush();
+      assert.equal(vscodeFake.terminals.length, 1, 'only the click launches');
+    } finally { resetContinue(); teardown(ctx); }
+  });
+}
+
+test('an idle terminal with auto-continue off, whose continue falls back, gets the auto-continue-off offer', async () => {
+  resetVscodeFake(); resetContinue(); idleTerminal(); autoContinueOn = false;
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.info.some((m) => m.items.includes('Resume in Terminal Anyway')));
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('and auto-continue is off; not starting a second writer.')));
+  } finally { autoContinueOn = true; resetContinue(); teardown(ctx); }
+});
+
+test('Resume Now on an idle terminal whose continue falls back shows the fork modal, and launches only on Resume Anyway', async () => {
+  resetVscodeFake(); resetContinue(); idleTerminal();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    const resumeNow = vscodeFake.commands.get('claudeLimitBreak.resumeNow')!;
+    const declined = resumeNow();
+    await flush(); await flush();
+    const first = vscodeFake.warningOffers.find((w) => w.modal);
+    assert.ok(first, 'the fork warning is shown once the continue has fallen back');
+    assert.match(first.message, /already open in a terminal\. Resuming here will fork the conversation\./);
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0, 'nothing launches before the answer');
+    first.answer(undefined);
+    await declined;
+    assert.equal(vscodeFake.terminals.length, 0, 'declined: nothing launched');
+    assert.ok(JSON.stringify(store.get(READY_KEY)).includes(SESSION), 'the job stays ready');
+
+    const confirmed = resumeNow();
+    await flush(); await flush();
+    const second = vscodeFake.warningOffers.filter((w) => w.modal).at(-1)!;
+    assert.notEqual(second, first);
+    second.answer('Resume Anyway');
+    await confirmed;
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
 });

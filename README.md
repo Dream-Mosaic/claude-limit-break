@@ -73,8 +73,10 @@ is tried in this order:
    "Message from @limit-break".
 
 Limit Break then waits up to 60 seconds to see the continue take. If it didn't,
-it falls back to launching a terminal, as in 1.0. Two cases skip or change the
-wait:
+a panel falls back to launching a terminal, as in 1.0. A terminal never gets a
+second terminal started beside it on its own: the session is remembered and you
+get 1.0's "Resume in Terminal Anyway" notice (or, from Resume Now, the fork
+warning before anything launches). Two cases skip or change the wait:
 
 - If nothing is listening for the message (the session closed between the check
   and the send), it launches at once rather than waiting.
@@ -96,7 +98,7 @@ Cancel while a continue is in flight likewise stops the fallback launch.
 **A session waiting on a prompt at the reset** (a permission, say) is not
 continued. You get a notice saying it is waiting for your input and the limit
 has reset, with an **Open Session** button that brings that panel or terminal
-into view (in this window only). A session that is busy is left alone silently.
+into view (in this window only: a panel that another VS Code window holds is not opened, and the notice says so). A session that is busy is left alone silently.
 
 Set `continueInPlace` to `false` to keep 1.0's behaviour: a terminal launch
 only.
@@ -205,7 +207,7 @@ resume for it:
 | A panel or terminal that is **busy** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
 | A panel or terminal **waiting on a prompt** | Tells you it is waiting, with an Open Session button. Nothing is sent. |
 | An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute after this window's own resume would have fired (the reset plus its random delay), it looks for a new message in the transcript since the stop was detected; if there is none (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
-| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Continues it in place, since nothing else is going to continue it, and no second terminal is opened. With `continueInPlace` off, it instead notifies with a "Resume in Terminal Anyway" button; the notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
+| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Continues it in place, since nothing else is going to continue it, and no second terminal is opened. If it can't be continued in place, or with `continueInPlace` off, it instead notifies with a "Resume in Terminal Anyway" button (1.0's offer); the notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
 | A session whose native auto-continue was **cancelled for a handoff or by you** (moved to Claude Desktop, sent to the cloud, moved to the background, or Esc / Ctrl+C / "Don't continue automatically" in `/rate-limit-options`) | Stands down when the resume would fire, whatever holds the session: it keeps the claim, remembers the job for Resume Now, logs the reason and says "Limit Break: session `<id8>` was moved to Claude Desktop (or: moved to the cloud, moved to the background, set to wait by you), so it was not resumed here." with a Resume Now button. The last cancel line since the stop was detected decides. Any other reason ("Claude Code exited during the wait", "Claude Code relaunched during the wait"), no cancel line, or wording this version does not know: nothing changes. The Resume Now command and buttons are unaffected: you chose. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
 
