@@ -265,12 +265,17 @@ stubModule('./claims', {
 
 /** What the fake continueInPlace answers during one test; default: fall back, so 1.0's launch tests keep launching. */
 let continueOutcome: ContinueOutcome = { kind: 'fallback', reason: 'test default' };
+/** When set, the fake continueInPlace waits for it before answering, so a test can act while a continue is in flight. */
+let continueGate: Promise<void> | undefined;
 const continueCalls: { sessionId: string; prompt: string; jobId: string; pid: number }[] = [];
 stubModule('./continueInPlace', {
   ...(require('../src/continueInPlace') as Record<string, unknown>),
   BRIDGED_GRACE_MS: 3_000,
   continueInPlace: async (job: { sessionId: string; prompt: string; jobId: string }, pid: number) => {
     continueCalls.push({ sessionId: job.sessionId, prompt: job.prompt, jobId: job.jobId, pid });
+    if (continueGate) {
+      await continueGate;
+    }
     return continueOutcome;
   },
 });
@@ -5647,6 +5652,7 @@ test('D10: a fire nine minutes late still resumes', async () => {
 const resetContinue = () => {
   continueOutcome = { kind: 'fallback', reason: 'test default' };
   continueCalls.length = 0;
+  continueGate = undefined;
   clearHolders();
 };
 
@@ -5769,4 +5775,147 @@ test('Resume Now on a session whose idle panel is open continues it in place', a
     assert.equal(vscodeFake.terminals.length, 0);
     assert.equal(continueCalls.length, 1);
   } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a continue that ends continued or landed late keeps the claim', async () => {
+  for (const outcome of [
+    { kind: 'continued', transport: 'socket', elapsedMs: 5 },
+    { kind: 'landed-late', transport: 'mod' },
+  ] as ContinueOutcome[]) {
+    resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = outcome;
+    fakeClaimResult = 'claimed';
+    releasedKeys.length = 0;
+    vscodeFake.config = liveConfig();
+    const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+    start(ctx);
+    try {
+      await oneTick(); await flush();
+      assert.equal(continueCalls.length, 1, outcome.kind);
+      assert.deepEqual(releasedKeys, [], `${outcome.kind} keeps the claim so other windows drop their copies`);
+    } finally { resetContinue(); teardown(ctx); }
+  }
+});
+
+test('a fallback launch that cannot start remembers the job and releases its claim', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  vscodeFake.config = liveConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(JSON.stringify(store.get(READY_KEY)).includes(SESSION), 'the job is remembered for Resume Now');
+    assert.ok(releasedKeys.length > 0, 'the claim is released so a later attempt is not blocked');
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('Resume Now that continues a counting job in place removes it from the pending list', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'continued', transport: 'mod', elapsedMs: 5 };
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', futureJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.ok(!JSON.stringify(store.get('claudeLimitBreak.pending') ?? []).includes(SESSION), 'scheduler.cancel ran');
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('Resume Now that continues a ready job in place forgets it', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(); continueOutcome = { kind: 'continued', transport: 'mod', elapsedMs: 5 };
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick();
+    assert.ok(JSON.stringify(store.get(READY_KEY)).includes(SESSION), 'setup: the job is ready');
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.ok(!JSON.stringify(store.get(READY_KEY) ?? []).includes(SESSION), 'the ready job is forgotten');
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('Resume Now whose continue falls back onto a missing cwd removes neither job', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  vscodeFake.config = manualConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', { ...futureJob(), cwd: MISSING_CWD }]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(JSON.stringify(store.get('claudeLimitBreak.pending')).includes(SESSION), 'the counting job stays');
+  } finally { resetContinue(); teardown(ctx); }
+
+  resetVscodeFake(); resetContinue(); idlePanel();
+  vscodeFake.config = manualConfig();
+  const store2 = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob(MISSING_CWD)]]);
+  const ctx2 = contextOver(store2);
+  start(ctx2);
+  try {
+    await oneTick();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.ok(JSON.stringify(store2.get(READY_KEY)).includes(SESSION), 'the ready job stays');
+  } finally { resetContinue(); teardown(ctx2); }
+});
+
+test('Cancel during the bridged head start drops the continue', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel(true); continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 5 };
+  vscodeFake.config = liveConfig();
+  const job = { ...pastJob(), baseResumeAtMs: Date.now() };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', job]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(continueCalls.length, 0, 'setup: still inside the head start');
+    vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.equal(continueCalls.length, 0);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('Cancel while a continue is in flight stops its fallback from launching', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  let release!: () => void;
+  continueGate = new Promise<void>((r) => { release = r; });
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(continueCalls.length, 1, 'setup: the continue is in flight');
+    vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    release(); await flush(); await flush();
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Cancelled; not launching a terminal for session 0b3d1f66')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('an idle terminal holder at a seven_day limit is continued in place with the default config (D8)', async () => {
+  resetVscodeFake(); resetContinue();
+  fakeAgentRows = [{ pid: 88, kind: 'interactive', sessionId: SESSION, status: 'idle', cwd: REAL_CWD }];
+  sessionRecordFor.set(88, { sessionId: SESSION, entrypoint: 'cli' });
+  autoContinueOn = true;
+  continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 5 };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', { ...pastJob(), rateLimitType: 'seven_day' }]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.deepEqual(continueCalls.map((c) => c.pid), [88]);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally { autoContinueOn = true; resetContinue(); teardown(ctx); }
 });

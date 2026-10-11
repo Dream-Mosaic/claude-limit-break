@@ -613,6 +613,9 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const detectAgentRows = agentRowsDetector(runAgentsListing);
 
+  /** Bumped by Cancel and on dispose; a continue that fell back after that does not launch. */
+  let cancelGeneration = 0;
+
   /** The real IO behind continueInPlace (continueInPlace.ts). */
   const continueDeps: ContinueDeps = {
     platform: process.platform,
@@ -891,7 +894,12 @@ export function activate(context: vscode.ExtensionContext): void {
   /**
    * Continue `job` in its live holder (continueInPlace.ts). Resolves whether the job is discharged: continued, landed late, or launched after a fallback. False only when the fallback launch itself could not start.
    */
-  const continueHolder = async (job: PendingJob, pid: number, manual: boolean): Promise<boolean> => {
+  const continueHolder = async (
+    job: PendingJob,
+    pid: number,
+    manual: boolean,
+    generation = cancelGeneration,
+  ): Promise<boolean> => {
     const id8 = job.sessionId.slice(0, 8);
     if (settings().notify) {
       void vscode.window.showInformationMessage(`Limit Break: continuing session ${id8} in place.`);
@@ -910,6 +918,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (outcome.kind === 'landed-late') {
       log.info(`Session ${id8}'s continue by ${outcome.transport} landed after the ${CONFIRM_WINDOW_MS / 1000} s window; not launching a second process.`);
+      return true;
+    }
+    if (generation !== cancelGeneration) {
+      log.info(`Cancelled; not launching a terminal for session ${id8} after its in-place continue fell back.`);
       return true;
     }
     log.warn(`Could not continue session ${id8} in place (${outcome.reason}); launching a terminal instead.`);
@@ -1234,6 +1246,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     {
       dispose: () => {
+        cancelGeneration += 1;
         for (const t of [...stallChecks, ...nativeChecks]) {
           clearTimeout(t);
         }
@@ -1384,6 +1397,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (decision.continueInPlace) {
         const target = decision.continueInPlace;
+        const generation = cancelGeneration;
         void (async () => {
           if (target.bridged) {
             const headStartMs = job.baseResumeAtMs + BRIDGED_GRACE_MS - Date.now();
@@ -1399,7 +1413,7 @@ export function activate(context: vscode.ExtensionContext): void {
               return;
             }
           }
-          if (!(await continueHolder(coordinated(job, rows), target.pid, false))) {
+          if (!(await continueHolder(coordinated(job, rows), target.pid, false, generation))) {
             rememberReady(job);
             releaseClaim(claimsDir(), claimKey, fs, log);
           }
@@ -1569,6 +1583,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (cancelled.length > 0) {
         log.info(`Claimed ${cancelled.length} cancelled resume(s) so other windows drop them too.`);
       }
+      cancelGeneration += 1;
       // A native auto-continue check in its grace would offer back a discarded job.
       for (const t of nativeChecks) {
         clearTimeout(t);
