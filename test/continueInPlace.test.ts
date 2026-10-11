@@ -93,11 +93,43 @@ test('elsewhere, no token: send without an auth line', async () => {
 });
 
 test('a failed send falls back at once, without waiting out the window', async () => {
-  const { deps } = fakeDeps({ send: async () => { throw new Error('ENOENT'); } });
+  let polls = 0;
+  const { deps } = fakeDeps({
+    send: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+    transcriptContains: () => { polls += 1; return false; },
+  });
   const started = Date.now();
   const out = await continueInPlace(JOB, 77, deps);
   assert.deepEqual(out, { kind: 'fallback', reason: 'send failed: ENOENT' });
   assert.ok(Date.now() - started < 1_000);
+  assert.equal(polls, 0);
+});
+
+test('a rejection that may have written (no code, or ETIMEDOUT) is confirmed like a sent message', async () => {
+  for (const err of [new Error('deadline'), Object.assign(new Error('late'), { code: 'ETIMEDOUT' })]) {
+    let polls = 0;
+    const { deps } = fakeDeps({
+      send: async () => { throw err; },
+      transcriptContains: () => ++polls >= 2,
+    });
+    const out = await continueInPlace(JOB, 77, deps);
+    assert.equal(out.kind, 'continued');
+  }
+});
+
+test('a rejection that may have written, seen only at the last look, is landed-late', async () => {
+  const { deps } = fakeDeps({ send: async () => { throw new Error('deadline'); }, continuedSince: () => true });
+  assert.deepEqual(await continueInPlace(JOB, 77, deps), { kind: 'landed-late', transport: 'socket' });
+});
+
+test('a throwing check counts as not seen and does not reject the continue', async () => {
+  let polls = 0;
+  const { deps } = fakeDeps({
+    transcriptContains: () => { polls += 1; if (polls < 3) { throw new Error('EBUSY'); } return true; },
+  });
+  assert.equal((await continueInPlace(JOB, 77, deps)).kind, 'continued');
+  const t = fakeDeps({ transcriptContains: () => { throw new Error('x'); }, continuedSince: () => { throw new Error('y'); } });
+  assert.equal((await continueInPlace(JOB, 77, t.deps)).kind, 'fallback');
 });
 
 test('nothing within the window and no sign at the last look: fall back', async () => {
@@ -118,6 +150,7 @@ test('transcriptContains reads only from the given offset', () => {
   try {
     assert.equal(transcriptContains(file, 'needle', 0, fs), true);
     assert.equal(transcriptContains(file, 'needle', 6, fs), false);
+    assert.equal(transcriptContains(file, 'needle', 500, fs), true, 'a file shorter than the offset is scanned whole');
     assert.equal(transcriptContains(path.join(os.tmpdir(), 'missing-lb.jsonl'), 'x', 0, fs), false);
   } finally {
     fs.rmSync(file, { force: true });

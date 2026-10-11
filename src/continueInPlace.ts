@@ -76,19 +76,45 @@ export async function continueInPlace(job: ContinueJob, holderPid: number, deps:
   try {
     await deps.send(record.messagingSocketPath, inboxLines(payload, token));
   } catch (err) {
-    return { kind: 'fallback', reason: `send failed: ${(err as Error).message}` };
-  }
-  const confirmed = () =>
-    transport === 'mod'
-      ? continuedJob(deps.readModStatus(job.sessionId), job.jobId)
-      : deps.transcriptContains(job.transcript, msgId, bytesAtSend ?? 0);
-  while (deps.now() - sentAt < CONFIRM_WINDOW_MS) {
-    if (confirmed()) {
-      return { kind: 'continued', transport, elapsedMs: deps.now() - sentAt };
+    // Only "nothing listening" proves nothing was written. Any other rejection (deadline, close before the
+    // write callback) may have delivered the message, so it is confirmed like a sent one.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ECONNREFUSED') {
+      return { kind: 'fallback', reason: `send failed: ${(err as Error).message}` };
     }
-    await deps.sleep(CONFIRM_POLL_MS);
   }
-  if (confirmed() || deps.transcriptContains(job.transcript, msgId, bytesAtSend ?? 0) || deps.continuedSince(job.transcript, bytesAtSend)) {
+  // A throwing check counts as "not seen", so it never rejects the whole continue.
+  const seen = (check: () => boolean): boolean => {
+    try {
+      return check();
+    } catch {
+      return false;
+    }
+  };
+  const confirmed = () =>
+    seen(() => transport === 'mod'
+      ? continuedJob(deps.readModStatus(job.sessionId), job.jobId)
+      : deps.transcriptContains(job.transcript, msgId, bytesAtSend ?? 0));
+  let elapsed: number | undefined;
+  try {
+    while (deps.now() - sentAt < CONFIRM_WINDOW_MS) {
+      if (confirmed()) {
+        elapsed = deps.now() - sentAt;
+        break;
+      }
+      await deps.sleep(CONFIRM_POLL_MS);
+    }
+  } catch {
+    // now() or sleep() threw: stop polling and take the last look.
+  }
+  if (elapsed !== undefined) {
+    return { kind: 'continued', transport, elapsedMs: elapsed };
+  }
+  if (
+    confirmed() ||
+    seen(() => deps.transcriptContains(job.transcript, msgId, bytesAtSend ?? 0)) ||
+    seen(() => deps.continuedSince(job.transcript, bytesAtSend))
+  ) {
     return { kind: 'landed-late', transport };
   }
   return { kind: 'fallback', reason: `not confirmed within ${CONFIRM_WINDOW_MS / 1000} s` };
@@ -108,14 +134,16 @@ export function transcriptContains(
 ): boolean {
   try {
     const size = fs.statSync(file).size;
-    const length = size - fromBytes;
+    // A file smaller than the offset was rewritten or truncated: scan it whole (a fresh msg_id can't false-positive).
+    const from = size < fromBytes ? 0 : fromBytes;
+    const length = size - from;
     if (length <= 0) {
       return false;
     }
     const fd = fs.openSync(file, 'r');
     try {
       const buffer = Buffer.alloc(length);
-      fs.readSync(fd, buffer, 0, length, fromBytes);
+      fs.readSync(fd, buffer, 0, length, from);
       return buffer.toString('utf8').includes(needle);
     } finally {
       fs.closeSync(fd);
