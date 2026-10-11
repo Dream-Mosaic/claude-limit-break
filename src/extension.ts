@@ -59,6 +59,7 @@ import {
 } from './claims';
 import { GaveUpState, gaveUpNotice, budgetRefusalNotice } from './gaveUp';
 import { continuedSince } from './continuedSince';
+import { lateByMinutes } from './lateFire';
 import { lastNativeCancel, standDownReason, STAND_DOWN_LABEL } from './nativeContinue';
 import { OverloadStreaks, overloadBackoffMs, MAX_OVERLOAD_RESUMES } from './overloadBackoff';
 import { RATE_LIMIT_LABELS } from './parsers/limitParser';
@@ -1181,6 +1182,17 @@ export function activate(context: vscode.ExtensionContext): void {
             ? 'already claimed by this window'
             : 'claimed by another window';
         log.info(`Resume for ${job.sessionId.slice(0, 8)} ${holder}; dropping.`);
+        return;
+      }
+      // D10: a fire well past its time means nothing was running on schedule (VS
+      // Code closed, or the machine asleep), and whoever just opened or woke it is
+      // there. Dropped with a log line, whatever autoResume says; the claim is KEPT
+      // so other windows drop their copies too. Resume Now is unaffected.
+      const lateMin = lateByMinutes(job.resumeAtMs, Date.now());
+      if (lateMin !== undefined) {
+        log.info(
+          `Resume for ${job.sessionId.slice(0, 8)} came due while VS Code wasn't running (${lateMin} min late); leaving it to you.`,
+        );
         return;
       }
       // A resume is only for a stop still unhandled. A real turn since detection

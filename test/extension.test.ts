@@ -4547,7 +4547,8 @@ test('a fire long past its reset still holds its claim at least as long as an or
   realClaimsDir = dir;
   vscodeFake.envSessionId = 'window-A';
   const threeHoursAgo = Date.now() - 3 * 3_600_000;
-  const job = { ...pastJob(), baseResumeAtMs: threeHoursAgo, resumeAtMs: threeHoursAgo + 60_000 };
+  // resumeAtMs stays recent (D10 drops a fire over ten minutes late); only the base is old.
+  const job = { ...pastJob(), baseResumeAtMs: threeHoursAgo };
   const key = realClaims.claimKeyFor(job);
   const ctx = contextOver(new Map([['claudeLimitBreak.pending', job]]));
   start(ctx);
@@ -5736,6 +5737,56 @@ test('an upgrade in a trusted folder has no trust note and no button', () => {
     const notice = vscodeFake.info.find((m) => m.message.includes('limit again.'));
     assert.equal(notice?.message, upgradeNotice('weekly', resetsAt.getTime()));
     assert.deepEqual(notice?.items, []);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+const lateJob = (minutesLate: number) => {
+  const resumeAtMs = Date.now() - minutesLate * 60_000;
+  return { ...pastJob(), resumeAtMs, baseResumeAtMs: resumeAtMs };
+};
+
+test('D10: a resume restored more than ten minutes late is dropped with a log line', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', lateJob(11)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 0, 'a late fire must not launch');
+    assert.equal(offers().length, 0, 'a late fire must not offer either');
+    assert.ok(
+      vscodeFake.outputLines.some((l) => l.includes("came due while VS Code wasn't running (11 min late)")),
+      vscodeFake.outputLines.join('\n'),
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D10: with autoResume off, a late fire is dropped instead of offered', async () => {
+  resetVscodeFake();
+  vscodeFake.config = manualConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', lateJob(30)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(offers().length, 0);
+    assert.equal(vscodeFake.terminals.length, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('D10: a fire nine minutes late still resumes', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER, randomDelayMinMinutes: 0, randomDelayMaxMinutes: 0 };
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', lateJob(9)]]));
+  start(ctx);
+  try {
+    await oneTick();
+    assert.equal(vscodeFake.terminals.length, 1);
   } finally {
     teardown(ctx);
   }
