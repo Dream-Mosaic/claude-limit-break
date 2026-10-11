@@ -1,0 +1,5 @@
+{
+  "name": "limit-break",
+  "owner": { "name": "Dream Mosaic" },
+  "plugins": [{ "name": "limit-break", "source": "./mod" }]
+}
