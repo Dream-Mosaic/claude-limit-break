@@ -13,6 +13,10 @@ import {
   shouldOfferInstall,
   runSteps,
   listInstalledPlugins,
+  installMod,
+  updateMod,
+  removeMod,
+  type ModDeps,
 } from '../src/modInstall';
 
 test('the marketplace lists the mod from ./mod', () => {
@@ -101,6 +105,100 @@ test('copyMod copies the plugin files and skips tests', () => {
     assert.equal(fs.readFileSync(path.join(dest, 'hooks', 'register.mjs'), 'utf8'), 'export {};');
     assert.equal(fs.existsSync(path.join(dest, 'hooks', 'register.test.ts')), false);
     assert.equal(fs.existsSync(path.join(dest, 'hooks', 'old.mjs')), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const LIST_INSTALLED = JSON.stringify([{ id: 'limit-break@limit-break' }]);
+
+/** Deps over a scripted CLI: `fail` names the first arg-joined steps that throw; `list` is the plugin list. */
+function harness(opts: { fail?: string[]; list?: string; stored?: string } = {}) {
+  const ran: string[] = [];
+  const notes: { m: string; level: string }[] = [];
+  const state = { version: opts.stored as string | undefined, copies: 0 };
+  const deps: ModDeps = {
+    run: async (args) => {
+      const line = args.join(' ');
+      ran.push(line);
+      if (opts.fail?.some((f) => line.startsWith(f))) {
+        throw new Error('nope');
+      }
+      return args[1] === 'list' ? (opts.list ?? '[]') : '';
+    },
+    copy: () => void (state.copies += 1),
+    marketplaceDir: '/g/marketplace',
+    version: '1.1.0',
+    storedVersion: () => state.version,
+    storeVersion: async (v) => void (state.version = v),
+    notify: (m, level) => notes.push({ m, level }),
+    log: () => {},
+  };
+  return { deps, ran, notes, state };
+}
+
+test('install success stores the version and reports installed', async () => {
+  const h = harness();
+  await installMod(h.deps);
+  assert.equal(h.state.copies, 1);
+  assert.equal(h.state.version, '1.1.0');
+  assert.deepEqual(h.ran, ['plugin marketplace add /g/marketplace', 'plugin install limit-break@limit-break --scope user']);
+  assert.equal(h.notes[0]?.level, 'info');
+  assert.match(h.notes[0]!.m, /is installed/);
+});
+
+test('a failed install step is named and nothing is stored', async () => {
+  const h = harness({ fail: ['plugin install'] });
+  await installMod(h.deps);
+  assert.equal(h.state.version, undefined);
+  assert.equal(h.notes[0]?.level, 'warn');
+  assert.match(h.notes[0]!.m, /claude plugin install limit-break@limit-break --scope user/);
+  assert.match(h.notes[0]!.m, /nope/);
+});
+
+test('update re-copies, runs the update steps and stores the version', async () => {
+  const h = harness({ stored: '1.0.0' });
+  await updateMod(h.deps);
+  assert.equal(h.state.copies, 1);
+  assert.deepEqual(h.ran, ['plugin marketplace update limit-break', 'plugin update limit-break@limit-break']);
+  assert.equal(h.state.version, '1.1.0');
+});
+
+test('a failed update keeps the old version so it is tried again', async () => {
+  const h = harness({ stored: '1.0.0', fail: ['plugin update'] });
+  await updateMod(h.deps);
+  assert.equal(h.state.version, '1.0.0');
+});
+
+test('remove when not installed skips uninstall, removes the marketplace and clears the key', async () => {
+  const h = harness({ stored: '1.0.0', list: '[]' });
+  await removeMod(h.deps);
+  assert.deepEqual(h.ran, ['plugin list --json', 'plugin marketplace remove limit-break']);
+  assert.equal(h.state.version, undefined);
+  assert.equal(h.notes[0]?.level, 'info');
+});
+
+test('remove when uninstall fails still removes the marketplace and keeps the key', async () => {
+  const h = harness({ stored: '1.0.0', list: LIST_INSTALLED, fail: ['plugin uninstall'] });
+  await removeMod(h.deps);
+  assert.deepEqual(h.ran, [
+    'plugin list --json',
+    'plugin uninstall limit-break@limit-break --scope user',
+    'plugin marketplace remove limit-break',
+  ]);
+  assert.equal(h.state.version, '1.0.0');
+  assert.equal(h.notes[0]?.level, 'warn');
+  assert.match(h.notes[0]!.m, /plugin uninstall/);
+});
+
+test('copyMod refuses a missing source without touching the destination', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-mod-'));
+  try {
+    const dest = path.join(root, 'dest');
+    fs.mkdirSync(dest);
+    fs.writeFileSync(path.join(dest, 'keep.txt'), 'x');
+    assert.throws(() => copyMod(path.join(root, 'missing'), dest, fs), /missing/);
+    assert.equal(fs.existsSync(path.join(dest, 'keep.txt')), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

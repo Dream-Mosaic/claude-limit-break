@@ -85,12 +85,12 @@ import {
   marketplaceJson,
   isModInstalled,
   listInstalledPlugins,
-  installSteps,
-  updateSteps,
-  removeSteps,
+  installMod,
+  updateMod,
+  removeMod,
+  type ModDeps,
   copyMod,
   shouldOfferInstall,
-  runSteps,
   OFFER_KEY,
   INSTALLED_VERSION_KEY,
 } from './modInstall';
@@ -1294,41 +1294,16 @@ export function activate(context: vscode.ExtensionContext): void {
     fs.writeFileSync(path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'), marketplaceJson());
   };
 
-  const installMod = async (): Promise<void> => {
-    let result: Awaited<ReturnType<typeof runSteps>>;
-    try {
-      copyModToMarketplace();
-      result = await runSteps(installSteps(marketplaceDir), runClaude);
-    } catch (e) {
-      result = { ok: false, step: ['copy the mod'], error: e instanceof Error ? e.message : String(e) };
-    }
-    if (result.ok) {
-      await context.globalState.update(INSTALLED_VERSION_KEY, extensionVersion());
-      log.info('Installed the Claude Code mod.');
-      void vscode.window.showInformationMessage(
-        'Limit Break: the Claude Code mod is installed. Sessions started from now on load it; an open session loads it after /reload-plugins.',
-      );
-      return;
-    }
-    log.warn(`Could not install the Claude Code mod (claude ${result.step.join(' ')}): ${result.error}`);
-    void vscode.window.showWarningMessage(
-      `Limit Break: couldn't install the Claude Code mod (\`claude ${result.step.join(' ')}\`: ${result.error}). Limit Break still works through each session's inbox.`,
-    );
-  };
-
-  const removeMod = async (): Promise<void> => {
-    const result = await runSteps(removeSteps(), runClaude);
-    if (result.ok) {
-      await context.globalState.update(INSTALLED_VERSION_KEY, undefined);
-      log.info('Removed the Claude Code mod.');
-      void vscode.window.showInformationMessage('Limit Break: the Claude Code mod is removed.');
-      return;
-    }
-    log.warn(`Could not remove the Claude Code mod (claude ${result.step.join(' ')}): ${result.error}`);
-    void vscode.window.showWarningMessage(
-      `Limit Break: couldn't remove the Claude Code mod (\`claude ${result.step.join(' ')}\`: ${result.error}).`,
-    );
-  };
+  const modDeps = (): ModDeps => ({
+    run: runClaude,
+    copy: copyModToMarketplace,
+    marketplaceDir,
+    version: extensionVersion(),
+    storedVersion: () => context.globalState.get<string>(INSTALLED_VERSION_KEY),
+    storeVersion: (v) => Promise.resolve(context.globalState.update(INSTALLED_VERSION_KEY, v)),
+    notify: (m, level) => void (level === 'warn' ? vscode.window.showWarningMessage(m) : vscode.window.showInformationMessage(m)),
+    log: (m) => log.info(m),
+  });
 
   /**
    * After an extension update, re-copy and update an installed mod (log only);
@@ -1339,14 +1314,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const installed = isModInstalled(await listInstalledPlugins(runClaude));
     const current = extensionVersion();
     if (installed && context.globalState.get<string>(INSTALLED_VERSION_KEY) !== current) {
-      copyModToMarketplace();
-      const result = await runSteps(updateSteps(), runClaude);
-      if (result.ok) {
-        await context.globalState.update(INSTALLED_VERSION_KEY, current);
-        log.info(`Updated the Claude Code mod to ${current}.`);
-      } else {
-        log.warn(`Could not update the Claude Code mod (claude ${result.step.join(' ')}): ${result.error}`);
-      }
+      await updateMod(modDeps());
       return;
     }
     const s = settings();
@@ -1369,7 +1337,7 @@ export function activate(context: vscode.ExtensionContext): void {
       ),
     );
     if (choice === 'Install') {
-      await installMod();
+      await installMod(modDeps());
     } else if (choice === 'Never') {
       await context.globalState.update(OFFER_KEY, 'never');
     }
@@ -1746,8 +1714,8 @@ export function activate(context: vscode.ExtensionContext): void {
       render();
     }),
     vscode.commands.registerCommand(`${NS}.showLog`, () => channel.show()),
-    vscode.commands.registerCommand(`${NS}.installMod`, () => installMod()),
-    vscode.commands.registerCommand(`${NS}.removeMod`, () => removeMod()),
+    vscode.commands.registerCommand(`${NS}.installMod`, () => installMod(modDeps())),
+    vscode.commands.registerCommand(`${NS}.removeMod`, () => removeMod(modDeps())),
     /**
      * What a click on the status bar opens. Cancel stays one deliberate pick
      * away, and dismissing the menu does nothing.

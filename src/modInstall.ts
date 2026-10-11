@@ -72,14 +72,19 @@ export interface CopyFs {
   readdirSync(p: string, o: { withFileTypes: true }): { name: string; isDirectory(): boolean }[];
   copyFileSync(from: string, to: string): void;
   rmSync(p: string, o: { recursive: true; force: true }): void;
+  existsSync(p: string): boolean;
 }
 
 /**
  * Replace `destDir` with a copy of the mod in `srcDir`, leaving out `*.test.ts`
  * (the VSIX does not ship them either). Replaced rather than merged, so a file
- * dropped from the mod does not linger.
+ * dropped from the mod does not linger. Throws before deleting anything when
+ * the source is missing.
  */
 export function copyMod(srcDir: string, destDir: string, fs: CopyFs): void {
+  if (!fs.existsSync(srcDir)) {
+    throw new Error(`the mod folder ${srcDir} is missing`);
+  }
   fs.rmSync(destDir, { recursive: true, force: true });
   const walk = (from: string, to: string): void => {
     fs.mkdirSync(to, { recursive: true });
@@ -120,4 +125,100 @@ export async function runSteps(
     }
   }
   return { ok: true };
+}
+
+/** What install, update and remove need from their surroundings; extension.ts supplies the real ones. */
+export interface ModDeps {
+  run: (args: string[]) => Promise<string>;
+  /** Put a fresh copy of the mod and the marketplace file in the marketplace folder. */
+  copy: () => void;
+  marketplaceDir: string;
+  /** The running extension's version. */
+  version: string;
+  /** The version whose copy was last installed (INSTALLED_VERSION_KEY). */
+  storedVersion: () => string | undefined;
+  storeVersion: (v: string | undefined) => Promise<void>;
+  notify: (message: string, level: 'info' | 'warn') => void;
+  log: (message: string) => void;
+}
+
+const stepText = (step: string[]) => `claude ${step.join(' ')}`;
+
+/** Copy the mod out and install it; stores the version and reports either way. */
+export async function installMod(d: ModDeps): Promise<void> {
+  let result: Awaited<ReturnType<typeof runSteps>>;
+  try {
+    d.copy();
+    result = await runSteps(installSteps(d.marketplaceDir), d.run);
+  } catch (e) {
+    result = { ok: false, step: ['(copy the mod)'], error: e instanceof Error ? e.message : String(e) };
+  }
+  if (result.ok) {
+    await d.storeVersion(d.version);
+    d.log('Installed the Claude Code mod.');
+    d.notify(
+      'Limit Break: the Claude Code mod is installed. Sessions started from now on load it; an open session loads it after /reload-plugins.',
+      'info',
+    );
+    return;
+  }
+  d.log(`Could not install the Claude Code mod (${stepText(result.step)}): ${result.error}`);
+  d.notify(
+    `Limit Break: couldn't install the Claude Code mod (\`${stepText(result.step)}\`: ${result.error}). Limit Break still works through each session's inbox.`,
+    'warn',
+  );
+}
+
+/** After an extension update: re-copy and update an installed mod whose stored version differs. Log only. */
+export async function updateMod(d: ModDeps): Promise<void> {
+  d.copy();
+  const result = await runSteps(updateSteps(), d.run);
+  if (result.ok) {
+    await d.storeVersion(d.version);
+    d.log(`Updated the Claude Code mod to ${d.version}.`);
+  } else {
+    d.log(`Could not update the Claude Code mod (${stepText(result.step)}): ${result.error}`);
+  }
+}
+
+/**
+ * Remove the mod. Uninstalls only when it is installed, but always tries to
+ * remove the marketplace, so a half-finished install does not leave one
+ * registered. The stored version is cleared once the plugin is gone.
+ */
+export async function removeMod(d: ModDeps): Promise<void> {
+  let installed: boolean;
+  try {
+    installed = isModInstalled(await listInstalledPlugins(d.run));
+  } catch {
+    installed = true; // cannot tell; let uninstall find out
+  }
+  const [uninstall, removeMarketplace] = removeSteps() as [string[], string[]];
+  const failures: { step: string[]; error: string }[] = [];
+  let pluginGone = true;
+  if (installed) {
+    const r = await runSteps([uninstall], d.run);
+    if (!r.ok) {
+      pluginGone = false;
+      failures.push(r);
+    }
+  }
+  const m = await runSteps([removeMarketplace], d.run);
+  if (!m.ok) {
+    failures.push(m);
+  }
+  if (pluginGone) {
+    await d.storeVersion(undefined);
+  }
+  const first = failures[0];
+  if (!first) {
+    d.log('Removed the Claude Code mod.');
+    d.notify('Limit Break: the Claude Code mod is removed.', 'info');
+    return;
+  }
+  d.log(`Could not fully remove the Claude Code mod (${stepText(first.step)}): ${first.error}`);
+  d.notify(
+    `Limit Break: couldn't remove the Claude Code mod (\`${stepText(first.step)}\`: ${first.error}). Limit Break still works through each session's inbox.`,
+    'warn',
+  );
 }
