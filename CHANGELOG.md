@@ -7,6 +7,44 @@ this is the only in-editor account of what changed.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-11
+
+Limit Break now continues a session that is still open where it is, instead of
+launching a second copy of it.
+
+### Added
+
+- Continue in place. A session still open and idle at the reset, in a panel or a
+  terminal, is continued in the same process: through Limit Break's Claude Code
+  mod when it is loaded there, otherwise through the session's inbox (the model
+  sees that as a message from another session). If nothing takes within 60
+  seconds, or the session can't be reached, it falls back to a terminal launch;
+  a continue that lands late is never followed by a launch. The
+  `continueInPlace` setting turns it off.
+- The Claude Code mod, shipped in the extension. It reports each session's
+  limits to Limit Break and carries out Limit Break's continue. It never acts
+  on its own. Limit Break offers to install it, and there are "Limit Break:
+  Install Claude Code mod" and "Limit Break: Remove Claude Code mod" commands.
+  The manual install is in the README.
+- A notice, with an Open Session button, when a session is waiting on a prompt
+  at the reset.
+- A panel bridged to Remote Control is marked as bridged, and the web client gets
+  5 minutes to continue it before Limit Break does. Cancel stops the follow-up.
+
+### Changed
+
+- A resume that comes due while VS Code wasn't running is dropped when VS Code
+  opens or wakes more than 10 minutes late, with a line in the log.
+- A reset beyond `maxWaitHours` is announced once and not scheduled.
+- `resumeMode`, `headlessPermissionMode` and `onStale` now apply only to a
+  launch. `resumePrompt` is used on all three paths.
+- The "reopen the tab" offer follows a launch only.
+
+### Removed
+
+- The offer-only route: no "(manual)" entry in the status bar and no offer
+  days later when a long limit resets.
+
 ## [1.0.0] - 2026-10-07
 
 The first release. Limit Break watches Claude Code's session transcripts. When

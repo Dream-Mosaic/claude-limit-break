@@ -45,6 +45,16 @@ node inject.js overload     # B hits a server overload now
 | R6 | B resumes | Same for B. If B wasn't trusted through R3's button, Claude shows its own trust prompt in the terminal; you answer it, Limit Break never does |
 | R7 | No doubles | Each session resumes exactly once; the tooltip empties |
 | R8 | Backoff reset | After B's resumed turn finishes, `node inject.js overload` again: scheduled at +0 again, because a finished turn resets the count |
+| L1 | Mod install offer | On first activation with the mod absent: the offer; Install runs `claude plugin marketplace add` and `claude plugin install`; `claude plugin list` shows `limit-break@limit-break` |
+| L2 | Idle panel, mod | Leave A's panel open and idle at the injected limit. At the reset: no new terminal; the log says `Continued session <A> in place by mod (confirmed after N ms)`; the transcript has no branch points. Record N. |
+| L3 | Idle panel, socket | Remove the mod (command), restart the panel, repeat L2: `by socket`; the panel shows "Message from @limit-break". Record N. |
+| L4 | Idle terminal (#29) | A open in a terminal instead, native auto-continue off: continued in place, no second terminal. |
+| L5 | Fallback | Point `messagingSocketPath` at nothing (close the panel right after the listing; or edit the record): falls back to a launch after the send fails. |
+| L6 | Waiting | Leave A at a permission prompt at the reset: the waiting notice; Open Session focuses the panel. |
+| L7 | Late fire | Close VS Code before A's reset; reopen more than 10 minutes after it: nothing resumes; the log says it came due while VS Code wasn't running. |
+| L8 | Open button, terminal | As L6 with A in a terminal: Open Session shows that terminal. |
+
+Record L2 and L3's N in `docs/research/` with the date and Claude Code version; the 60 s window should rest on these.
 
 Afterwards: close the window. `node setup.js` remakes the sessions.
 

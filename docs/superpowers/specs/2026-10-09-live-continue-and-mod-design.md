@@ -320,6 +320,28 @@ the mod logs it with `$.ui.log`.
 **The mod never acts on its own.** Without the extension, it only writes status
 files.
 
+### Planning notes (2026-10-11)
+
+Decisions taken while writing the plan, each [derived from the 2.1.296 mod
+types]. Where they differ from the text above, these win.
+
+- **No pid in the mod.** The types expose none, so the extension uses the mod
+  only when the status file's `loadedAtMs` is at or after the holder process's
+  `startedAt` (from `~/.claude/sessions/<pid>.json`). A file left by an earlier
+  process is older and is ignored. [derived from the 2.1.296 mod types]
+- **`movedTo`, not a delete.** `$.fs` has no delete. When the process moves to
+  another session (`clear`, `resume`, `fork`), the mod marks the old file
+  `movedTo: <new id>` and the extension treats it as absent. [derived from the
+  2.1.296 mod types]
+- **Native auto-continue notices are logged only.** The `quota_auto_resume_*`
+  notification types are unverified in the panel, so the transcript check stays
+  the authority. [derived from the 2.1.296 mod types]
+- **`.mjs`.** The hooks module is `register.mjs`, not `register.js`. [derived
+  from the 2.1.296 mod types]
+- **The install command** is `/plugin install limit-break --marketplace
+  Dream-Mosaic/claude-limit-break`, then `y` and the user scope; sessions already
+  open need `/reload-plugins`. [derived from the 2.1.296 mod types]
+
 ## The extension
 
 New modules, pure where possible, each with an injected IO layer like the

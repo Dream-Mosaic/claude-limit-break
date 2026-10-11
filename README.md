@@ -35,14 +35,18 @@ you can walk away from a long run and hear when it is your turn again.
 
 ## How it resumes
 
-Recovery targets a session **by ID** and hands the prompt to a fresh terminal as
-an argument:
+If the session is still open and idle when its limit resets, Limit Break
+continues it in place: no second process, no fork (see
+[Continuing a live session in place](#continuing-a-live-session-in-place)).
+Only when no live process holds the session, or a continue in place fails, does
+it launch one. A launch targets a session **by ID** and hands the prompt to a
+fresh terminal as an argument:
 
 ```
 claude --resume <session-id> "<prompt>"
 ```
 
-Three consequences worth knowing:
+Three consequences worth knowing about a launch:
 
 - **Nothing is typed into an existing terminal.** No prompt text is ever sent to
   a shell that might be sitting at a command line.
@@ -52,6 +56,105 @@ Three consequences worth knowing:
 - **No autonomy is granted.** Resume runs at whatever permission level you
   already use. An unattended headless mode exists, but it is opt-in and
   machine-scoped so a workspace cannot enable it for you.
+
+## Continuing a live session in place
+
+A session that is still open and idle at the reset (in a Claude Code panel or a
+terminal) is continued where it is, with the same prompt (`resumePrompt`). It
+is tried in this order:
+
+1. **The Claude Code mod**, if it is installed and loaded in that session (see
+   [The Claude Code mod](#the-claude-code-mod)). The prompt goes in as if you had
+   typed it.
+2. **The session's inbox**, otherwise. Claude Code lets other sessions send a
+   message to a running one, and Limit Break sends the prompt that way. The
+   model sees it as a message from another session, not from you, so it may stop
+   before an irreversible step and ask you to confirm. The panel shows it as
+   "Message from @limit-break".
+
+Limit Break then waits up to 60 seconds to see the continue take. If it didn't,
+it falls back to launching a terminal, as in 1.0. Two cases skip or change the
+wait:
+
+- If nothing is listening for the message (the session closed between the check
+  and the send), it launches at once rather than waiting.
+- Before it launches, it looks once more. If the message has turned up in the
+  transcript, or the session has taken a new turn since (you typed into it, say),
+  the continue landed late and nothing is launched.
+
+Because there is no second process, a continue in place does not offer to reopen
+the panel tab.
+
+**A panel bridged to Remote Control** is flagged as bridged in the status bar and
+in the "resuming at" notice. The Claude Code web client has been seen to continue
+such a session by itself shortly after the reset, so Limit Break gives it a
+5-minute head start. If the session has moved on by then, Limit Break leaves it
+alone (the log says Remote Control continued it); if not, it continues it in
+place. Cancel Pending Resume during the head start means no continue at all.
+Cancel while a continue is in flight likewise stops the fallback launch.
+
+**A session waiting on a prompt at the reset** (a permission, say) is not
+continued. You get a notice saying it is waiting for your input and the limit
+has reset, with an **Open Session** button that brings that panel or terminal
+into view (in this window only). A session that is busy is left alone silently.
+
+Set `continueInPlace` to `false` to keep 1.0's behaviour: a terminal launch
+only.
+
+## The Claude Code mod
+
+The mod is a small Claude Code plugin that ships inside the extension. It does
+two things:
+
+- **It reports.** Each session it is loaded in writes a status file in
+  `~/.limit-break/sessions/` (the usage numbers Claude Code shows, the last
+  failure, whether Claude Code's own auto-continue fired), so Limit Break sees
+  limits exactly instead of inferring them.
+- **It continues, when asked.** Limit Break sends it a control message through
+  the session's inbox; the mod checks it came from Limit Break, and continues
+  the session as you. Claude never sees the control message.
+
+**It never acts on its own.** Without Limit Break telling it to, the mod only
+writes status files. A control message must carry a single-use, expiring code
+from a file only Limit Break writes; a replayed, pasted or expired one is
+refused (and not shown to Claude either). That guards against accidents and replays. It is not protection against a
+program running as you that is set on reading Limit Break's files; nothing
+file-based can be.
+
+The first time the extension activates without the mod, it offers to install it
+(**Install** / **Not now** / **Never**; "Not now" asks again next time, "Never"
+is final). Install runs `claude plugin marketplace add` and
+`claude plugin install` for you, at user scope. An open session picks the mod up
+after `/reload-plugins`; new sessions load it. After an extension update the mod
+is refreshed to match.
+
+Two commands, in the Command Palette:
+
+- **Limit Break: Install Claude Code mod** installs it (this also undoes a
+  "Never").
+- **Limit Break: Remove Claude Code mod** uninstalls it, and removes its
+  marketplace entry whatever state the install was in.
+
+To install by hand, inside Claude Code:
+
+```
+/plugin install limit-break --marketplace Dream-Mosaic/claude-limit-break
+```
+
+Answer `y`, then pick the user scope. Run `/reload-plugins` in sessions that were
+already open.
+
+The mod is optional. Without it, Limit Break continues through the session's
+inbox.
+
+## A resume that comes due while VS Code is closed
+
+A resume that comes due while VS Code isn't running (closed, or the machine
+asleep) isn't fired when you come back. If VS Code is opened or wakes more than
+10 minutes after the scheduled time, the resume is dropped, with a line in the
+log: "Resume for `<id8>` came due while VS Code wasn't running (N min late);
+leaving it to you." You are there, and can continue the session yourself. Opened
+within 10 minutes, it still resumes. Resume Now is unaffected.
 
 ## Limits that reset more than a day out
 
@@ -97,10 +200,11 @@ resume for it:
 
 | The session is | Limit Break |
 |---|---|
-| An **idle Claude Code panel** | Resumes it. This is the main case: someone leaves a panel idle at a limit and walks away. The stale-tab handling (below) runs afterwards. |
-| A panel or terminal that is **busy or waiting** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
+| An **idle Claude Code panel** | Continues it in place (a bridged panel after a 5-minute head start for the web client); launches a resume only if that fails. This is the main case: someone leaves a panel idle at a limit and walks away. |
+| A panel or terminal that is **busy** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
+| A panel or terminal **waiting on a prompt** | Tells you it is waiting, with an Open Session button. Nothing is sent. |
 | An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute after this window's own resume would have fired (the reset plus its random delay), it looks for a new message in the transcript since the stop was detected; if there is none (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |
-| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Notifies instead of spawning, with a "Resume in Terminal Anyway" button, since nothing else is going to continue it. The notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
+| An **idle terminal, native auto-continue off** — or any idle terminal after an **overload** or at any **other usage limit** (weekly, Opus, Sonnet, Fable, usage credit) | Continues it in place, since nothing else is going to continue it, and no second terminal is opened. With `continueInPlace` off, it instead notifies with a "Resume in Terminal Anyway" button; the notice ends "Resuming here opens a second terminal on the same conversation." The button looks again when you click it: if the session has become busy or waiting in the meantime, you are told so, nothing is started, and the session stays ready for Resume Now. |
 | A session whose native auto-continue was **cancelled for a handoff or by you** (moved to Claude Desktop, sent to the cloud, moved to the background, or Esc / Ctrl+C / "Don't continue automatically" in `/rate-limit-options`) | Stands down when the resume would fire, whatever holds the session: it keeps the claim, remembers the job for Resume Now, logs the reason and says "Limit Break: session `<id8>` was moved to Claude Desktop (or: moved to the cloud, moved to the background, set to wait by you), so it was not resumed here." with a Resume Now button. The last cancel line since the stop was detected decides. Any other reason ("Claude Code exited during the wait", "Claude Code relaunched during the wait"), no cancel line, or wording this version does not know: nothing changes. The Resume Now command and buttons are unaffected: you chose. |
 | A **different** session busy or waiting in the **same folder** | Resumes anyway, and adds a sentence to the resumed session's own opening prompt asking it to message the busy session with SendMessage before editing anything, so the two coordinate instead of colliding. |
 
@@ -206,7 +310,11 @@ entirely.
 
 ## The panel tab after a resume
 
-A resume advances the session on disk. A Claude Code panel tab that was already
+This applies to a **launch** only. A session continued in place has no second
+process, so its tab stays correct and nothing is offered. (A launch happens when
+no live process held the session, or a continue in place failed.)
+
+A launch advances the session on disk. A Claude Code panel tab that was already
 open does not re-read it: it keeps its own idea of where the conversation ends,
 in memory. Type into that tab and your message is anchored *before* the resumed
 turn — the transcript forks, and the branch holding the resumed turn is the one
@@ -283,10 +391,10 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 |---|---|---|
 | `enabled` | `true` | Watch transcripts for limits and server errors. Turning it off also stops a resume that is already counting down: when its time comes it is kept for Resume Now instead of firing. |
 | `autoResume` | `true` | Resume when the cooldown elapses. Off means a notification offers Resume Now instead, and that offer survives a window reload (unless another window on the same VS Code profile has overwritten the shared list of waiting resumes; see Known limitations in [CHANGELOG.md](CHANGELOG.md)). |
-| `resumeMode` | `interactive` | `interactive` opens a terminal at your normal autonomy. `headless` runs with `-p` and needs an explicit permission mode below or tool calls are denied; opt-in and machine-scoped. |
-| `headlessPermissionMode` | `""` | Permission mode for headless resumes. Empty denies tool calls; headless does not inherit the session's own mode. |
+| `resumeMode` | `interactive` | Applies to a launch only, which now happens only when no live process holds the session or a continue in place fails. `interactive` opens a terminal at your normal autonomy. `headless` runs with `-p` and needs an explicit permission mode below or tool calls are denied; opt-in and machine-scoped. |
+| `headlessPermissionMode` | `""` | Permission mode for headless launches. Empty denies tool calls; headless does not inherit the session's own mode. |
 | `claudeCommand` | `""` | Path to `claude`. Empty auto-detects from PATH. |
-| `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | Passed as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
+| `resumePrompt` | `[Limit Break] Your session was interrupted and has been resumed automatically. Please continue from where you left off.` | The same prompt goes out on all three paths: the mod's continue, the inbox message and a launch. A launch passes it as one argument, never through a shell. The same prompt is used for a usage limit and for a server error. |
 | `maxResumeTokens` | `0` | Off by default. When set, refuse a resume whose estimated cost exceeds this, with a "Resume anyway" button. A session with no usage record is not checked. `0` never refuses; `500000` is a reasonable starting point. |
 | `maxWaitHours` | `24` | Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is announced once and not scheduled; continue the session yourself when it resets. Each new limit hit is judged again. A reset more than 8 days out, or beyond `maxWaitHours` if that is higher, is rejected as a misread. See [Limits that reset more than a day out](#limits-that-reset-more-than-a-day-out). |
 | `continueInPlace` | `true` | When a session's process is still open and idle at the reset, continue it in place, through Limit Break's Claude Code mod or the session's inbox, instead of launching a second process. Off keeps 1.0's terminal launch. |
@@ -294,7 +402,7 @@ All under `claudeLimitBreak.`, all with defaults that work unattended.
 | `randomDelayMinMinutes` / `randomDelayMaxMinutes` | `5` / `30` | Random padding after the reset time, so every waiting session does not resume at the same instant. |
 | `notify` | `true` | Notify on detection and on resume. |
 | `alertSound` / `alertSoundFile` | `true` / `""` | Chime when a turn finishes in this window's folders. Empty file uses the system default. |
-| `onStale` | `notify` | What to do when the resumed session is still open in a panel tab: `notify` or `reopen`. |
+| `onStale` | `notify` | Applies to a launch only, not to a continue in place. What to do when the resumed session is still open in a panel tab: `notify` or `reopen`. |
 | `statusBar` | `always` | `always`, `pending` (hide unless something is counting down, ready, or given up) or `never`. |
 | `watchScope` | `machine` | `machine` watches every Claude session on the machine, including one started outside any open window. `workspace` watches only this window's workspace, and avoids two open windows reacting to the same limit. |
 | `checkForUpdates` | `false` | Check GitHub once a day for a newer release and say so. Off by default: it's an outbound request to `api.github.com`, and a VSIX never updates itself so nothing else will tell you. Failures are silent. |
@@ -356,7 +464,12 @@ Releases**.
 ```bash
 npm install
 npm test
+claude plugin validate mod
+claude plugin test mod
 ```
+
+The last two check the Claude Code mod in `mod/` (its manifest, and its own
+tests run by Claude Code).
 
 The parser suites in [test/parsers](test/parsers), together with the
 entry-level cases in

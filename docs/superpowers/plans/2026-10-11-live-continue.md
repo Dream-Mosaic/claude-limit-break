@@ -26,7 +26,7 @@ Tick a task's box here when its commit lands, and commit this file with it, so a
 - [x] Task 10: Wire continue-in-place, the waiting notice and the bridged head start into `extension.ts`
 - [x] Task 11: Show bridged sessions (D11 indicator)
 - [x] Task 12: Install the mod (`modInstall.ts`, commands, packaging)
-- [ ] Task 13: Docs, version 1.1.0, smoke kit
+- [x] Task 13: Docs, version 1.1.0, smoke kit
 
 ## Standing permission
 
