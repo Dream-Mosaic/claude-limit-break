@@ -1230,6 +1230,7 @@ export function activate(context: vscode.ExtensionContext): void {
         job.sessionId.slice(0, 8),
         job.reason,
         job.rateLimitType,
+        false,
       );
       if (decision.logMessage) {
         (decision.logLevel === 'warn' ? log.warn : log.info)(decision.logMessage);
@@ -1241,6 +1242,10 @@ export function activate(context: vscode.ExtensionContext): void {
         const notice = decision.notice;
         void Promise.resolve(vscode.window.showInformationMessage(notice.message, notice.button)).then(async (choice) => {
           if (choice !== notice.button) {
+            return;
+          }
+          // Task 10 wires the open-session button.
+          if (decision.openSession) {
             return;
           }
           // The offer used the holder snapshot from this fire and the notice does not

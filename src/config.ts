@@ -17,6 +17,7 @@ export interface Settings {
   watchScope: 'machine' | 'workspace';
   checkForUpdates: boolean;
   onStale: 'notify' | 'reopen';
+  continueInPlace: boolean;
 }
 
 export interface ConfigSource {
@@ -61,5 +62,6 @@ export function readSettings(c: ConfigSource): Settings {
     statusBar: oneOf(STATUS_BAR_MODES, c.get('statusBar', 'always'), 'always'),
     watchScope: oneOf(WATCH_SCOPES, c.get('watchScope', 'machine'), 'machine'),
     checkForUpdates: c.get('checkForUpdates', false),
+    continueInPlace: typeof c.get('continueInPlace', true) === 'boolean' ? c.get('continueInPlace', true) : true,
   };
 }

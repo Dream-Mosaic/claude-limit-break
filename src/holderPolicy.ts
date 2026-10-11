@@ -16,9 +16,16 @@ export interface OnFireDecision {
    * True only when this stood down for Claude Code's own auto-continue: an idle terminal at a five-hour usage limit (or one of unknown type) with the setting on. Native auto-continue arms only for `status === "rejected"` and `rateLimitType === "five_hour"`, so other limits are offered instead. The feature may not exist for every account, so the caller checks back after the stall-watch grace and offers the job if the transcript never grew; that check also keeps an unknown limit type safe.
    */
   awaitNativeContinue?: true;
+  /** Continue the live, idle holder in place (mod or socket) instead of launching (D5, D8). */
+  continueInPlace?: { pid: number; kind: 'panel' | 'terminal'; bridged: boolean };
+  /** The notice's button opens this holder instead of resuming (D9). */
+  openSession?: { pid: number; kind: 'panel' | 'terminal' };
 }
 
 const RESUME_IN_TERMINAL_BUTTON = 'Resume in Terminal Anyway';
+
+/** The button on the notice for a holder waiting on a prompt (D9). */
+export const OPEN_SESSION_BUTTON = 'Open Session';
 
 /** Appended to every notice carrying {@link RESUME_IN_TERMINAL_BUTTON}: the button opens a NEW terminal on a conversation the existing one still holds. */
 const SECOND_TERMINAL = ' Resuming here opens a second terminal on the same conversation.';
@@ -26,7 +33,7 @@ const SECOND_TERMINAL = ' Resuming here opens a second terminal on the same conv
 /**
  * Whether a holder's status counts as idle. An unknown or missing status counts as idle (fail open): resuming unattended is the goal, and a failed listing already resumes. Only 'busy' and 'waiting' are not idle.
  */
-function isIdleStatus(status: string | undefined): boolean {
+export function isIdleStatus(status: string | undefined): boolean {
   return status !== 'busy' && status !== 'waiting';
 }
 
@@ -48,7 +55,9 @@ export function decideOnFire(
   shortId: string,
   reason: 'limit' | 'overload',
   /** The limit type the detection named (LimitDetection.rateLimitType), when it could tell. Read for `reason === 'limit'` only. */
-  rateLimitType?: string,
+  rateLimitType: string | undefined,
+  /** The `continueInPlace` setting. Off keeps 1.0's outcomes for an idle holder. */
+  continueInPlaceOn: boolean,
 ): OnFireDecision {
   if (holder === 'unknown') {
     return {
@@ -61,7 +70,29 @@ export function decideOnFire(
   if (holder.kind === 'none') {
     return { resume: true, remember: false };
   }
+  const where = holder.kind === 'panel' ? 'a Claude panel' : 'a terminal';
+  // Waiting on a prompt (a permission, a question): continuing in place would answer it by accident and a launch would fork it, so tell the person, whatever the setting says (D9).
+  if (holder.status === 'waiting') {
+    return {
+      resume: false,
+      remember: false,
+      logMessage: `Session ${shortId} is waiting for input in ${where} (pid ${holder.pid}); the limit has reset, so telling you.`,
+      notice: {
+        message: `Limit Break: session ${shortId} is waiting for your input in ${where}; the limit has reset.`,
+        button: OPEN_SESSION_BUTTON,
+      },
+      openSession: { pid: holder.pid, kind: holder.kind },
+    };
+  }
   if (holder.kind === 'panel' && isIdleStatus(holder.status)) {
+    if (continueInPlaceOn) {
+      return {
+        resume: false,
+        remember: false,
+        continueInPlace: { pid: holder.pid, kind: 'panel', bridged: holder.bridged },
+        logMessage: `Session ${shortId} is open in an idle Claude panel (pid ${holder.pid}); continuing it in place.`,
+      };
+    }
     return {
       resume: true,
       remember: false,
@@ -89,6 +120,15 @@ export function decideOnFire(
     };
   }
   // terminal, idle. Native auto-continue (`autoContinueAtUsageLimit`) covers a usage limit reset only, not the overload family (529, transient 429, interrupted stream), so for an overload job the setting is irrelevant and the offer is made as if it were off.
+  const nativeCovers = reason === 'limit' && (rateLimitType === undefined || rateLimitType === 'five_hour') && autoContinueOn;
+  if (continueInPlaceOn && !nativeCovers) {
+    return {
+      resume: false,
+      remember: false,
+      continueInPlace: { pid: holder.pid, kind: 'terminal', bridged: false },
+      logMessage: `Session ${shortId} is open in an idle terminal (pid ${holder.pid}); continuing it in place.`,
+    };
+  }
   if (reason === 'overload') {
     return {
       resume: false,
@@ -173,8 +213,12 @@ export function busyAtClickNotice(holder: SessionHolder | 'unknown', shortId: st
 export function manualResumeWarning(
   holder: SessionHolder | 'unknown',
   shortId: string,
+  continueInPlaceOn = false,
 ): { message: string; button: string } | undefined {
   if (holder === 'unknown' || holder.kind === 'none') {
+    return undefined;
+  }
+  if (continueInPlaceOn && isIdleStatus(holder.status)) {
     return undefined;
   }
   if (holder.kind === 'panel' && isIdleStatus(holder.status)) {

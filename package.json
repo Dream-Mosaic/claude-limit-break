@@ -131,6 +131,12 @@
           "scope": "window",
           "description": "Resume automatically only when the limit resets within this many hours. A later reset (a weekly limit, for example) is announced once and not scheduled; continue the session yourself when it resets. Each new limit hit is judged again. A reset more than 8 days out, or beyond maxWaitHours if that is higher, is rejected as a misread."
         },
+        "claudeLimitBreak.continueInPlace": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "When a session's process is still open and idle at the reset, continue it in place, through Limit Break's Claude Code mod or the session's inbox, instead of launching a second process. Off keeps 1.0's terminal launch."
+        },
         "claudeLimitBreak.transcriptPollSeconds": {
           "type": "number",
           "default": 5,

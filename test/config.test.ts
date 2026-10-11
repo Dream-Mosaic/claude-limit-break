@@ -170,3 +170,9 @@ test('update checks are off until asked for', () => {
 test('checkForUpdates can be turned on', () => {
   assert.equal(readSettings(source({ checkForUpdates: true })).checkForUpdates, true);
 });
+
+test('continueInPlace is on by default, can be turned off, and a non-boolean falls back to on', () => {
+  assert.equal(readSettings(source()).continueInPlace, true);
+  assert.equal(readSettings(source({ continueInPlace: false })).continueInPlace, false);
+  assert.equal(readSettings(source({ continueInPlace: 'no' })).continueInPlace, true);
+});
