@@ -20,6 +20,9 @@ import * as nodeFs from 'node:fs';
  *   `<local-command-caveat>`, `<command-name>` or `<local-command-stdout>`. Checking when a
  *   limit resets is not getting past it. Other `isMeta` entries still count: native
  *   auto-continue's "Continue from where you left off." is one.
+ * - Inbound deliveries: `user` entries starting `<task-notification>` (a background task
+ *   finishing), `<cross-session-message` or `Another Claude session sent a message:`. They queue
+ *   into a stopped session without waking it; a real assistant entry after one still counts.
  * - Any other entry type (`system`, `summary`, hook and snapshot records).
  * - Unparseable or partial lines: the tail may be mid-write, and a tail read can start mid-line.
  *
@@ -120,6 +123,13 @@ export interface ContinuedFs {
 const LOCAL_COMMAND_RE = /^\s*<(?:command-name|local-command-stdout|local-command-stderr|local-command-caveat)>/;
 
 /**
+ * Where a `user` entry carrying an inbound delivery starts: a background task's finishing notice,
+ * or a message from another session or agent. Queued into a stopped session, it is not the
+ * session moving; only the turn it wakes is.
+ */
+const INBOUND_DELIVERY_RE = /^\s*(?:<task-notification>|<cross-session-message|Another Claude session sent a message:)/;
+
+/**
  * What one appended entry says about the stop: true for the session moving
  * on (a real user or assistant entry), false for it stopping again (a flagged
  * user or assistant entry), undefined for neither.
@@ -141,8 +151,11 @@ function readEntry(entry: unknown): boolean | undefined {
     if (m.model === '<synthetic>') {
       return undefined;
     }
-    if (e.type === 'user' && LOCAL_COMMAND_RE.test(leadingText(m.content))) {
-      return undefined;
+    if (e.type === 'user') {
+      const text = leadingText(m.content);
+      if (LOCAL_COMMAND_RE.test(text) || INBOUND_DELIVERY_RE.test(text)) {
+        return undefined;
+      }
     }
   }
   return true;

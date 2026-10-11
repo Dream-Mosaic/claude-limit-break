@@ -336,3 +336,59 @@ test('a compaction that failed on the limit again, then nothing, is still stoppe
   );
   assert.equal(continuedSince(file, baseline), false);
 });
+
+// Inbound deliveries queued into a stopped session (a background task finishing, a message from
+// another session or agent) are not the session moving; only the turn they wake is. Shapes
+// follow a real transcript where two subagents finished after the limit entry; no real content.
+const taskNotification = (summary: string, timestamp: string) =>
+  line({
+    type: 'user',
+    timestamp,
+    message: { role: 'user', content: `<task-notification>\n<task-id>a1b2c3</task-id>\n<status>completed</status>\n<summary>${summary}</summary>\n</task-notification>` },
+  });
+
+test('two task notifications queued after the stop, then nothing, are not a continuation', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    taskNotification('Agent "review" completed', '2026-10-11T09:39:57.987Z') + taskNotification('Agent "tests" completed', '2026-10-11T09:39:59.560Z'),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('task notifications followed by a real assistant reply are a continuation', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, taskNotification('Agent "review" completed', '2026-10-11T09:39:57.987Z') + REAL_TURN);
+  assert.equal(continuedSince(file, baseline), true);
+});
+
+test('a task notification as the first block of a content array is not a continuation either', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<task-notification>done</task-notification>' }] } }),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('a cross-session message queued after the stop, then nothing, is not a continuation', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(
+    file,
+    line({ type: 'user', message: { role: 'user', content: '<cross-session-message from="peer">status?</cross-session-message>' } }) +
+      line({ type: 'user', message: { role: 'user', content: 'Another Claude session sent a message: status?' } }),
+  );
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('a flagged error after a task notification is still stopped', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, taskNotification('Agent "review" completed', '2026-10-11T09:39:57.987Z') + LIMIT_ENTRY);
+  assert.equal(continuedSince(file, baseline), false);
+});
+
+test('task-notification text that is not at the start of a user message is a real prompt (control)', () => {
+  const { file, baseline } = transcriptAtDetection();
+  fs.appendFileSync(file, line({ type: 'user', message: { role: 'user', content: 'what is a <task-notification>?' } }));
+  assert.equal(continuedSince(file, baseline), true);
+});
