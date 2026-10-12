@@ -57,8 +57,10 @@ test('mod: a control message goes out with a fresh nonce, and the mod listing th
   const control = JSON.parse(controls[0]!);
   assert.equal(control.entries[0].jobId, JOB.jobId);
   assert.equal(control.entries[0].nonce, 'id-1');
+  assert.equal(control.entries[0].prompt, '[Limit Break] continue');
   const payload = JSON.parse(sent[0]!.lines[1]!);
-  assert.ok(payload.message.content.includes(`[limit-break-control v1] {"jobId":"${JOB.jobId}","nonce":"id-1","prompt":"[Limit Break] continue"}`));
+  assert.ok(payload.message.content.includes(`[limit-break-control v1] {"jobId":"${JOB.jobId}","nonce":"id-1"}`));
+  assert.ok(!payload.message.content.includes('[Limit Break] continue'), 'the prompt is in the control file, not the message');
 });
 
 test('a status file from an earlier process means the socket, never a control message', async () => {

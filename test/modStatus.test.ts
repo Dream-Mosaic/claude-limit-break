@@ -8,8 +8,8 @@ import {
 import { buildEnvelope } from '../src/inbox';
 
 const mod = require(path.join(__dirname, '..', '..', 'mod', 'hooks', 'control.mjs')) as {
-  parseControl(t: string): { kind: string; jobId?: string; nonce?: string; prompt?: string };
-  acceptControl(c: { jobId: string; nonce: string }, f: string | undefined, s: { continued: { jobId: string }[] }, now: number): { ok: boolean };
+  parseControl(t: string): { kind: string; jobId?: string; nonce?: string; };
+  acceptControl(c: { jobId: string; nonce: string }, f: string | undefined, s: { continued: { jobId: string }[] }, now: number): { ok: boolean; prompt?: string };
   CONTROL_MARKER: string; PROTOCOL: number;
 };
 
@@ -19,15 +19,15 @@ const status = (over: Record<string, unknown> = {}) =>
 
 test('the extension and the mod agree on the protocol', () => {
   assert.equal(MOD_PROTOCOL, mod.PROTOCOL);
-  assert.equal(buildControlBody('j', 'n', 'p').startsWith(mod.CONTROL_MARKER), true);
+  assert.equal(buildControlBody('j', 'n').startsWith(mod.CONTROL_MARKER), true);
 });
 
 test('a control body the extension builds is one the mod parses and accepts', () => {
-  const text = buildEnvelope(buildControlBody('job-1', 'nonce-1', '[Limit Break] continue'));
+  const text = buildEnvelope(buildControlBody('job-1', 'nonce-1'));
   const parsed = mod.parseControl(text);
-  assert.deepEqual(parsed, { kind: 'control', jobId: 'job-1', nonce: 'nonce-1', prompt: '[Limit Break] continue' });
-  assert.deepEqual(mod.acceptControl({ jobId: 'job-1', nonce: 'nonce-1' }, controlFileText('job-1', 'nonce-1', 1_000), { continued: [] }, 1_000 + CONTROL_TTL_MS - 1), { ok: true });
-  assert.equal(mod.acceptControl({ jobId: 'job-1', nonce: 'nonce-1' }, controlFileText('job-1', 'nonce-1', 1_000), { continued: [] }, 1_000 + CONTROL_TTL_MS).ok, false);
+  assert.deepEqual(parsed, { kind: 'control', jobId: 'job-1', nonce: 'nonce-1' });
+  assert.deepEqual(mod.acceptControl({ jobId: 'job-1', nonce: 'nonce-1' }, controlFileText('job-1', 'nonce-1', 1_000, '[Limit Break] continue'), { continued: [] }, 1_000 + CONTROL_TTL_MS - 1), { ok: true, prompt: '[Limit Break] continue' });
+  assert.equal(mod.acceptControl({ jobId: 'job-1', nonce: 'nonce-1' }, controlFileText('job-1', 'nonce-1', 1_000, 'p'), { continued: [] }, 1_000 + CONTROL_TTL_MS).ok, false);
 });
 
 test('paths', () => {

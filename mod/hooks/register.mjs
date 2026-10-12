@@ -47,9 +47,9 @@ async function start($, s, sessionId) {
   await write($, s);
 }
 
-async function submit($, s, control, sessionId) {
+async function submit($, s, control, prompt, sessionId) {
   try {
-    const result = await $.prompt.submit({ text: control.prompt, asUser: true });
+    const result = await $.prompt.submit({ text: prompt, asUser: true });
     if (typeof result.text === 'string') {
       await recordContinued($, s, sessionId, control.jobId);
     } else {
@@ -123,7 +123,7 @@ export const register = (on) => {
   });
 
   on('session.receive', async ($, e, next) => {
-    if (e.agentId !== undefined || !PEER_ORIGINS.includes(e.origin.kind)) {
+    if (e.agentId !== undefined || !PEER_ORIGINS.includes(e.origin?.kind)) {
       return next(e);
     }
     const control = parseControl(e.text);
@@ -148,7 +148,7 @@ export const register = (on) => {
     }
     // Unawaited, as spike S4 ran it from session.receive: the turn starts once the session is idle. The job counts as continued only once the prompt entered; until the submit settles it is in flight, so a replay is refused meanwhile.
     s.inFlight.add(control.jobId);
-    void submit($, s, control, s.status.sessionId);
+    void submit($, s, control, verdict.prompt, s.status.sessionId);
     return { consumed: 'limit-break control message' };
   });
 };

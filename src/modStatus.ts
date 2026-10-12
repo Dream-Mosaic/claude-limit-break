@@ -6,6 +6,7 @@ import * as path from 'node:path';
  */
 
 export const MOD_PROTOCOL = 1;
+/** Starts the body of a control message: `[limit-break-control v1] {"jobId","nonce"}`. */
 export const CONTROL_MARKER = '[limit-break-control v1]';
 /** How long a control entry stays valid: long enough for a busy-then-idle session to read its inbox, short enough that a stale one can't be replayed later. */
 export const CONTROL_TTL_MS = 120_000;
@@ -98,11 +99,12 @@ export function continuedJob(status: ModStatus | undefined, jobId: string): bool
   return status !== undefined && status.continued.some((c) => c.jobId === jobId);
 }
 
-export function buildControlBody(jobId: string, nonce: string, prompt: string): string {
-  return `${CONTROL_MARKER} ${JSON.stringify({ jobId, nonce, prompt })}`;
+/** The control message: `jobId` and `nonce` only. The prompt travels in the control file, which only the extension writes (2026-10-12, U2). */
+export function buildControlBody(jobId: string, nonce: string): string {
+  return `${CONTROL_MARKER} ${JSON.stringify({ jobId, nonce })}`;
 }
 
-/** The whole control file for one continue: a single-use entry (the mod refuses a job it already continued) that expires CONTROL_TTL_MS from now. */
-export function controlFileText(jobId: string, nonce: string, nowMs: number): string {
-  return JSON.stringify({ protocol: MOD_PROTOCOL, entries: [{ jobId, nonce, expiresAtMs: nowMs + CONTROL_TTL_MS }] }, null, 2);
+/** The whole control file for one continue: a single-use entry (the mod refuses a job it already continued) that carries the prompt the mod will submit and expires CONTROL_TTL_MS from now. */
+export function controlFileText(jobId: string, nonce: string, nowMs: number, prompt: string): string {
+  return JSON.stringify({ protocol: MOD_PROTOCOL, entries: [{ jobId, nonce, prompt, expiresAtMs: nowMs + CONTROL_TTL_MS }] }, null, 2);
 }

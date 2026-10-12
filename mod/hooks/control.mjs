@@ -4,7 +4,7 @@
 /** The status file's and control file's protocol; the extension uses the mod only on the same major. */
 export const PROTOCOL = 1;
 export const MOD_VERSION = '1.1.0';
-/** Starts the body of a control message: `[limit-break-control v1] {"jobId","nonce","prompt"}`. */
+/** Starts the body of a control message: `[limit-break-control v1] {"jobId","nonce"}`. The prompt is not in the message; it comes from the control file (2026-10-12, U2). */
 export const CONTROL_MARKER = '[limit-break-control v1]';
 const MAX_CONTINUED = 20;
 
@@ -37,14 +37,15 @@ export function parseControl(text) {
   } catch {
     return { kind: 'invalid', reason: 'its payload is not JSON' };
   }
-  if (typeof parsed !== 'object' || parsed === null || !nonEmpty(parsed.jobId) || !nonEmpty(parsed.nonce) || !nonEmpty(parsed.prompt)) {
-    return { kind: 'invalid', reason: 'its payload lacks jobId, nonce or prompt' };
+  if (typeof parsed !== 'object' || parsed === null || !nonEmpty(parsed.jobId) || !nonEmpty(parsed.nonce)) {
+    return { kind: 'invalid', reason: 'its payload lacks jobId or nonce' };
   }
-  return { kind: 'control', jobId: parsed.jobId, nonce: parsed.nonce, prompt: parsed.prompt };
+  // Any other field, a prompt included, is ignored: only the control file says what to submit.
+  return { kind: 'control', jobId: parsed.jobId, nonce: parsed.nonce };
 }
 
 /**
- * Whether a control message may act: the extension's control file (which only it writes) must hold an unexpired entry with this job and nonce, and the job must not have been continued already.
+ * Whether a control message may act: the extension's control file (which only it writes) must hold an unexpired entry with this job and nonce and a non-empty prompt, and the job must not have been continued already. On success `prompt` is the entry's, which is what the mod submits.
  * @param {{ jobId: string, nonce: string }} control
  * @param {string | undefined} controlFileText
  * @param {{ continued: { jobId: string }[] }} status
@@ -71,7 +72,10 @@ export function acceptControl(control, controlFileText, status, nowMs) {
   if (!(typeof match.expiresAtMs === 'number' && match.expiresAtMs > nowMs)) {
     return { ok: false, reason: 'its control entry has expired' };
   }
-  return { ok: true };
+  if (!nonEmpty(match.prompt)) {
+    return { ok: false, reason: 'its control entry has no prompt' };
+  }
+  return { ok: true, prompt: match.prompt };
 }
 
 /**

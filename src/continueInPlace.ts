@@ -64,11 +64,11 @@ export async function continueInPlace(job: ContinueJob, holderPid: number, deps:
   if (transport === 'mod') {
     const nonce = deps.newId();
     try {
-      deps.writeControlFile(job.sessionId, controlFileText(job.jobId, nonce, deps.now()));
+      deps.writeControlFile(job.sessionId, controlFileText(job.jobId, nonce, deps.now(), job.prompt));
     } catch (err) {
       return { kind: 'fallback', reason: `could not write the control file: ${(err as Error).message}` };
     }
-    body = buildControlBody(job.jobId, nonce, job.prompt);
+    body = buildControlBody(job.jobId, nonce);
   }
   const msgId = deps.newId();
   const payload = buildPayload(job.sessionId, buildEnvelope(body), msgId);

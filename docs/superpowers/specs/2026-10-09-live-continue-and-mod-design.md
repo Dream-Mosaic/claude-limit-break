@@ -302,12 +302,14 @@ file, and drops the old one.
 control message:
 1. The text is an envelope from `limit-break` whose body starts with
    `[limit-break-control v1]`, followed by a JSON payload
-   `{ jobId, nonce, prompt }`.
+   `{ jobId, nonce }`. (2026-10-12: prompt moved into the control file (U2).
+   The message no longer carries it, and the mod ignores any extra field.)
 2. The mod reads `<dir>/control/<sessionId>.json`, which only the extension
    writes. It accepts the message only if the nonce and job id match an entry
-   there that hasn't expired and hasn't been used yet.
+   there that hasn't expired and hasn't been used yet, and that entry has a
+   non-empty `prompt`.
 3. It returns `{ consumed }`, so Claude never sees the control text.
-4. It runs `$.prompt.submit({ text: prompt, asUser: true })` without awaiting
+4. It runs `$.prompt.submit({ text: <the entry's prompt>, asUser: true })` without awaiting
    it. S4 did exactly that from `session.receive` and the turn started. S2
    found that a submit made inside a `command.run` handler was silently
    dropped, so the plan should also test whether a `$.clock.after(0)` callback
