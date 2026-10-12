@@ -234,3 +234,118 @@ test('on linux a differently-cased path is a different folder, not another spell
   assert.equal(trustedSpelling('/home/a/proj', config, 'linux'), undefined);
   assert.equal(isFolderTrusted('/home/a/proj', config, 'linux'), false);
 });
+
+// --- A git worktree is trusted through its main checkout (F2) ---
+// Mirrors the CLI's canonical-root lookup. The reads are injected: no test here touches the real disk.
+
+const WT = '/r/proj-wt';
+const MAIN = '/r/proj';
+const fakeFs = (files: Record<string, string>) => (p: string): string => {
+  const text = files[p];
+  if (text === undefined) {
+    throw new Error(`ENOENT ${p}`);
+  }
+  return text;
+};
+const worktreeFiles = (over: Record<string, string | undefined> = {}): Record<string, string> => {
+  const files: Record<string, string | undefined> = {
+    [`${WT}/.git`]: `gitdir: ${MAIN}/.git/worktrees/wt\n`,
+    [`${MAIN}/.git/worktrees/wt/commondir`]: '../..\n',
+    [`${MAIN}/.git/worktrees/wt/gitdir`]: `${WT}/.git\n`,
+    ...over,
+  };
+  return Object.fromEntries(Object.entries(files).filter(([, v]) => v !== undefined)) as Record<string, string>;
+};
+const mainTrusted = { projects: { [MAIN]: { hasTrustDialogAccepted: true } } };
+
+test('a valid worktree is trusted through its main checkout, though its own record is missing', () => {
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', fakeFs(worktreeFiles())), true);
+});
+
+test('an explicit false on the worktree\'s own key does not block the main checkout\'s record', () => {
+  const config = { projects: { [MAIN]: { hasTrustDialogAccepted: true }, [WT]: { hasTrustDialogAccepted: false } } };
+  assert.equal(isFolderTrusted(WT, config, 'linux', fakeFs(worktreeFiles())), true);
+});
+
+test('without a reader only the exact folder is checked', () => {
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux'), false);
+});
+
+test('a worktree whose main checkout is not trusted is not trusted', () => {
+  const config = { projects: { [MAIN]: { hasTrustDialogAccepted: false } } };
+  assert.equal(isFolderTrusted(WT, config, 'linux', fakeFs(worktreeFiles())), false);
+});
+
+test('a worktree is not trusted when its gitdir back-pointer is stale', () => {
+  const read = fakeFs(worktreeFiles({ [`${MAIN}/.git/worktrees/wt/gitdir`]: '/elsewhere/.git\n' }));
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', read), false);
+});
+
+test('a worktree is not trusted when commondir is missing', () => {
+  const read = fakeFs(worktreeFiles({ [`${MAIN}/.git/worktrees/wt/commondir`]: undefined }));
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', read), false);
+});
+
+test('a worktree is not trusted when its gitdir file is missing', () => {
+  const read = fakeFs(worktreeFiles({ [`${MAIN}/.git/worktrees/wt/gitdir`]: undefined }));
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', read), false);
+});
+
+test('a submodule-style gitdir is not trusted', () => {
+  const files = worktreeFiles({
+    [`${WT}/.git`]: 'gitdir: ../proj/.git/modules/x\n',
+    [`${MAIN}/.git/modules/x/commondir`]: undefined,
+  });
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', fakeFs(files)), false);
+  const withCommondir = worktreeFiles({
+    [`${WT}/.git`]: 'gitdir: ../proj/.git/modules/x\n',
+    [`${MAIN}/.git/modules/x/commondir`]: '../..\n',
+    [`${MAIN}/.git/modules/x/gitdir`]: `${WT}/.git\n`,
+  });
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', fakeFs(withCommondir)), false, 'modules is not worktrees');
+});
+
+test('a bare common directory (not named .git) is not trusted', () => {
+  const files = {
+    [`${WT}/.git`]: 'gitdir: /r/proj.git/worktrees/wt\n',
+    '/r/proj.git/worktrees/wt/commondir': '../..\n',
+    '/r/proj.git/worktrees/wt/gitdir': `${WT}/.git\n`,
+  };
+  const config = { projects: { '/r': { hasTrustDialogAccepted: true }, '/r/proj.git': { hasTrustDialogAccepted: true } } };
+  assert.equal(isFolderTrusted(WT, config, 'linux', fakeFs(files)), false);
+});
+
+test('a main checkout key that differs only in case is not trusted: the lookup is exact', () => {
+  const config = { projects: { '/R/Proj': { hasTrustDialogAccepted: true } } };
+  assert.equal(isFolderTrusted(WT, config, 'linux', fakeFs(worktreeFiles())), false);
+  assert.equal(isFolderTrusted(WT, config, 'win32', fakeFs(worktreeFiles())), false);
+});
+
+test('a .git folder rather than a file is not a worktree', () => {
+  const read = (p: string): string => {
+    if (p === `${WT}/.git`) {
+      throw Object.assign(new Error('EISDIR'), { code: 'EISDIR' });
+    }
+    return fakeFs(worktreeFiles())(p);
+  };
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', read), false);
+});
+
+test('a reader that throws means not trusted, never an exception', () => {
+  assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', () => { throw new Error('boom'); }), false);
+});
+
+test('a worktree is trusted on win32 with the gitdir file\'s forward slashes and a differently-cased cwd', () => {
+  const files: Record<string, string> = {
+    'C:\\Users\\u\\proj-wt\\.git': 'gitdir: C:/Users/u/proj/.git/worktrees/wt',
+    'C:\\Users\\u\\proj\\.git\\worktrees\\wt\\commondir': '../..',
+    'C:\\Users\\u\\proj\\.git\\worktrees\\wt\\gitdir': 'C:/Users/u/proj-wt/.git',
+  };
+  const config = { projects: { 'C:/Users/u/proj': { hasTrustDialogAccepted: true } } };
+  assert.equal(isFolderTrusted('C:\\Users\\u\\proj-wt', config, 'win32', fakeFs(files)), true);
+  assert.equal(isFolderTrusted('c:\\Users\\u\\proj-wt', config, 'win32', (p) => fakeFs(files)(p.replace(/^c:/, 'C:'))), true);
+});
+
+test('trustedSpelling is unchanged by a worktree hit: the launch folder stays the exact folder', () => {
+  assert.equal(trustedSpelling(WT, mainTrusted, 'linux'), undefined);
+});

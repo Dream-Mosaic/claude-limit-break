@@ -21,13 +21,70 @@ export function normalizeProjectPath(p: string, platform: NodeJS.Platform): stri
  * Whether Claude Code has recorded `cwd` as trusted for CLI use.
  *
  * Read-only, and must stay so: writing `hasTrustDialogAccepted` back would answer the trust prompt on the user's behalf. "No config", "folder not tracked yet" and "tracked but declined" all return false and are treated identically: all three land a resume on the same stalled prompt.
+ *
+ * A folder is trusted when its own record says so (`trustedSpelling`), or when it is a git worktree whose main checkout is trusted (`worktreeTrusted`, which needs `readText`). Without `readText` only the first applies. An explicit `false` on the worktree's own key does not block the second: the CLI looks up the canonical root first.
  */
 export function isFolderTrusted(
   cwd: string,
   config: ClaudeUserConfig | undefined,
   platform: NodeJS.Platform,
+  readText?: (p: string) => string,
 ): boolean {
-  return trustedSpelling(cwd, config, platform) !== undefined;
+  return trustedSpelling(cwd, config, platform) !== undefined || (readText !== undefined && worktreeTrusted(cwd, config, platform, readText));
+}
+
+/**
+ * Whether `cwd` is the root of a git worktree whose main checkout is recorded as trusted. This mirrors Claude Code 2.1.296, which looks up `projects[<canonical root>]` first, where a worktree's canonical root is its main checkout. The CLI's validation is copied so that a copied or moved worktree reads as "not trusted", the safe direction:
+ *
+ * 1. `<cwd>/.git` is a file whose content starts with `gitdir:`; call the folder it names gitdirDir.
+ * 2. `<gitdirDir>/commondir` resolves, against gitdirDir, to u; `dirname(gitdirDir)` is `join(u, 'worktrees')`; `<gitdirDir>/gitdir` resolves to `<cwd>/.git`; `basename(u)` is `.git`. The main checkout is `dirname(u)`.
+ * 3. Any failed check, or any read that throws, means "not trusted".
+ * 4. The main checkout's key is looked up exactly: backslashes become slashes and a trailing slash goes, but case is not folded, and the spelling is the gitdir file's own.
+ *
+ * Only `<cwd>/.git` is read, so a session in a subfolder of the worktree keeps the plain warning. Known limit: the CLI's final path helper may be a realpath. If so its key has the disk's real case where ours has the case written in the gitdir file; that errs safe unless the gitdir spelling's key is trusted and the real-case key is not. The general walk from cwd up to the git root is not done (#55).
+ */
+export function worktreeTrusted(
+  cwd: string,
+  config: ClaudeUserConfig | undefined,
+  platform: NodeJS.Platform,
+  readText: (p: string) => string,
+): boolean {
+  const main = worktreeMainCheckout(cwd, platform, readText);
+  if (main === undefined) {
+    return false;
+  }
+  const key = main.replace(/\\/g, '/').replace(/\/+$/, '');
+  return config?.projects?.[key]?.hasTrustDialogAccepted === true;
+}
+
+const firstLine = (text: string): string => text.split(/\r?\n/)[0]!.trim();
+
+/** The main checkout of the worktree rooted at `cwd`, as the gitdir file spells it, or undefined when any check of `worktreeTrusted` fails. */
+export function worktreeMainCheckout(
+  cwd: string,
+  platform: NodeJS.Platform,
+  readText: (p: string) => string,
+): string | undefined {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const same = (a: string, b: string) => normalizeProjectPath(p.resolve(a), platform) === normalizeProjectPath(p.resolve(b), platform);
+  try {
+    const dotGit = readText(p.join(cwd, '.git'));
+    if (!dotGit.startsWith('gitdir:')) {
+      return undefined;
+    }
+    const gitdirDir = p.resolve(cwd, firstLine(dotGit.slice('gitdir:'.length)));
+    const u = p.resolve(gitdirDir, firstLine(readText(p.join(gitdirDir, 'commondir'))));
+    if (!same(p.dirname(gitdirDir), p.join(u, 'worktrees'))) {
+      return undefined;
+    }
+    const back = p.resolve(gitdirDir, firstLine(readText(p.join(gitdirDir, 'gitdir'))));
+    if (!same(back, p.join(cwd, '.git')) || p.basename(u) !== '.git') {
+      return undefined;
+    }
+    return p.dirname(u);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

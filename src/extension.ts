@@ -290,6 +290,7 @@ export function activate(context: vscode.ExtensionContext): void {
           planned.cwd,
           readClaudeUserConfig(defaultClaudeConfigPath(), (p) => fs.readFileSync(p, 'utf8')),
           process.platform,
+          (p) => fs.readFileSync(p, 'utf8'),
         )
       : undefined;
     const job = { ...planned, folderTrusted };
@@ -532,6 +533,7 @@ export function activate(context: vscode.ExtensionContext): void {
       job.cwd,
       readClaudeUserConfig(configPath, (p) => fs.readFileSync(p, 'utf8')),
       process.platform,
+      (p) => fs.readFileSync(p, 'utf8'),
     );
     if (trusted) {
       job.folderTrusted = true;
