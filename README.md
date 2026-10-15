@@ -79,7 +79,8 @@ get 1.0's "Resume in Terminal Anyway" notice (or, from Resume Now, the fork
 warning before anything launches). Two cases skip or change the wait:
 
 - If nothing is listening for the message (the session closed between the check
-  and the send), it launches at once rather than waiting.
+  and the send), it does not wait: a panel launches a terminal at once, and a
+  terminal gets 1.0's "Resume in Terminal Anyway" notice.
 - Before it launches, it looks once more. If the message has turned up in the
   transcript, or the session has taken a new turn since (you typed into it, say),
   the continue landed late and nothing is launched.
@@ -89,8 +90,10 @@ the panel tab.
 
 **A panel bridged to Remote Control** is flagged as bridged in the status bar and
 in the "resuming at" notice. The Claude Code web client has been seen to continue
-such a session by itself shortly after the reset, so Limit Break gives it a
-5-minute head start. If the session has moved on by then, Limit Break leaves it
+such a session by itself shortly after the reset, so Limit Break continues it no
+sooner than 5 minutes after the reset. That is a minimum: the default random
+delay (5 to 30 minutes) already covers it, so it only matters with a shorter
+delay. If the session has moved on by then, Limit Break leaves it
 alone (the log says Remote Control continued it); if not, it continues it in
 place. Cancel Pending Resume during the head start means no continue at all.
 Cancel while a continue is in flight likewise stops the fallback launch.
@@ -204,7 +207,7 @@ resume for it:
 
 | The session is | Limit Break |
 |---|---|
-| An **idle Claude Code panel** | Continues it in place (a bridged panel after a 5-minute head start for the web client); launches a resume only if that fails. This is the main case: someone leaves a panel idle at a limit and walks away. |
+| An **idle Claude Code panel** | Continues it in place (a bridged panel no sooner than 5 minutes after the reset, to give the web client a head start); launches a resume only if that fails. This is the main case: someone leaves a panel idle at a limit and walks away. |
 | A panel or terminal that is **busy** | Stands down silently (a log line only) — something is already continuing it, whether that's you or, for a bridged panel, Remote Control's own auto-continue. |
 | A panel or terminal **waiting on a prompt** | Tells you it is waiting, with an Open Session button. Nothing is sent. |
 | An **idle terminal at a five-hour usage limit (or one whose type is unknown), native auto-continue on** | Stands down: Claude Code should pick it back up by itself, and a second `claude --resume` here would just fork the conversation. A minute after this window's own resume would have fired (the reset plus its random delay), it looks for a new message in the transcript since the stop was detected; if there is none (the setting is not available on every account), it says "Claude Code did not continue … on its own" and offers Resume Now. |

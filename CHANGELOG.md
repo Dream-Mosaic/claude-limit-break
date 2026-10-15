@@ -31,7 +31,9 @@ launching a second copy of it.
 - A notice, with an Open Session button, when a session is waiting on a prompt
   at the reset.
 - A panel bridged to Remote Control is marked as bridged, and the web client gets
-  5 minutes to continue it before Limit Break does. Cancel stops the follow-up.
+  a head start: Limit Break continues it no sooner than 5 minutes after the reset.
+  That is a minimum, and the default random delay (5 to 30 minutes) already
+  covers it. Cancel stops the follow-up.
 
 ### Changed
 
