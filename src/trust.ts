@@ -66,7 +66,8 @@ export function worktreeMainCheckout(
   readText: (p: string) => string,
 ): string | undefined {
   const p = platform === 'win32' ? path.win32 : path.posix;
-  const same = (a: string, b: string) => normalizeProjectPath(p.resolve(a), platform) === normalizeProjectPath(p.resolve(b), platform);
+  // Exact, as the CLI's `!==` on resolved paths: a case mismatch then reads as "not trusted", the safe direction.
+  const same = (a: string, b: string) => p.resolve(a) === p.resolve(b);
   try {
     const dotGit = readText(p.join(cwd, '.git'));
     if (!dotGit.startsWith('gitdir:')) {

@@ -335,7 +335,7 @@ test('a reader that throws means not trusted, never an exception', () => {
   assert.equal(isFolderTrusted(WT, mainTrusted, 'linux', () => { throw new Error('boom'); }), false);
 });
 
-test('a worktree is trusted on win32 with the gitdir file\'s forward slashes and a differently-cased cwd', () => {
+test('a worktree is trusted on win32 with the gitdir file\'s forward slashes; a differently-cased cwd is not (the CLI compares the back-pointer exactly)', () => {
   const files: Record<string, string> = {
     'C:\\Users\\u\\proj-wt\\.git': 'gitdir: C:/Users/u/proj/.git/worktrees/wt',
     'C:\\Users\\u\\proj\\.git\\worktrees\\wt\\commondir': '../..',
@@ -343,7 +343,7 @@ test('a worktree is trusted on win32 with the gitdir file\'s forward slashes and
   };
   const config = { projects: { 'C:/Users/u/proj': { hasTrustDialogAccepted: true } } };
   assert.equal(isFolderTrusted('C:\\Users\\u\\proj-wt', config, 'win32', fakeFs(files)), true);
-  assert.equal(isFolderTrusted('c:\\Users\\u\\proj-wt', config, 'win32', (p) => fakeFs(files)(p.replace(/^c:/, 'C:'))), true);
+  assert.equal(isFolderTrusted('c:\\Users\\u\\proj-wt', config, 'win32', (p) => fakeFs(files)(p.replace(/^c:/, 'C:'))), false);
 });
 
 test('trustedSpelling is unchanged by a worktree hit: the launch folder stays the exact folder', () => {
