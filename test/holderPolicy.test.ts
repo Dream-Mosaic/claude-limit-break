@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice, terminalOffer } from '../src/holderPolicy';
+import { decideOnFire, manualResumeWarning, buildResumePrompt, peerLabel, busyAtClickNotice, terminalOffer, holderLogLine } from '../src/holderPolicy';
 
 const panel = (status: string | undefined, bridged = false) => ({ kind: 'panel' as const, pid: 77, bridged, status });
 const terminal = (status: string | undefined) => ({ kind: 'terminal' as const, pid: 88, status });
@@ -493,4 +493,11 @@ test('terminalOffer words the 1.0 terminal offer by why native auto-continue doe
     assert.equal(offer.notice.button, 'Resume in Terminal Anyway');
     assert.match(offer.notice.message, /Resuming here opens a second terminal on the same conversation\.$/);
   }
+});
+
+test('holderLogLine shows the raw status, and says so when none was reported', () => {
+  assert.equal(holderLogLine({ kind: 'panel', pid: 77, bridged: false, status: 'busy' }, '0b3d1f66'), 'Holder of 0b3d1f66: panel, pid 77, status "busy"');
+  assert.equal(holderLogLine({ kind: 'terminal', pid: 88, status: undefined }, '0b3d1f66'), 'Holder of 0b3d1f66: terminal, pid 88, status (not reported)');
+  assert.equal(holderLogLine({ kind: 'none' }, '0b3d1f66'), 'Holder of 0b3d1f66: (none)');
+  assert.equal(holderLogLine('unknown', '0b3d1f66'), 'Holder of 0b3d1f66: (listing failed)');
 });

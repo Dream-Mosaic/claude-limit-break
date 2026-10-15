@@ -50,6 +50,7 @@ import {
   peerLabel,
   busyAtClickNotice,
   isIdleStatus,
+  holderLogLine,
 } from './holderPolicy';
 import {
   continueInPlace,
@@ -115,6 +116,8 @@ const READY_KEY = 'claudeLimitBreak.ready';
  * past one oversized entry (a base64 image) to the last real turn.
  */
 const USAGE_TAIL_BYTES = 8 * 1024 * 1024;
+/** How long the window that takes a mod update or offer claim holds it: long enough for the other windows of one reload to see it, short enough that a later activation can offer again. */
+const MOD_CLAIM_HOLD_MS = 10 * 60_000;
 
 /**
  * Whether a transcript entry's cwd belongs to this window. The watcher is
@@ -848,6 +851,10 @@ export function activate(context: vscode.ExtensionContext): void {
       stallChecks.delete(check);
       const bytesNow = transcriptBytes(job.transcript);
       const verdict = stallVerdict({ bytesAtLaunch, bytesNow });
+      if (verdict !== 'grew') {
+        // A resume that produced nothing leaves no stale panel to warn about.
+        resumedSessions.delete(job.sessionId);
+      }
       if (verdict === 'grew') {
         log.info(`Resume of ${job.sessionId} is producing work; its transcript has grown.`);
         return;
@@ -961,6 +968,27 @@ export function activate(context: vscode.ExtensionContext): void {
       log.info(`Cancelled; not launching a terminal for session ${id8} after its in-place continue fell back.`);
       logOutcome(job, 'cancelled; nothing launched');
       return true;
+    }
+    // The holder may have changed in the 60 s the continue took (a long tool call that started before the send, or a prompt now waiting): look again before any launch. A failed listing fails open, as at the fire.
+    const rowsNow = detectAgentRows();
+    const holderNow = rowsNow === 'unknown' ? 'unknown' : classifyHolder(rowsNow, job.sessionId, undefined, readHolderRecord);
+    if (holderNow !== 'unknown' && holderNow.kind !== 'none') {
+      if (holderNow.status === 'waiting') {
+        const waiting = decideOnFire(holderNow, false, id8, job.reason, job.rateLimitType, false);
+        if (waiting.logMessage) {
+          log.info(waiting.logMessage);
+        }
+        if (waiting.notice) {
+          showHolderNotice(job, claimKeyFor(job), waiting.notice, waiting.openSession);
+        }
+        logOutcome(job, 'waiting for input at fallback; notice shown');
+        return true;
+      }
+      if (!isIdleStatus(holderNow.status)) {
+        log.info(`Session ${id8} is ${holderNow.status} in a ${holderNow.kind} (pid ${holderNow.pid}) after its in-place continue fell back; not launching a second writer.`);
+        logOutcome(job, `dropped: busy at fallback (${holderNow.kind})`);
+        return true;
+      }
     }
     if (kind === 'terminal') {
       if (manual) {
@@ -1249,6 +1277,8 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const reopen = async (target: { tab: vscode.Tab; command: string }, sessionId: string): Promise<void> => {
+    // A reopened panel is current: nothing later needs a stale-panel warning.
+    resumedSessions.delete(sessionId);
     await vscode.window.tabGroups.close(target.tab);
     await vscode.commands.executeCommand(target.command);
     log.info(`Reopened the stale panel tab for session ${sessionId}.`);
@@ -1260,6 +1290,8 @@ export function activate(context: vscode.ExtensionContext): void {
    * anchored to the pre-resume node, forking the transcript and stranding the
    * resumed turn, with no error. Reopening resyncs it, since a restarted panel
    * reads the transcript.
+   *
+   * Once per resume: the FIRST turn end after a launch decides, and the entry is deleted before any async work, so a second turn end (including one the reopened panel ran itself) can neither race it nor warn again. The notice's button keeps working without the entry: it re-resolves its own target.
    */
   const handleStalePanel = async (hit: { file: string; cwd?: string }): Promise<void> => {
     const resolved = resolveSession(hit.file, hit.cwd, statBytes);
@@ -1267,6 +1299,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!resolved || !pending) {
       return;
     }
+    resumedSessions.delete(resolved.sessionId);
     if (!detectLivePanel(resolved.sessionId, await pending)) {
       return;
     }
@@ -1448,15 +1481,24 @@ export function activate(context: vscode.ExtensionContext): void {
    * After an extension update, re-copy and update an installed mod (log only);
    * otherwise, when it could help, offer to install it once per answer
    * ("Not now" asks again next time, "Never" is final).
+   *
+   * Every window activates, and an extension update reloads them all at once, so the flag is read before anything is spawned, and the update/install and the offer are each done by the one window that gets their claim (`mod-update-<version>`, `mod-offer-<version>`); the others do nothing.
    */
   const maybeOfferMod = async (): Promise<void> => {
+    if (context.globalState.get<string>(OFFER_KEY) === 'never') {
+      return;
+    }
+    const takeClaim = (key: string): boolean =>
+      holdClaim(claimsDir(), key, Date.now(), Date.now() + MOD_CLAIM_HOLD_MS, fs, log, vscode.env.sessionId) !== 'taken';
     const installed = isModInstalled(await listInstalledPlugins(runClaude));
     if (installed === undefined) {
       throw new Error('the plugin list could not be read');
     }
     const current = extensionVersion();
     if (installed && context.globalState.get<string>(INSTALLED_VERSION_KEY) !== current) {
-      await updateMod(modDeps());
+      if (takeClaim(`mod-update-${current}`)) {
+        await updateMod(modDeps());
+      }
       return;
     }
     const s = settings();
@@ -1470,9 +1512,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ) {
       return;
     }
+    if (!takeClaim(`mod-offer-${current}`)) {
+      return;
+    }
     const choice = await Promise.resolve(
       vscode.window.showInformationMessage(
-        'Limit Break: a small Claude Code mod reports each session\'s limits and lets Limit Break continue a session as you, privately. Without it, Limit Break uses each session\'s inbox.',
+        'Limit Break: a small Claude Code mod reports each session\'s limits and lets Limit Break continue a session as you, privately. It loads into every Claude Code session on this machine. Without it, Limit Break uses each session\'s inbox.',
         'Install',
         'Not now',
         'Never',
@@ -1642,6 +1687,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // ('unknown') and an IDLE panel reach the ordinary resume below.
       const rows = detectAgentRows();
       const holder = rows === 'unknown' ? 'unknown' : classifyHolder(rows, job.sessionId, undefined, readHolderRecord);
+      log.info(holderLogLine(holder, job.sessionId.slice(0, 8)));
       const decision = decideOnFire(
         holder,
         autoContinueEnabled(job.cwd, process.platform, (p) => fs.readFileSync(p, 'utf8')),
@@ -1660,25 +1706,34 @@ export function activate(context: vscode.ExtensionContext): void {
         const target = decision.continueInPlace;
         const generation = cancelGeneration;
         void (async () => {
-          if (target.bridged) {
-            const headStartMs = job.baseResumeAtMs + BRIDGED_GRACE_MS - Date.now();
-            if (headStartMs > 0) {
-              const until = new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString();
-              log.info(
-                `Session ${job.sessionId.slice(0, 8)} is bridged to Remote Control; giving the web client until ${until} to continue it.`,
-              );
-              logOutcome(job, `bridged; waiting for the web client until ${until}`);
-              await wait(headStartMs);
+          try {
+            if (target.bridged) {
+              const headStartMs = job.baseResumeAtMs + BRIDGED_GRACE_MS - Date.now();
+              if (headStartMs > 0) {
+                const until = new Date(job.baseResumeAtMs + BRIDGED_GRACE_MS).toLocaleTimeString();
+                log.info(
+                  `Session ${job.sessionId.slice(0, 8)} is bridged to Remote Control; giving the web client until ${until} to continue it.`,
+                );
+                logOutcome(job, `bridged; waiting for the web client until ${until}`);
+                await wait(headStartMs);
+              }
+              if (hasContinued(job)) {
+                log.info(`Remote Control continued session ${job.sessionId.slice(0, 8)}; not continuing it here.`);
+                logOutcome(job, 'Remote Control continued it');
+                return;
+              }
             }
-            if (hasContinued(job)) {
-              log.info(`Remote Control continued session ${job.sessionId.slice(0, 8)}; not continuing it here.`);
-              logOutcome(job, 'Remote Control continued it');
-              return;
+            if (!(await continueHolder(coordinated(job, rows), target.pid, target.kind, false, generation))) {
+              rememberReady(job);
+              releaseClaim(claimsDir(), claimKey, fs, log);
             }
-          }
-          if (!(await continueHolder(coordinated(job, rows), target.pid, target.kind, false, generation))) {
+          } catch (error) {
+            // Exactly one outcome line per fire (final-fix D): an error here is the outcome. The job is kept for Resume Now and the claim released so a later attempt is not blocked.
+            const message = error instanceof Error ? error.message : String(error);
             rememberReady(job);
             releaseClaim(claimsDir(), claimKey, fs, log);
+            log.error(`Continuing session ${job.sessionId.slice(0, 8)} in place failed: ${message}`);
+            logOutcome(job, `failed: ${message}`);
           }
         })();
         return;

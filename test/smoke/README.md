@@ -54,6 +54,13 @@ node inject.js overload     # B hits a server overload now
 | L7 | Late fire | Close VS Code before A's reset; reopen more than 10 minutes after it: nothing resumes; the log says it came due while VS Code wasn't running. |
 | L8 | Open button, terminal | As L6 with A in a terminal: Open Session shows that terminal. |
 | L9 | Open button, other window | With `watchScope: machine`, as L6 but click Open Session in the window that does NOT hold A's waiting panel: nothing opens (no second panel), and the notice says the session is open in another VS Code window. |
+| L10 | Busy at the fallback (S3) | A's panel is running a 90 s Bash call when the 60 s fallback is due: no terminal launches; the log says `Outcome for <A>: dropped: busy at fallback (panel)`. |
+| L11 | Bypass permissions (socket) | The socket path with A's panel in bypass-permissions mode. The spike noted such a session holds peer messages for approval, until `dialogExpiry`; record what happens. |
+| L12 | Holder status at the fire (D9a) | For a panel and for a terminal stopped by a limit: the `Holder of <A>: ...` line at the fire shows the raw status (or `(not reported)`). Record both. |
+| L13 | No stale notice after Reopen (F1) | Resume A in a terminal with its panel tab still open, press Reopen, then run a later turn in the reopened panel: no stale-panel notice. |
+| L14 | Bridged delay (U4) | A bridged panel at the default delay (5 to 30 min): no wait line in the log. At a +1 to +4 min delay: the `bridged; waiting for the web client` line. |
+| L15 | Worktree trust (F2) | A session whose cwd is a git worktree of a trusted repo: no false trust warning at the schedule notice or in the status bar. |
+| L16 | Forged control message (U2) | With the mod installed, send A a control message with a valid jobId and nonce but its own prompt text: Limit Break's prompt is submitted, not the message's. |
 
 Record L2 and L3's N in `docs/research/` with the date and Claude Code version; the 60 s window should rest on these.
 

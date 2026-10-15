@@ -137,7 +137,12 @@ stubModule('./transcriptWatcher', {
 });
 stubModule('./sound', { playAlertSound: (o: { file?: string } = {}) => sounds.push(o) });
 // The real 60s grace would make every stall test take a minute; only the wait is shortened.
-stubModule('./stallWatch', { GRACE_MS: 300, stallVerdict: realStallVerdict });
+/** The stale-panel tests resume a session whose transcript never exists; this says it grew, so the stall verdict (which forgets the resume) leaves them alone. */
+let stallAlwaysGrew = false;
+stubModule('./stallWatch', {
+  GRACE_MS: 300,
+  stallVerdict: (a: Parameters<typeof realStallVerdict>[0]) => (stallAlwaysGrew ? 'grew' : realStallVerdict(a)),
+});
 
 /**
  * Which sessions a panel holds open during one test, and what the extension
@@ -267,6 +272,8 @@ stubModule('./claims', {
 let continueOutcome: ContinueOutcome = { kind: 'fallback', reason: 'test default' };
 /** When set, the fake continueInPlace waits for it before answering, so a test can act while a continue is in flight. */
 let continueGate: Promise<void> | undefined;
+/** When set, the fake continueInPlace throws this message instead of answering. */
+let continueThrows: string | undefined;
 const continueCalls: { sessionId: string; prompt: string; jobId: string; pid: number }[] = [];
 stubModule('./continueInPlace', {
   ...(require('../src/continueInPlace') as Record<string, unknown>),
@@ -275,6 +282,9 @@ stubModule('./continueInPlace', {
     continueCalls.push({ sessionId: job.sessionId, prompt: job.prompt, jobId: job.jobId, pid });
     if (continueGate) {
       await continueGate;
+    }
+    if (continueThrows !== undefined) {
+      throw new Error(continueThrows);
     }
     return continueOutcome;
   },
@@ -302,11 +312,18 @@ stubModule('node:child_process', {
 
 /** Whether the fake modInstall says the mod should be offered during one test; default false so activation never offers it. */
 let offerMod = false;
+/** How often activation asked `claude` for the plugin list, and ran the mod update; `modInstalled` makes the list say the mod is installed. */
+let pluginListCalls = 0;
+let modUpdates = 0;
+let modInstalled = false;
 // listInstalledPlugins is stubbed so activation never runs `claude`.
+const realModInstall = require('../src/modInstall') as Record<string, unknown>;
 stubModule('./modInstall', {
-  ...(require('../src/modInstall') as Record<string, unknown>),
+  ...realModInstall,
   shouldOfferInstall: () => offerMod,
-  listInstalledPlugins: async () => '[]',
+  listInstalledPlugins: async () => { pluginListCalls += 1; return '[]'; },
+  isModInstalled: (text: string) => (modInstalled ? true : (realModInstall.isModInstalled as (t: string) => boolean | undefined)(text)),
+  updateMod: async () => { modUpdates += 1; },
 });
 
 // Required, not imported: the stubs above must be registered first, and a
@@ -359,6 +376,7 @@ const start = (ctx: FakeContext) =>
   activate(ctx as unknown as Parameters<typeof activate>[0]);
 
 const teardown = (ctx: FakeContext) => {
+  stallAlwaysGrew = false;
   for (const d of ctx.subscriptions) {
     d.dispose();
   }
@@ -1043,6 +1061,7 @@ async function resumeSession(): Promise<void> {
 
 const staleSetup = (opts: { onStale?: string; tabs?: FakeTab[]; livePanel?: boolean } = {}) => {
   resetVscodeFake();
+  stallAlwaysGrew = true;
   vscodeFake.config = {
     claudeCommand: LAUNCHER,
     randomDelayMinMinutes: 0,
@@ -5711,6 +5730,7 @@ const resetContinue = () => {
   continueOutcome = { kind: 'fallback', reason: 'test default' };
   continueCalls.length = 0;
   continueGate = undefined;
+  continueThrows = undefined;
   clearHolders();
 };
 
@@ -6245,5 +6265,288 @@ test('D10: a late drop keeps the claim, so another window\'s attempt afterwards 
     fakeClaimResult = 'claimed';
     resetContinue(); teardown(ctx);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S3: the holder is read again before a fallback launch; D9a: the holder's raw status is logged at the fire.
+// ---------------------------------------------------------------------------
+
+/** Run one fire whose continue falls back after `during` changed the holder, mid-continue. */
+async function fallbackWith(during: () => void, over: { terminal?: boolean } = {}) {
+  resetVscodeFake(); resetContinue(); (over.terminal ? idleTerminal : idlePanel)();
+  continueOutcome = { kind: 'fallback', reason: 'not confirmed within 60 s' };
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  let release!: () => void;
+  continueGate = new Promise<void>((r) => { release = r; });
+  vscodeFake.config = liveConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  await oneTick(); await flush();
+  during();
+  release();
+  await flush(); await flush();
+  return { ctx, store };
+}
+
+test('a panel that turned busy during the continue is not launched into: the claim is kept and the outcome logged', async () => {
+  const { ctx } = await fallbackWith(() => { fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, status: 'busy', cwd: REAL_CWD }]; });
+  try {
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.deepEqual(releasedKeys, []);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Outcome for 0b3d1f66: dropped: busy at fallback (panel).')), JSON.stringify(vscodeFake.outputLines));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a terminal that turned busy during the continue is dropped the same way', async () => {
+  autoContinueOn = false;
+  const { ctx } = await fallbackWith(() => { fakeAgentRows = [{ pid: 88, kind: 'interactive', sessionId: SESSION, status: 'busy', cwd: REAL_CWD }]; }, { terminal: true });
+  try {
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('dropped: busy at fallback (terminal)')));
+    assert.ok(!vscodeFake.info.some((m) => m.items.includes('Resume in Terminal Anyway')), 'no offer for a busy terminal');
+  } finally { autoContinueOn = true; resetContinue(); teardown(ctx); }
+});
+
+test('a panel that is waiting for input at the fallback gets the Open Session notice and no launch', async () => {
+  const { ctx } = await fallbackWith(() => { fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, status: 'waiting', cwd: REAL_CWD }]; });
+  try {
+    assert.equal(vscodeFake.terminals.length, 0);
+    const notice = vscodeFake.info.find((m) => m.items.includes('Open Session'));
+    assert.ok(notice, JSON.stringify(vscodeFake.info));
+    assert.match(notice.message, /waiting for your input/);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Outcome for 0b3d1f66: waiting for input at fallback; notice shown.')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a panel still idle at the fallback is launched, as before', async () => {
+  const { ctx } = await fallbackWith(() => {});
+  try {
+    assert.equal(vscodeFake.terminals.length, 1);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('fell back to a terminal launch')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a panel that is gone at the fallback is launched', async () => {
+  const { ctx } = await fallbackWith(() => { fakeAgentRows = []; });
+  try {
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a listing that fails at the fallback fails open to a launch', async () => {
+  const { ctx } = await fallbackWith(() => { fakeAgentRows = 'unknown'; });
+  try {
+    assert.equal(vscodeFake.terminals.length, 1);
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('the fire logs the holder\'s raw status, and a holder with none is not logged as idle', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  fakeAgentRows = [{ pid: 77, kind: 'interactive', sessionId: SESSION, cwd: REAL_CWD } as AgentRow];
+  continueOutcome = { kind: 'continued', transport: 'socket', elapsedMs: 1 };
+  vscodeFake.config = liveConfig();
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]));
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Holder of 0b3d1f66: panel, pid 77, status (not reported)')), JSON.stringify(vscodeFake.outputLines));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+// ---------------------------------------------------------------------------
+// M2: an error in the fire's continue path is its outcome. F1: the stale-panel warning is once per resume.
+// ---------------------------------------------------------------------------
+
+test('a continue that throws remembers the job, releases the claim and logs the one outcome line', async () => {
+  resetVscodeFake(); resetContinue(); idlePanel();
+  continueThrows = 'socket exploded';
+  fakeClaimResult = 'claimed';
+  releasedKeys.length = 0;
+  vscodeFake.config = liveConfig();
+  const store = new Map<string, unknown>([['claudeLimitBreak.pending', pastJob()]]);
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await oneTick(); await flush();
+    assert.equal(continueCalls.length, 1);
+    assert.equal(vscodeFake.terminals.length, 0);
+    assert.ok(JSON.stringify(store.get(READY_KEY)).includes(SESSION), 'the job is remembered');
+    assert.ok(releasedKeys.length > 0, 'the claim is released');
+    assert.equal(vscodeFake.outputLines.filter((l) => l.includes('Outcome for 0b3d1f66:')).length, 1);
+    assert.ok(vscodeFake.outputLines.some((l) => l.includes('Outcome for 0b3d1f66: failed: socket exploded.')));
+  } finally { resetContinue(); teardown(ctx); }
+});
+
+test('a second turn end in a resumed session shows no second stale-panel notice', async () => {
+  staleSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(staleNotices().length, 1);
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(staleNotices().length, 1, 'still just the first');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('two turn ends in a row race to one notice', async () => {
+  staleSetup();
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(staleNotices().length, 1);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('the first notice button still reopens after later turn ends', async () => {
+  staleSetup();
+  const reopened: string[] = [];
+  vscodeFake.commands.set(REOPEN_COMMAND, () => { reopened.push(REOPEN_COMMAND); });
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    const notice = staleNotices()[0];
+    assert.ok(notice);
+    notice.answer('Reopen session tab');
+    await flush();
+    assert.deepEqual(reopened, [REOPEN_COMMAND]);
+    assert.equal(staleNotices().length, 1);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('after onStale reopen, a later turn end warns about nothing', async () => {
+  staleSetup({ onStale: 'reopen' });
+  vscodeFake.commands.set(REOPEN_COMMAND, () => {});
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    const before = staleNotices().length;
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.equal(staleNotices().length, before);
+    assert.equal(vscodeFake.closedTabs.length, 1, 'and no second reopen');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// I5: one window updates or installs the mod, and one offers it; "Never" spawns nothing.
+// ---------------------------------------------------------------------------
+
+test('with "Never" set, activation does not even list the plugins', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  pluginListCalls = 0; offerMod = true;
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.modOffer', 'never']]));
+  start(ctx);
+  try {
+    await flush();
+    assert.equal(pluginListCalls, 0);
+    assert.ok(!vscodeFake.info.some((m) => m.message.includes('Claude Code mod')));
+  } finally { offerMod = false; teardown(ctx); }
+});
+
+test('two windows activating together update the mod once', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  modUpdates = 0; modInstalled = true;
+  fakeClaimResult = 'real';
+  realClaimsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-modclaim-'));
+  claimCalls.length = 0;
+  const a = contextOver(new Map<string, unknown>());
+  const b = contextOver(new Map<string, unknown>());
+  start(a); start(b);
+  try {
+    await flush(); await flush();
+    assert.equal(modUpdates, 1);
+    assert.ok(claimCalls.some((c) => c.key.startsWith('mod-update-')));
+  } finally {
+    modInstalled = false; fakeClaimResult = 'claimed';
+    teardown(a); teardown(b);
+    fs.rmSync(realClaimsDir, { recursive: true, force: true });
+  }
+});
+
+test('two windows activating together show the mod offer once', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  offerMod = true;
+  fakeClaimResult = 'real';
+  realClaimsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clb-modclaim-'));
+  const a = contextOver(new Map<string, unknown>());
+  const b = contextOver(new Map<string, unknown>());
+  start(a); start(b);
+  try {
+    await flush(); await flush();
+    assert.equal(vscodeFake.info.filter((m) => m.message.includes('Claude Code mod')).length, 1);
+  } finally {
+    offerMod = false; fakeClaimResult = 'claimed';
+    teardown(a); teardown(b);
+    fs.rmSync(realClaimsDir, { recursive: true, force: true });
+  }
+});
+
+test('a window that does not get the update claim does nothing', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  modUpdates = 0; modInstalled = true;
+  fakeClaimResult = 'taken';
+  const ctx = contextOver(new Map<string, unknown>());
+  start(ctx);
+  try {
+    await flush(); await flush();
+    assert.equal(modUpdates, 0);
+  } finally { modInstalled = false; fakeClaimResult = 'claimed'; teardown(ctx); }
+});
+
+test('the install offer says the mod loads into every Claude Code session', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  offerMod = true;
+  const ctx = contextOver(new Map<string, unknown>());
+  start(ctx);
+  try {
+    await flush();
+    const offer = vscodeFake.info.find((m) => m.message.includes('Claude Code mod'));
+    assert.ok(offer);
+    assert.ok(offer.message.startsWith('Limit Break: '));
+    assert.match(offer.message, /loads into every Claude Code session on this machine/);
+  } finally { offerMod = false; teardown(ctx); }
+});
+
+test('a resume that stalls forgets the stale-panel warning: a later turn end says nothing', async () => {
+  staleSetup();
+  stallAlwaysGrew = false;
+  const ctx = contextOver(new Map());
+  start(ctx);
+  try {
+    await resumeSession();
+    await new Promise((r) => setTimeout(r, 500));
+    FakeWatcher.latest?.endTurnIn(REAL_CWD);
+    await flush();
+    assert.deepEqual(staleNotices(), []);
+  } finally {
+    teardown(ctx);
   }
 });

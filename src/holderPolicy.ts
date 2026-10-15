@@ -38,6 +38,19 @@ export function isIdleStatus(status: string | undefined): boolean {
 }
 
 /**
+ * The log line for who holds a session at a fire: the holder's kind, pid and RAW status. {@link isIdleStatus} fails open, so a holder that reported no status acts as idle; the line shows what was actually reported.
+ */
+export function holderLogLine(holder: SessionHolder | 'unknown', shortId: string): string {
+  if (holder === 'unknown') {
+    return `Holder of ${shortId}: (listing failed)`;
+  }
+  if (holder.kind === 'none') {
+    return `Holder of ${shortId}: (none)`;
+  }
+  return `Holder of ${shortId}: ${holder.kind}, pid ${holder.pid}, status ${holder.status === undefined ? '(not reported)' : JSON.stringify(holder.status)}`;
+}
+
+/**
  * Decide what `scheduler.onFire` does with a fired job, given who (if anyone) already holds the session. Resuming into a session a panel or terminal still holds forks the conversation.
  *
  * `status` ("idle" | "busy" | "waiting") decides the outcome:
