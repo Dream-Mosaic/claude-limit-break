@@ -15,6 +15,22 @@ What was run to verify (no source file was edited):
 - The branch's `out/src/continuedSince.js` on session 7a00d6c0's real transcript (F3a).
 - A read-only search of `claude.exe` 2.1.296 for the trust lookup, and a read of the field worktree's git pointer files and its `~/.claude.json` keys (F2).
 
+## User decisions (2026-10-12 and 2026-10-14)
+
+- **Must-fix for the release**, all done in a50b142, 03dfa56, 84cb39c and 18515c0:
+  - S3, I5, M5, M2 and F1;
+  - U2 (the prompt moved into the control file);
+  - **F2**, moved from FIX-LATER to must-fix because it had already bitten the user;
+  - the wording fixes (D3, P2, U4);
+  - D9a.
+
+  The smoke run, rows L1-L16, stays by hand before merge.
+- **U1**: parked as #56. No README note in this release.
+- **U3, U5 and U6**: kept as recommended. Parked in #36, #29 and #33.
+- **Finding `claude`** (I4 + M12): deferred to after the release. #16 was retitled "Finding and running claude" and carries the full triage. The npm package's `bin` became a native `bin/claude.exe` at 2.1.113, so the shim parser fails for every npm install on Windows, not only on the line order.
+- **Everything else** went to issues: #27, #29, #31, #33, #34, #36, #38, #39 and #53. New issues: #54 (mod follow-ups), #55 (the Trust terminal and the general trust walk) and #56 (U1).
+- **Version**: the release is **2.0.0**, not 1.1.0 (7ae3ff1), because how a resume happens changed by default. The mod's protocol stays at 1. "1.1" remains the working name in the spec, plan, ledger and these reviews.
+
 ## Summary
 
 - **10 FIX-NOW**, all before merge:
