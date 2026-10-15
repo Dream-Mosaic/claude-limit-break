@@ -1482,20 +1482,32 @@ export function activate(context: vscode.ExtensionContext): void {
    * otherwise, when it could help, offer to install it once per answer
    * ("Not now" asks again next time, "Never" is final).
    *
-   * Every window activates, and an extension update reloads them all at once, so the flag is read before anything is spawned, and the update/install and the offer are each done by the one window that gets their claim (`mod-update-<version>`, `mod-offer-<version>`); the others do nothing.
+   * Every window activates, and an extension update reloads them all at once, so the update/install and the offer are each done by the one window that gets their claim (`mod-update-<version>`, `mod-offer-<version>`); the others do nothing.
+   *
+   * "Never" answers the offer only; it never stops an installed mod from being updated. The stored version (set by install and update, cleared by Remove) decides without spawning anything: the current version means nothing to do, an older one means update. Only with no stored version is "Never" read and `plugin list` spawned, for the offer or for a mod installed by hand.
    */
   const maybeOfferMod = async (): Promise<void> => {
+    const takeClaim = (key: string): boolean =>
+      holdClaim(claimsDir(), key, Date.now(), Date.now() + MOD_CLAIM_HOLD_MS, fs, log, vscode.env.sessionId) !== 'taken';
+    const current = extensionVersion();
+    const stored = context.globalState.get<string>(INSTALLED_VERSION_KEY);
+    if (stored === current) {
+      return;
+    }
+    if (stored !== undefined) {
+      if (takeClaim(`mod-update-${current}`)) {
+        await updateMod(modDeps());
+      }
+      return;
+    }
     if (context.globalState.get<string>(OFFER_KEY) === 'never') {
       return;
     }
-    const takeClaim = (key: string): boolean =>
-      holdClaim(claimsDir(), key, Date.now(), Date.now() + MOD_CLAIM_HOLD_MS, fs, log, vscode.env.sessionId) !== 'taken';
     const installed = isModInstalled(await listInstalledPlugins(runClaude));
     if (installed === undefined) {
       throw new Error('the plugin list could not be read');
     }
-    const current = extensionVersion();
-    if (installed && context.globalState.get<string>(INSTALLED_VERSION_KEY) !== current) {
+    if (installed) {
       if (takeClaim(`mod-update-${current}`)) {
         await updateMod(modDeps());
       }

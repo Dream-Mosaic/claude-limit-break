@@ -6471,6 +6471,34 @@ test('with "Never" set, activation does not even list the plugins', async () => 
   } finally { offerMod = false; teardown(ctx); }
 });
 
+test('with "Never" set, an installed older mod is still updated, without listing the plugins', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  pluginListCalls = 0; modUpdates = 0;
+  const ctx = contextOver(new Map<string, unknown>([
+    ['claudeLimitBreak.modOffer', 'never'],
+    ['claudeLimitBreak.modVersion', '0.9.0'],
+  ]));
+  start(ctx);
+  try {
+    await flush(); await flush();
+    assert.equal(modUpdates, 1, '"Never" answers the offer only');
+    assert.equal(pluginListCalls, 0, 'the stored version decides; nothing is listed');
+  } finally { teardown(ctx); }
+});
+
+test('a mod already at this version spawns nothing and updates nothing', async () => {
+  resetVscodeFake(); vscodeFake.config = {};
+  pluginListCalls = 0; modUpdates = 0; offerMod = true;
+  const ctx = contextOver(new Map<string, unknown>([['claudeLimitBreak.modVersion', '1.1.0']]));
+  start(ctx);
+  try {
+    await flush(); await flush();
+    assert.equal(modUpdates, 0);
+    assert.equal(pluginListCalls, 0);
+    assert.ok(!vscodeFake.info.some((m) => m.message.includes('Claude Code mod')), 'no offer for an installed mod');
+  } finally { offerMod = false; teardown(ctx); }
+});
+
 test('two windows activating together update the mod once', async () => {
   resetVscodeFake(); vscodeFake.config = {};
   modUpdates = 0; modInstalled = true;
