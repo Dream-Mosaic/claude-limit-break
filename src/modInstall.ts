@@ -1,7 +1,7 @@
 /**
  * Installing Limit Break's Claude Code mod (the plugin in `mod/`).
  *
- * The extension folder is versioned (`publisher.name-1.1.0`), so Claude Code
+ * The extension folder is versioned (`publisher.name-2.0.0`), so Claude Code
  * cannot be pointed at it for good. Instead the mod is copied out into
  * `globalStorage/marketplace/mod`, a stable folder that is a one-plugin
  * marketplace Claude Code reads in place. After an extension update the copy is

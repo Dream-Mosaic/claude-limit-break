@@ -188,7 +188,7 @@ test('a stored value that is not a job list at all restores nothing and does not
 });
 
 
-// 1.0 kept offer-only jobs; 1.1 keeps none, and a stored one must not become an automatic resume.
+// 1.0 kept offer-only jobs; 2.0 keeps none, and a stored one must not become an automatic resume.
 test('restoreJob drops a stored offer-only job from 1.0', () => {
   assert.deepEqual(restoreJob({ ...full(), offerOnly: true }), {
     dropped: 'it is an offer-only resume from 1.0, which this version no longer keeps',

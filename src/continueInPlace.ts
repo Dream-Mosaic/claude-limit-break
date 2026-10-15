@@ -6,7 +6,7 @@ import { modUsable, continuedJob, buildControlBody, controlFileText, type ModSta
  * 1. Choose a transport: the mod when the holder runs it (modStatus.ts modUsable), otherwise the socket.
  * 2. Send through the session's inbox (inbox.ts): a control message the mod consumes, or the enveloped resume prompt.
  * 3. Confirm within CONFIRM_WINDOW_MS: the mod lists the job as continued, or the payload's msg_id is in the transcript.
- * 4. Last look before giving up: the msg_id, or any new turn since the send, means it landed late, and nothing may launch (a launch then would be the fork 1.1 exists to prevent).
+ * 4. Last look before giving up: the msg_id, or any new turn since the send, means it landed late, and nothing may launch (a launch then would be the fork 2.0 exists to prevent).
  * Anything else is `fallback`, and the caller launches as 1.0 did.
  */
 

@@ -81,7 +81,7 @@ export function restoreJob(raw: unknown): RestoreResult {
   if (j.folderTrusted !== undefined && typeof j.folderTrusted !== 'boolean') {
     return { dropped: 'its folderTrusted is not a boolean' };
   }
-  // 1.0 kept a job for a reset beyond maxWaitHours and only offered it at the fire; 1.1 announces such a reset at detection and keeps nothing.
+  // 1.0 kept a job for a reset beyond maxWaitHours and only offered it at the fire; 2.0 announces such a reset at detection and keeps nothing.
   if (j.offerOnly !== undefined) {
     return { dropped: 'it is an offer-only resume from 1.0, which this version no longer keeps' };
   }

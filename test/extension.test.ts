@@ -2284,7 +2284,7 @@ test('the mod offer is shown when it can help, and Never is remembered', async (
     assert.ok(offer, `expected the mod offer; saw ${JSON.stringify(vscodeFake.info.map((m) => m.message))}`);
     assert.deepEqual(offer.items, ['Install', 'Not now', 'Never']);
     assert.ok(offer.message.startsWith('Limit Break: '), offer.message);
-    assert.ok(!/exactly/.test(offer.message), 'no promise of limit sensing 1.1 does not do');
+    assert.ok(!/exactly/.test(offer.message), 'no promise of limit sensing 2.0 does not do');
     offer.answer('Never');
     await flush();
     assert.equal(store.get('claudeLimitBreak.modOffer'), 'never');
@@ -5722,7 +5722,7 @@ test('D10: a fire nine minutes late still resumes', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Continue in place (live-continue 1.1): `continueOutcome` / `continueCalls`
+// Continue in place (live-continue, 2.0): `continueOutcome` / `continueCalls`
 // stand in for continueInPlace.ts; holder pid 77.
 // ---------------------------------------------------------------------------
 

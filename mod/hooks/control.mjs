@@ -3,7 +3,7 @@
 
 /** The status file's and control file's protocol; the extension uses the mod only on the same major. */
 export const PROTOCOL = 1;
-export const MOD_VERSION = '1.1.0';
+export const MOD_VERSION = '2.0.0';
 /** Starts the body of a control message: `[limit-break-control v1] {"jobId","nonce"}`. The prompt is not in the message; it comes from the control file (2026-10-12, U2). */
 export const CONTROL_MARKER = '[limit-break-control v1]';
 const MAX_CONTINUED = 20;

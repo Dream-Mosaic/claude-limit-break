@@ -7,10 +7,12 @@ this is the only in-editor account of what changed.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this
 project follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2026-10-11
+## [2.0.0] - 2026-10-15
 
 Limit Break now continues a session that is still open where it is, instead of
-launching a second copy of it.
+launching a second copy of it. A major version because how a resume happens has
+changed by default: read "Changed" and "Removed" below. No setting or command was
+removed or renamed.
 
 ### Added
 
