@@ -77,8 +77,11 @@ function makeSession(name, cwd) {
 fs.rmSync(WS, { recursive: true, force: true });
 fs.mkdirSync(KIT, { recursive: true });
 const state = { ws: WS, sessions: {} };
+// B must start untrusted, but ~/.claude.json remembers a folder's trust forever, and the kit never edits that file.
+// So B gets a new folder each run: trusting it during one run (R3's button, R6's prompt) can't carry over to the next.
+const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
 for (const name of ['a', 'b']) {
-  const cwd = path.join(WS, name);
+  const cwd = path.join(WS, name === 'b' ? `b-${stamp}` : name);
   fs.mkdirSync(cwd, { recursive: true });
   const id = makeSession(name, cwd).session_id;
   if (!/^[0-9a-f-]{36}$/.test(id ?? '')) fail(`no session id from claude for session ${name.toUpperCase()}`);

@@ -18,7 +18,9 @@ the PATH.
 
 `setup.js` makes two throwaway sessions with `claude -p`:
 - **A** in `%TEMP%\lb-smoke\a`, gets a five-hour usage limit
-- **B** in `%TEMP%\lb-smoke\b`, gets a server overload, and stays untrusted
+- **B** in `%TEMP%\lb-smoke\b-<date-time>`, gets a server overload, and stays untrusted. Its folder is new on every
+  run because `~/.claude.json` keeps a folder's trust forever: once B is trusted during a run (R3's button or R6's
+  prompt), reusing its folder would make it trusted in every run after.
 
 The window watches only `%TEMP%\lb-smoke` (`watchScope: workspace`).
 
