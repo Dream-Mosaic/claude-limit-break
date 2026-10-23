@@ -2,19 +2,42 @@
 //   node inject.js limit [seconds]   -> session A: a five-hour usage limit resetting in [seconds] (default 120)
 //   node inject.js overload          -> session B: a server-overload error, now
 const fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto');
-let state;
-try {
-  state = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'lb-smoke-kit', 'real', 'state.json'), 'utf8'));
-} catch {
-  console.error('inject.js: no smoke sessions yet; run `node setup.js` first.');
+/** Stop with a readable line instead of a stack trace. */
+function fail(message) {
+  console.error(`inject.js: ${message}`);
   process.exit(1);
 }
-const kind = process.argv[2];
-const s = state.sessions[kind === 'limit' ? 'a' : kind === 'overload' ? 'b' : ''];
-if (!s) { console.error('usage: node inject.js limit [seconds] | overload'); process.exit(1); }
+// A failure the checks below don't anticipate is a bug in this script: say so, and keep the stack.
+process.on('uncaughtException', (e) => {
+  console.error(`inject.js: unexpected error: ${e?.message ?? e}`);
+  console.error(e?.stack ?? '');
+  process.exit(1);
+});
 
-const lines = fs.readFileSync(s.file, 'utf8').trim().split('\n').map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+const kind = process.argv[2];
+if (kind !== 'limit' && kind !== 'overload') fail('usage: node inject.js limit [seconds] | overload');
+const seconds = Number(process.argv[3] ?? 120);
+if (kind === 'limit' && !(Number.isFinite(seconds) && seconds > 0)) fail(`[seconds] must be a positive number, not "${process.argv[3]}"`);
+
+const statePath = path.join(os.tmpdir(), 'lb-smoke-kit', 'real', 'state.json');
+let state;
+try {
+  state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+} catch (e) {
+  fail(e.code === 'ENOENT' ? 'no smoke sessions yet; run `node setup.js` first.' : `can't read ${statePath} (${e.message}); run \`node setup.js\` again.`);
+}
+const s = state?.sessions?.[kind === 'limit' ? 'a' : 'b'];
+if (!s?.file) fail(`${statePath} has no session ${kind === 'limit' ? 'A' : 'B'}; run \`node setup.js\` again.`);
+
+let text;
+try {
+  text = fs.readFileSync(s.file, 'utf8');
+} catch (e) {
+  fail(`can't read session ${s.id}'s transcript ${s.file} (${e.code ?? e.message}); run \`node setup.js\` again.`);
+}
+const lines = text.trim().split('\n').map((l) => { try { return JSON.parse(l); } catch { return {}; } });
 const last = [...lines].reverse().find((e) => e.uuid && (e.type === 'assistant' || e.type === 'user'));
+if (!last) fail(`session ${s.id}'s transcript has no message to attach the stop to: ${s.file}`);
 const now = new Date();
 const base = {
   parentUuid: last.uuid, isSidechain: false, type: 'assistant', uuid: crypto.randomUUID(), timestamp: now.toISOString(),
@@ -25,7 +48,7 @@ const msg = (text) => ({ id: crypto.randomUUID(), type: 'message', role: 'assist
 
 let entry;
 if (kind === 'limit') {
-  const resetsAt = Math.floor(now.getTime() / 1000) + Number(process.argv[3] || 120);
+  const resetsAt = Math.floor(now.getTime() / 1000) + seconds;
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const local = new Date(resetsAt * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: zone }).replace(' ', '').toLowerCase();
   entry = { ...base, error: 'rate_limit', apiErrorStatus: 429, quotaLimits: { status: 'rejected', rateLimitType: 'five_hour', resetsAt },

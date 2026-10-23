@@ -13,11 +13,22 @@ for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT',
 const shell = process.platform === 'win32';
 const arg = (s) => (shell ? `"${s}"` : s);
 
-/** Stop with one readable line instead of a stack trace. */
-function fail(message) {
+/** Stop with a readable line instead of a stack trace, followed by whatever the failing command printed. */
+function fail(message, output = '') {
   console.error(`setup.js: ${message}`);
+  const text = String(output).trim();
+  if (text) {
+    console.error(text.length > 4000 ? `${text.slice(0, 4000)}\n… (${text.length - 4000} more characters)` : text);
+  }
   process.exit(1);
 }
+
+// A failure the checks below don't anticipate is a bug in this script: say so, and keep the stack.
+process.on('uncaughtException', (e) => {
+  console.error(`setup.js: unexpected error: ${e?.message ?? e}`);
+  console.error(e?.stack ?? '');
+  process.exit(1);
+});
 
 /** `claude -p`'s JSON result, from its stdout whether or not it exited 0; undefined if there is none. */
 function parseResult(text) {
@@ -33,24 +44,30 @@ function makeSession(name, cwd) {
   let out;
   try {
     out = execFileSync('claude', ['-p', arg(`Smoke test session ${name.toUpperCase()}. Reply with just: ready`), '--output-format', 'json'],
-      { cwd, env, encoding: 'utf8', shell, timeout: 180_000 });
+      // stderr is captured, not echoed, so a failure prints it once, under the summary line.
+      { cwd, env, encoding: 'utf8', shell, timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
+    const who = `claude -p for session ${name.toUpperCase()}`;
+    const printed = [e.stderr, e.stdout].map((s) => String(s ?? '').trim()).filter(Boolean).join('\n');
     const result = parseResult(e.stdout);
-    if (result?.api_error === 'usage_limit_reached' || result?.api_error_status === 429) {
+    if (result?.api_error === 'usage_limit_reached') {
       fail(`Claude is at a usage limit: "${result.result}". Part 1 needs live Claude usage; run it again after the reset. Part 2 (test/smoke/fake) needs none.`);
     }
     if (result?.is_error) {
-      fail(`claude -p failed for session ${name.toUpperCase()}: ${result.result ?? result.api_error ?? 'no detail'}`);
+      fail(`${who} returned an error${result.api_error_status ? ` (HTTP ${result.api_error_status})` : ''}: ${result.result ?? result.api_error ?? 'no detail'}`, printed);
     }
-    if (e.code === 'ENOENT') {
+    // Without a shell a missing program is ENOENT; through cmd.exe it is exit 1 and "is not recognized".
+    if (e.code === 'ENOENT' || /'claude' is not recognized/.test(String(e.stderr ?? ''))) {
       fail('`claude` is not on the PATH.');
     }
-    const detail = (String(e.stderr ?? '').trim() || e.message).split('\n')[0];
-    fail(`claude -p failed for session ${name.toUpperCase()} (exit ${e.status ?? e.signal ?? '?'}): ${detail}`);
+    if (e.code === 'ETIMEDOUT') {
+      fail(`${who} did not finish within 3 minutes and was stopped.`, printed);
+    }
+    fail(`${who} failed (${e.status != null ? `exit ${e.status}` : `signal ${e.signal ?? '?'}`}).`, printed || e.message);
   }
   const result = parseResult(out);
-  if (!result) fail(`claude -p printed no JSON: ${out.slice(0, 300)}`);
-  if (result.is_error) fail(`claude -p reported an error for session ${name.toUpperCase()}: ${result.result}`);
+  if (!result) fail(`claude -p for session ${name.toUpperCase()} printed no JSON result.`, out);
+  if (result.is_error) fail(`claude -p for session ${name.toUpperCase()} returned an error: ${result.result ?? result.api_error ?? 'no detail'}`, out);
   return result;
 }
 
