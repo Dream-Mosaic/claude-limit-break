@@ -1,6 +1,6 @@
 // Smoke kit, part 1: appends the stop Claude Code would write, to a throwaway session made by setup.js.
-//   node inject.js limit [seconds]   -> session A: a five-hour usage limit resetting in [seconds] (default 120)
-//   node inject.js overload          -> session B: a server-overload error, now
+//   node inject.js limit [seconds] [a|w]  -> session A (or W): a five-hour usage limit resetting in [seconds] (default 120)
+//   node inject.js overload               -> session B: a server-overload error, now
 const fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto');
 /** Stop with a readable line instead of a stack trace. */
 function fail(message) {
@@ -15,9 +15,11 @@ process.on('uncaughtException', (e) => {
 });
 
 const kind = process.argv[2];
-if (kind !== 'limit' && kind !== 'overload') fail('usage: node inject.js limit [seconds] | overload');
+if (kind !== 'limit' && kind !== 'overload') fail('usage: node inject.js limit [seconds] [a|w] | overload');
 const seconds = Number(process.argv[3] ?? 120);
 if (kind === 'limit' && !(Number.isFinite(seconds) && seconds > 0)) fail(`[seconds] must be a positive number, not "${process.argv[3]}"`);
+const letter = kind === 'overload' ? 'b' : (process.argv[4] ?? 'a').toLowerCase();
+if (letter !== 'a' && letter !== 'b' && letter !== 'w') fail(`the session must be a or w, not "${process.argv[4]}"`);
 
 const statePath = path.join(os.tmpdir(), 'lb-smoke-kit', 'real', 'state.json');
 let state;
@@ -26,8 +28,8 @@ try {
 } catch (e) {
   fail(e.code === 'ENOENT' ? 'no smoke sessions yet; run `node setup.js` first.' : `can't read ${statePath} (${e.message}); run \`node setup.js\` again.`);
 }
-const s = state?.sessions?.[kind === 'limit' ? 'a' : 'b'];
-if (!s?.file) fail(`${statePath} has no session ${kind === 'limit' ? 'A' : 'B'}; run \`node setup.js\` again.`);
+const s = state?.sessions?.[letter];
+if (!s?.file) fail(`${statePath} has no session ${letter.toUpperCase()}; run \`node setup.js\` again.`);
 
 let text;
 try {

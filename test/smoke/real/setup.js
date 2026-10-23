@@ -1,5 +1,6 @@
-// Smoke kit, part 1: two throwaway Claude sessions in <tmp>/lb-smoke/{a,b}, made with your real
-// login, and the smoke window's profile in <tmp>/lb-smoke-kit/real.
+// Smoke kit, part 1: three throwaway Claude sessions made with your real login: A in <tmp>/lb-smoke/a,
+// B in <tmp>/lb-smoke/b-<date-time>, W in a git worktree of <tmp>/lb-smoke/repo. Also the smoke window's profile
+// in <tmp>/lb-smoke-kit/real.
 // Run: node setup.js   (re-running deletes and recreates both folders and sessions)
 const fs = require('fs'), path = require('path'), os = require('os'), { execFileSync, execSync } = require('child_process');
 const WS = path.join(os.tmpdir(), 'lb-smoke');
@@ -80,8 +81,26 @@ const state = { ws: WS, sessions: {} };
 // B must start untrusted, but ~/.claude.json remembers a folder's trust forever, and the kit never edits that file.
 // So B gets a new folder each run: trusting it during one run (R3's button, R6's prompt) can't carry over to the next.
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '-');
-for (const name of ['a', 'b']) {
-  const cwd = path.join(WS, name === 'b' ? `b-${stamp}` : name);
+
+// W (L15): a session in a git worktree of <ws>/repo. You trust <ws>/repo by hand once (step 2); the CLI then trusts
+// the worktree through the main checkout's record, and Limit Break must too.
+const REPO = path.join(WS, 'repo');
+const WT = path.join(REPO, '.claude', 'worktrees', 'w');
+function git(args, cwd) {
+  try {
+    execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    if (e.code === 'ENOENT') fail('`git` is not on the PATH (needed for session W).');
+    fail(`git ${args.join(' ')} failed in ${cwd}.`, [e.stderr, e.stdout].map((s) => String(s ?? '').trim()).filter(Boolean).join('\n'));
+  }
+}
+fs.mkdirSync(REPO, { recursive: true });
+git(['init', '-q'], REPO);
+git(['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'smoke'], REPO);
+git(['worktree', 'add', '-q', '-b', 'smoke-w', WT], REPO);
+
+for (const name of ['a', 'b', 'w']) {
+  const cwd = name === 'w' ? WT : path.join(WS, name === 'b' ? `b-${stamp}` : name);
   fs.mkdirSync(cwd, { recursive: true });
   const id = makeSession(name, cwd).session_id;
   if (!/^[0-9a-f-]{36}$/.test(id ?? '')) fail(`no session id from claude for session ${name.toUpperCase()}`);
@@ -89,6 +108,11 @@ for (const name of ['a', 'b']) {
   if (!fs.existsSync(file)) fail(`transcript not found: ${file}`);
   state.sessions[name] = { id, cwd, file };
 }
+state.repo = REPO;
+// A's terminal rows (L4, L8, L12) need Claude Code's own auto-continue off, or Limit Break leaves an idle terminal to
+// it. A project-local setting keeps your own settings untouched; Limit Break reads this layer as the CLI does.
+fs.mkdirSync(path.join(WS, 'a', '.claude'), { recursive: true });
+fs.writeFileSync(path.join(WS, 'a', '.claude', 'settings.local.json'), JSON.stringify({ autoContinueAtUsageLimit: false }, null, 2));
 fs.writeFileSync(path.join(KIT, 'state.json'), JSON.stringify(state, null, 2));
 
 // The smoke window's own profile: fast timings, and only this workspace is watched.
