@@ -1,7 +1,7 @@
 // Smoke kit, part 1: two throwaway Claude sessions in <tmp>/lb-smoke/{a,b}, made with your real
 // login, and the smoke window's profile in <tmp>/lb-smoke-kit/real.
 // Run: node setup.js   (re-running deletes and recreates both folders and sessions)
-const fs = require('fs'), path = require('path'), os = require('os'), { execFileSync } = require('child_process');
+const fs = require('fs'), path = require('path'), os = require('os'), { execFileSync, execSync } = require('child_process');
 const WS = path.join(os.tmpdir(), 'lb-smoke');
 const KIT = path.join(os.tmpdir(), 'lb-smoke-kit', 'real');
 const PROFILE = path.join(KIT, 'profile');
@@ -9,9 +9,12 @@ const PROFILE = path.join(KIT, 'profile');
 // A nested launch from inside Claude Code would otherwise be refused or tagged as a child session.
 const env = { ...process.env };
 for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CONFIG_DIR']) delete env[k];
-// On Windows `claude` is a .cmd shim, so it needs a shell, which splits unquoted arguments.
-const shell = process.platform === 'win32';
-const arg = (s) => (shell ? `"${s}"` : s);
+// On Windows `claude` may be an npm .cmd shim, which only runs through a shell. Node warns (DEP0190) when an
+// argument list goes to a shell, so there the command is one string, built here from fixed text only.
+const runClaude = (args, opts) =>
+  process.platform === 'win32'
+    ? execSync(['claude', ...args.map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a))].join(' '), opts)
+    : execFileSync('claude', args, opts);
 
 /** Stop with a readable line instead of a stack trace, followed by whatever the failing command printed. */
 function fail(message, output = '') {
@@ -43,9 +46,9 @@ function parseResult(text) {
 function makeSession(name, cwd) {
   let out;
   try {
-    out = execFileSync('claude', ['-p', arg(`Smoke test session ${name.toUpperCase()}. Reply with just: ready`), '--output-format', 'json'],
+    out = runClaude(['-p', `Smoke test session ${name.toUpperCase()}. Reply with just: ready`, '--output-format', 'json'],
       // stderr is captured, not echoed, so a failure prints it once, under the summary line.
-      { cwd, env, encoding: 'utf8', shell, timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd, env, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     const who = `claude -p for session ${name.toUpperCase()}`;
     const printed = [e.stderr, e.stdout].map((s) => String(s ?? '').trim()).filter(Boolean).join('\n');
