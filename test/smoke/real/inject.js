@@ -2,7 +2,13 @@
 //   node inject.js limit [seconds]   -> session A: a five-hour usage limit resetting in [seconds] (default 120)
 //   node inject.js overload          -> session B: a server-overload error, now
 const fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto');
-const state = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'lb-smoke-kit', 'real', 'state.json'), 'utf8'));
+let state;
+try {
+  state = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'lb-smoke-kit', 'real', 'state.json'), 'utf8'));
+} catch {
+  console.error('inject.js: no smoke sessions yet; run `node setup.js` first.');
+  process.exit(1);
+}
 const kind = process.argv[2];
 const s = state.sessions[kind === 'limit' ? 'a' : kind === 'overload' ? 'b' : ''];
 if (!s) { console.error('usage: node inject.js limit [seconds] | overload'); process.exit(1); }
