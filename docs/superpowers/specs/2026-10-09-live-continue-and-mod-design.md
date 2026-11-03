@@ -357,11 +357,11 @@ existing ones:
 - **`continueInPlace.ts`:** chooses the transport, sends, confirms, and falls
   back.
 - **`modInstall.ts`:**
-  - copies `mod/` from the extension into `globalStorage`;
+  - copies `mod/` from the extension into `~/.limit-break/marketplace` (first `globalStorage`; moved 2026-11-02, because a user-scope install must not depend on one VS Code profile's folder);
   - runs `claude plugin marketplace add <dir>` and
     `claude plugin install limit-break@limit-break --scope user`;
   - after an extension update, re-copies the mod and runs
-    `claude plugin marketplace update` and `claude plugin update`;
+    `claude plugin marketplace add` (which re-points the registration, even at a dead folder) and `claude plugin update`;
   - offers to install once ([Install] [Not now] [Never]);
   - adds a command, "Limit Break: Remove Claude Code mod".
 

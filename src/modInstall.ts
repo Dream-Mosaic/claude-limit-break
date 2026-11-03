@@ -3,9 +3,14 @@
  *
  * The extension folder is versioned (`publisher.name-2.0.0`), so Claude Code
  * cannot be pointed at it for good. Instead the mod is copied out into
- * `globalStorage/marketplace/mod`, a stable folder that is a one-plugin
+ * `~/.limit-break/marketplace/mod`, a stable folder that is a one-plugin
  * marketplace Claude Code reads in place. After an extension update the copy is
  * refreshed and `claude plugin update` picks it up.
+ *
+ * Not in VS Code's `globalStorage`: the install is at user scope, so it applies to
+ * every Claude Code session on the machine, and a folder that belongs to one VS Code
+ * profile can disappear out from under it. Claude Code then reports the mod as
+ * failing to load, in every session.
  *
  * Everything here is pure or takes its IO as an argument. `runSteps` takes the
  * `claude` runner, so tests never run the CLI.
@@ -54,10 +59,12 @@ export function installSteps(marketplaceDir: string): string[][] {
   ];
 }
 
-/** Refresh the marketplace, then the installed mod, after the copy was replaced. */
-export function updateSteps(): string[][] {
+/**
+ * Refresh the installed mod after the copy was replaced. `marketplace add` rather than `marketplace update`: adding a name that is already registered re-points it at this folder and reads it again, and that works when the old folder is gone, where `marketplace update` fails (Claude Code 2.1.310).
+ */
+export function updateSteps(marketplaceDir: string): string[][] {
   return [
-    ['plugin', 'marketplace', 'update', MARKETPLACE],
+    ['plugin', 'marketplace', 'add', marketplaceDir],
     ['plugin', 'update', MOD_ID],
   ];
 }
@@ -145,6 +152,8 @@ export interface ModDeps {
   log: (message: string) => void;
   /** Delete the mod's status files (`~/.limit-break/sessions/*.json`), errors ignored. */
   clearStatusFiles: () => void;
+  /** Delete the copy of the mod in the marketplace folder, errors ignored. */
+  removeCopy: () => void;
 }
 
 const stepText = (step: string[]) => `claude ${step.join(' ')}`;
@@ -177,7 +186,7 @@ export async function installMod(d: ModDeps): Promise<void> {
 /** After an extension update: re-copy and update an installed mod whose stored version differs. Log only. */
 export async function updateMod(d: ModDeps): Promise<void> {
   d.copy();
-  const result = await runSteps(updateSteps(), d.run);
+  const result = await runSteps(updateSteps(d.marketplaceDir), d.run);
   if (result.ok) {
     await d.storeVersion(d.version);
     d.log(`Updated the Claude Code mod to ${d.version}.`);
@@ -190,7 +199,7 @@ export async function updateMod(d: ModDeps): Promise<void> {
  * Remove the mod. Uninstalls only when it is installed, but always tries to
  * remove the marketplace, so a half-finished install does not leave one
  * registered. The stored version and the mod's status files are cleared once the
- * plugin is gone.
+ * plugin is gone, and the copy of the mod once its marketplace is gone too.
  */
 export async function removeMod(d: ModDeps): Promise<void> {
   let installed: boolean;
@@ -220,6 +229,7 @@ export async function removeMod(d: ModDeps): Promise<void> {
   }
   const first = failures[0];
   if (!first) {
+    d.removeCopy();
     d.log('Removed the Claude Code mod.');
     d.notify('Limit Break: the Claude Code mod is removed.', 'info');
     return;

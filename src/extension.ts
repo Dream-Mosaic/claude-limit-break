@@ -1445,7 +1445,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const extensionVersion = (): string =>
     (context.extension?.packageJSON as { version?: string } | undefined)?.version ?? '0.0.0';
-  const marketplaceDir = path.join(context.globalStorageUri.fsPath, 'marketplace');
+  const marketplaceDir = path.join(limitBreakDir(), 'marketplace');
 
   /** Copy the mod out of the versioned extension folder into the stable marketplace folder. */
   const copyModToMarketplace = (): void => {
@@ -1473,6 +1473,13 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       } catch {
         // nothing to clear, or not ours to clear
+      }
+    },
+    removeCopy: () => {
+      try {
+        fs.rmSync(marketplaceDir, { recursive: true, force: true });
+      } catch {
+        // harmless: nothing reads it now
       }
     },
   });

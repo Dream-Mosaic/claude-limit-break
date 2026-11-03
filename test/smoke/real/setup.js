@@ -88,6 +88,27 @@ function makeSession(name, cwd) {
   return result;
 }
 
+/**
+ * The mod installs at user scope, into your real ~/.claude, so it outlives the kit. Say what's there, since it changes
+ * L1 and a dead registration shows up in every Claude Code session. Only reads: the kit never edits your real setup.
+ */
+function modNote() {
+  let plugins;
+  try {
+    plugins = JSON.parse(runClaude(['plugin', 'list', '--json'], { env, encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] }));
+  } catch {
+    return undefined; // can't tell; making the sessions reports a missing `claude`
+  }
+  const mod = Array.isArray(plugins) ? plugins.find((p) => p.id === 'limit-break@limit-break') : undefined;
+  if (!mod) return undefined;
+  if (mod.errors?.length) {
+    return `Limit Break's mod is still registered in your real Claude Code, but can't load (${mod.errors[0]}). Remove it, and L1 offers the install again:\n` +
+      '  claude plugin uninstall limit-break@limit-break\n  claude plugin marketplace remove limit-break';
+  }
+  return `Limit Break's mod ${mod.version} is already installed in your real Claude Code, so L1's offer won't appear. Skip L1, or remove the mod first (see "Afterwards").`;
+}
+
+const note = modNote();
 fs.rmSync(WS, { recursive: true, force: true });
 fs.mkdirSync(KIT, { recursive: true });
 const state = { ws: WS, sessions: {} };
@@ -141,3 +162,4 @@ fs.writeFileSync(path.join(PROFILE, 'User', 'settings.json'), JSON.stringify({
   'security.workspace.trust.enabled': false,
 }, null, 2));
 console.log(JSON.stringify(state, null, 2));
+if (note) console.log(`\nNote: ${note}`);

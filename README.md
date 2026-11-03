@@ -131,16 +131,19 @@ file-based can be.
 The first time the extension activates without the mod, it offers to install it
 (**Install** / **Not now** / **Never**; "Not now" asks again next time, "Never"
 is final). Install runs `claude plugin marketplace add` and
-`claude plugin install` for you, at user scope. An open session picks the mod up
-after `/reload-plugins`; new sessions load it. After an extension update the mod
-is refreshed to match.
+`claude plugin install` for you, at user scope, so it applies to every Claude
+Code session on this machine, in any VS Code window or terminal. The files it
+installs from are a copy in `~/.limit-break/marketplace`. An open session picks
+the mod up after `/reload-plugins`; new sessions load it. After an extension
+update the mod is refreshed to match, and if you installed it by hand, it then
+updates from that copy instead.
 
 Two commands, in the Command Palette:
 
 - **Limit Break: Install Claude Code mod** installs it (this also undoes a
   "Never").
-- **Limit Break: Remove Claude Code mod** uninstalls it, and removes its
-  marketplace entry whatever state the install was in.
+- **Limit Break: Remove Claude Code mod** uninstalls it, removes its marketplace
+  entry whatever state the install was in, and deletes the copy.
 
 To install by hand, inside Claude Code:
 

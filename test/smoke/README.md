@@ -8,7 +8,9 @@ sessions. Part 2 covers what Part 1 can't stage with real sessions, using fake o
 needs no Claude usage. Both run in their own isolated VS Code window, and everything they
 create lives under your temp folder (`lb-smoke` and `lb-smoke-kit`). Part 1 uses your real
 Claude login, and **its L1 installs Limit Break's mod into your real Claude Code**: the mod
-loads into every Claude Code session on this machine until you remove it at the end.
+loads into every Claude Code session on this machine, in any VS Code window or terminal, until
+you remove it at the end. The isolated window doesn't contain it, and deleting the kit doesn't
+remove it. `setup.js` tells you if it finds the mod already installed.
 
 Open the log in any smoke window: Command Palette → `Limit Break: Show Log`. Each fire
 logs `Resume due for <id8> …`, then exactly one `Outcome for <id8>: …`. The log names
@@ -161,7 +163,7 @@ Afterwards, close the second window and answer the prompt.
 ### Afterwards
 
 - Record L2's and L3's N and L12's two statuses in `docs/research/`, with the date and the Claude Code version. The 60 s confirm window should rest on these.
-- Remove the mod, if it is still installed: Command Palette → `Limit Break: Remove Claude Code mod`. From a terminal, `claude plugin uninstall limit-break@limit-break` then `claude plugin marketplace remove limit-break` does the same.
+- Remove the mod, if it is still installed: Command Palette → `Limit Break: Remove Claude Code mod`. From a terminal, `claude plugin uninstall limit-break@limit-break` then `claude plugin marketplace remove limit-break` removes the install but leaves the copy in `~/.limit-break/marketplace`, which is harmless.
 - Close the smoke windows. `node setup.js` remakes the sessions.
 - Update "Last run" below.
 
@@ -178,6 +180,8 @@ What to expect from the window:
   the dev build, which is also why the Extensions view doesn't list it.
 - A resumed `claude` stops at a login prompt, because the config folder is fake. That still shows
   the launch worked. Close the terminal.
+- If Limit Break offers its mod, click **Not now**. The fake Claude config doesn't have the mod, but
+  the folder it installs from, `~/.limit-break/marketplace`, is your real one.
 
 | Session | Folder | Used for |
 |---|---|---|
@@ -235,6 +239,8 @@ Open the log in both windows.
 Close both windows afterwards.
 
 ## Cleanup
+
+Remove the mod first, if it's installed (see "Afterwards" in Part 1); the kit's folders don't hold it. Then:
 
 ```powershell
 Remove-Item -Recurse -Force "$env:TEMP\lb-smoke", "$env:TEMP\lb-smoke-kit"

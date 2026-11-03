@@ -316,6 +316,7 @@ let offerMod = false;
 let pluginListCalls = 0;
 let modUpdates = 0;
 let modInstalled = false;
+let lastModDeps: { marketplaceDir: string } | undefined;
 // listInstalledPlugins is stubbed so activation never runs `claude`.
 const realModInstall = require('../src/modInstall') as Record<string, unknown>;
 stubModule('./modInstall', {
@@ -323,7 +324,7 @@ stubModule('./modInstall', {
   shouldOfferInstall: () => offerMod,
   listInstalledPlugins: async () => { pluginListCalls += 1; return '[]'; },
   isModInstalled: (text: string) => (modInstalled ? true : (realModInstall.isModInstalled as (t: string) => boolean | undefined)(text)),
-  updateMod: async () => { modUpdates += 1; },
+  updateMod: async (d: { marketplaceDir: string }) => { modUpdates += 1; lastModDeps = d; },
 });
 
 // Required, not imported: the stubs above must be registered first, and a
@@ -6518,6 +6519,18 @@ test('a mod already at this version spawns nothing and updates nothing', async (
     assert.equal(pluginListCalls, 0);
     assert.ok(!vscodeFake.info.some((m) => m.message.includes('Claude Code mod')), 'no offer for an installed mod');
   } finally { offerMod = false; teardown(ctx); }
+});
+
+test('the copy of the mod lives in ~/.limit-break, not in a VS Code profile', async () => {
+  // The install is machine-wide, so a deleted profile must not strand it.
+  resetVscodeFake(); vscodeFake.config = {};
+  modUpdates = 0; modInstalled = true; lastModDeps = undefined;
+  const ctx = contextOver(new Map<string, unknown>());
+  start(ctx);
+  try {
+    await flush(); await flush();
+    assert.equal((lastModDeps as { marketplaceDir: string } | undefined)?.marketplaceDir, path.join(os.homedir(), '.limit-break', 'marketplace'));
+  } finally { modInstalled = false; teardown(ctx); }
 });
 
 test('two windows activating together update the mod once', async () => {

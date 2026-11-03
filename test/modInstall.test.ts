@@ -40,8 +40,8 @@ test('the CLI steps', () => {
     ['plugin', 'marketplace', 'add', '/g/marketplace'],
     ['plugin', 'install', 'limit-break@limit-break', '--scope', 'user'],
   ]);
-  assert.deepEqual(updateSteps(), [
-    ['plugin', 'marketplace', 'update', 'limit-break'],
+  assert.deepEqual(updateSteps('/g/marketplace'), [
+    ['plugin', 'marketplace', 'add', '/g/marketplace'],
     ['plugin', 'update', 'limit-break@limit-break'],
   ]);
   assert.deepEqual(removeSteps(), [
@@ -117,7 +117,7 @@ const LIST_INSTALLED = JSON.stringify([{ id: 'limit-break@limit-break' }]);
 function harness(opts: { fail?: string[]; list?: string; stored?: string } = {}) {
   const ran: string[] = [];
   const notes: { m: string; level: string }[] = [];
-  const state = { version: opts.stored as string | undefined, copies: 0, cleared: 0 };
+  const state = { version: opts.stored as string | undefined, copies: 0, cleared: 0, copiesRemoved: 0 };
   const deps: ModDeps = {
     run: async (args) => {
       const line = args.join(' ');
@@ -135,6 +135,7 @@ function harness(opts: { fail?: string[]; list?: string; stored?: string } = {})
     notify: (m, level) => notes.push({ m, level }),
     log: () => {},
     clearStatusFiles: () => void (state.cleared += 1),
+    removeCopy: () => void (state.copiesRemoved += 1),
   };
   return { deps, ran, notes, state };
 }
@@ -162,7 +163,8 @@ test('update re-copies, runs the update steps and stores the version', async () 
   const h = harness({ stored: '1.0.0' });
   await updateMod(h.deps);
   assert.equal(h.state.copies, 1);
-  assert.deepEqual(h.ran, ['plugin marketplace update limit-break', 'plugin update limit-break@limit-break']);
+  // Add, not "marketplace update": it re-points a registration at this folder, even one whose old folder is gone.
+  assert.deepEqual(h.ran, ['plugin marketplace add /g/marketplace', 'plugin update limit-break@limit-break']);
   assert.equal(h.state.version, '1.1.0');
 });
 
@@ -191,6 +193,17 @@ test('remove when uninstall fails still removes the marketplace and keeps the ke
   assert.equal(h.state.version, '1.0.0');
   assert.equal(h.notes[0]?.level, 'warn');
   assert.match(h.notes[0]!.m, /plugin uninstall/);
+});
+
+test('remove deletes the copy of the mod only once the plugin and its marketplace are both gone', async () => {
+  const gone = harness({ stored: '1.0.0', list: LIST_INSTALLED });
+  await removeMod(gone.deps);
+  assert.equal(gone.state.copiesRemoved, 1);
+  for (const fail of ['plugin uninstall', 'plugin marketplace remove']) {
+    const stuck = harness({ stored: '1.0.0', list: LIST_INSTALLED, fail: [fail] });
+    await removeMod(stuck.deps);
+    assert.equal(stuck.state.copiesRemoved, 0, `${fail} failed, so Claude Code may still read the copy`);
+  }
 });
 
 test('remove when the plugin list cannot be read still attempts the uninstall', async () => {
