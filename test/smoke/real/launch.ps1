@@ -15,6 +15,10 @@ $state = Get-Content $statePath -Raw | ConvertFrom-Json
 $target = switch ($Folder) { 'root' { $ws } 'a' { $state.sessions.a.cwd } 'w' { $state.sessions.w.cwd } }
 if (-not $target -or -not (Test-Path $target)) { Write-Error "No folder for '$Folder' in state.json; run 'node setup.js' again."; exit 1 }
 
+# While VS Code's own update is installing, a new window waits 30 seconds and then quits, and `code` still reports success.
+$updating = Get-Process -Name 'CodeSetup*' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($updating) { Write-Error "VS Code is installing an update ($($updating.Name), pid $($updating.Id)), so it won't open a new window until that finishes. Restart your VS Code (Restart to Update, if it's offered), then run this again."; exit 1 }
+
 $prof = Join-Path $kit 'profile'
 $exts = Join-Path $kit 'extensions'
 Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue

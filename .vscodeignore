@@ -11,6 +11,7 @@ docs/**
 tsconfig.json
 .gitignore
 .superpowers/**
+.impeccable/**
 .github/**
 scripts/**
 .vscode-test/**

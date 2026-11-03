@@ -63,13 +63,15 @@ done
 
 # .superpowers is gitignored, but vsce reads .vscodeignore and ignores
 # .gitignore - so the whole development workspace once shipped to users inside
-# the package. Assert it stays out.
-if printf '%s\n' "$names" | grep -q "\.superpowers"; then
-  echo "::error::.superpowers is present in the .vsix"
-  failed=1
-else
-  echo "ok: .superpowers is absent from the .vsix"
-fi
+# the package. Assert it stays out, along with the design tool's local cache.
+for d in .superpowers .impeccable; do
+  if printf '%s\n' "$names" | grep -q "\\$d"; then
+    echo "::error::$d is present in the .vsix"
+    failed=1
+  else
+    echo "ok: $d is absent from the .vsix"
+  fi
+done
 
 # The Marketplace icon is the only brand asset users need at install time; it
 # is what package.json's "icon" field points at, so it must ship.
