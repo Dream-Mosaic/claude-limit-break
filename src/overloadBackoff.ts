@@ -5,7 +5,7 @@
  * - The 1st consecutive automatic overload resume of a session keeps the usual random delay (randomDelayMin/MaxMinutes).
  * - The 2nd to 5th add +15, +30, +60 and +120 minutes on top of that delay.
  * - A 6th is never scheduled: the session gives up until it finishes a turn.
- * - A finished turn resets the count. Limit jobs neither count nor get a backoff.
+ * - A finished turn resets the count, and so does Cancel: a retry the user cancelled never ran, so it is no failure. Limit jobs neither count nor get a backoff.
  *
  * Pure: no VS Code, no clock, no filesystem.
  */
@@ -49,5 +49,12 @@ export class OverloadStreaks {
   /** The session finished a turn: it works again, so its count starts over. Returns whether it had one. */
   turnEnded(sessionId: string): boolean {
     return this.counts.delete(sessionId);
+  }
+
+  /** The user cancelled: a cancelled retry never ran, so it is no failure. Every count starts over. Returns whether there were any. */
+  clear(): boolean {
+    const had = this.counts.size > 0;
+    this.counts.clear();
+    return had;
   }
 }

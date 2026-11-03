@@ -4771,10 +4771,9 @@ const pendingIn = (store: Map<string, unknown>) => (store.get('claudeLimitBreak.
 let overloadEntry = Date.now();
 /**
  * One overload detection for SESSION, and the job it planned (or undefined).
- * A planned job is cancelled afterwards, so the next detection is not
- * dropped by the one-job-per-session dedupe; Cancel does not reset the count.
- * Nothing planned, nothing cancelled: Cancel would also clear the gave-up
- * state a test may be looking at.
+ * A planned job is resumed by hand afterwards (Resume Now), as if the retry
+ * ran and overloaded again, so the next detection is not dropped by the
+ * one-job-per-session dedupe. Not Cancel: that starts the count over.
  */
 const detectOverload = async (store: Map<string, unknown>): Promise<{ job?: StoredJobLike; before: number; after: number }> => {
   const before = Date.now();
@@ -4783,7 +4782,8 @@ const detectOverload = async (store: Map<string, unknown>): Promise<{ job?: Stor
   const after = Date.now();
   const job = pendingIn(store).find((j) => j.sessionId === SESSION);
   if (job) {
-    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.ok(!pendingIn(store).some((j) => j.sessionId === SESSION), 'setup: Resume Now took the retry');
   }
   return { job, before, after };
 };
@@ -4875,6 +4875,26 @@ test('a turn end resets the overload count', async () => {
   }
 });
 
+test('Cancel starts the overload count over: a cancelled retry is not a failed one', async () => {
+  resetVscodeFake();
+  vscodeFake.config = { claudeCommand: LAUNCHER };
+  const store = new Map<string, unknown>();
+  const ctx = contextOver(store);
+  start(ctx);
+  try {
+    await detectOverload(store);
+    await detectOverload(store);
+    // The third retry is pending at +30; the user cancels it.
+    FakeWatcher.latest!.overloadFor(SESSION, (overloadEntry += 1));
+    assert.ok(pendingIn(store).find((j) => j.sessionId === SESSION), 'setup: the third retry is pending');
+    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    assertBackoff(await detectOverload(store), 0, [5, 30], 'the first overload after Cancel');
+    assertBackoff(await detectOverload(store), 15, [5, 30], 'and the count builds again from there');
+  } finally {
+    teardown(ctx);
+  }
+});
+
 test('a limit job in between neither resets the overload count nor is delayed by it', async () => {
   resetVscodeFake();
   vscodeFake.config = { claudeCommand: LAUNCHER };
@@ -4891,7 +4911,7 @@ test('a limit job in between neither resets the overload count nor is delayed by
     assert.equal(limitJob?.baseResumeAtMs, resetAt.getTime(), 'no backoff on a limit');
     const padding = limitJob!.resumeAtMs - limitJob!.baseResumeAtMs;
     assert.ok(padding >= 5 * MINUTE && padding <= 30 * MINUTE, 'just the usual random delay');
-    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
     assertBackoff(await detectOverload(store), 30, [5, 30], 'the third overload still counts as the third');
   } finally {
     teardown(ctx);
@@ -4918,7 +4938,8 @@ test('the budget "Resume anyway" override keeps the overload backoff', async () 
   try {
     fire(1);
     assert.ok(pendingIn(store)[0], 'setup: the first retry is scheduled');
-    await vscodeFake.commands.get('claudeLimitBreak.cancel')!();
+    await vscodeFake.commands.get('claudeLimitBreak.resumeNow')!();
+    assert.equal(pendingIn(store).length, 0, 'setup: the first retry ran');
     vscodeFake.config = { claudeCommand: LAUNCHER, maxResumeTokens: 1 };
     const before = Date.now();
     fire(2);

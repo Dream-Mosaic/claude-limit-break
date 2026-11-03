@@ -48,6 +48,8 @@ removed or renamed.
 - A background task finishing, or a message from another session, queued into a
   stopped session no longer counts as the session having moved on, so its resume
   is no longer skipped as "continued".
+- Cancel Pending Resume starts the overload backoff over. A cancelled retry
+  never ran, so it no longer counts as a failed one.
 - Every fire is logged: "Resume due for …", then one "Outcome for …" line.
 - Open Session for a panel held by another VS Code window says so instead of
   opening a second panel.

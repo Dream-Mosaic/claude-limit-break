@@ -33,3 +33,13 @@ test('the streak counts per session, and a finished turn resets only that sessio
   assert.equal(s.count(B), 1, 'another session is left alone');
   assert.equal(s.turnEnded(A), false, 'nothing left to reset');
 });
+
+test('clear (Cancel) starts every session over', () => {
+  const s = new OverloadStreaks();
+  assert.equal(s.clear(), false, 'nothing to clear');
+  s.planned(A);
+  s.planned(B);
+  assert.equal(s.clear(), true);
+  assert.equal(s.count(A), 0);
+  assert.equal(s.count(B), 0);
+});

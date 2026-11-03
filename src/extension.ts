@@ -1882,6 +1882,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (gaveUp.clearAll()) {
         log.info('Cleared the gave-up state.');
       }
+      // A cancelled retry never ran, so it is no failure: the next overload is a first
+      // retry again. This window's counts only; another window keeps its own, and the
+      // window with the shortest backoff fires first and takes the claim.
+      if (overloadStreaks.clear()) {
+        log.info('Overload retry counts start over.');
+      }
       // Unconditional: with nothing pending the scheduler does not fire onChange,
       // and a readyJobs-only cancel must still clear its lines.
       render();

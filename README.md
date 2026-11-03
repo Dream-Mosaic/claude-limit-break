@@ -284,8 +284,10 @@ resumes in a row for one session, since it last finished a turn:
 | 2nd to 5th | The usual delay plus 15, 30, 60 and 120 minutes. |
 | 6th | Not retried. A warning says `Limit Break: session <id8> kept stopping on server errors (5 resumes in a row); giving up until it finishes a turn.`, and the status bar lists it as gave up. Nothing is kept for Resume Now; continue it by hand. |
 
-A finished turn starts the count over. A usage limit in between neither counts
-nor resets it, and is never backed off. The count lives in memory, per window,
+A finished turn starts the count over, and so does Cancel Pending Resume: a
+retry you cancelled never ran, so the next overload is a first retry again. A
+usage limit in between neither counts nor resets it, and is never backed off.
+The count lives in memory, per window,
 so a window reload starts it again at zero.
 
 ## What you will see
