@@ -43,11 +43,24 @@ function parseResult(text) {
   }
 }
 
+const title = (name) => `Smoke test session ${name.toUpperCase()}`;
+
+/**
+ * `claude -p` records `"entrypoint":"sdk-cli"` on every entry, and the Claude Code panel's past-conversations list
+ * hides any session whose first entry says sdk-cli, sdk-ts or sdk-py (scripted runs). Relabel it as a terminal
+ * session, which is what the rows treat it as: one you started earlier and now open in a panel or a terminal.
+ */
+function showInPanelList(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, text.replaceAll('"entrypoint":"sdk-cli"', '"entrypoint":"cli"'));
+}
+
 /** Make one session with `claude -p` and return its result, or stop with why it couldn't. */
 function makeSession(name, cwd) {
   let out;
   try {
-    out = runClaude(['-p', `Smoke test session ${name.toUpperCase()}. Reply with just: ready`, '--output-format', 'json'],
+    // --name gives it a title to find it by in the panel's past-conversations list and `claude --resume`'s picker.
+    out = runClaude(['-p', `Smoke test session ${name.toUpperCase()}. Reply with just: ready`, '--name', title(name), '--output-format', 'json'],
       // stderr is captured, not echoed, so a failure prints it once, under the summary line.
       { cwd, env, encoding: 'utf8', timeout: 180_000, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
@@ -106,7 +119,8 @@ for (const name of ['a', 'b', 'w']) {
   if (!/^[0-9a-f-]{36}$/.test(id ?? '')) fail(`no session id from claude for session ${name.toUpperCase()}`);
   const file = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'), `${id}.jsonl`);
   if (!fs.existsSync(file)) fail(`transcript not found: ${file}`);
-  state.sessions[name] = { id, cwd, file };
+  showInPanelList(file);
+  state.sessions[name] = { id, cwd, file, title: title(name) };
 }
 state.repo = REPO;
 // A's terminal rows (L4, L8, L12) need Claude Code's own auto-continue off, or Limit Break leaves an idle terminal to

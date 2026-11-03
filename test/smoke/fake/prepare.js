@@ -2,9 +2,10 @@
 // Nothing here touches the real ~/.claude or ~/.claude.json. Everything lives in
 // <tmp>/lb-smoke-kit/fake.
 //   node prepare.js                                   sessions A-D, no stops yet
-//   node prepare.js stop [seconds] [weeklySeconds] [letters]
-//                                                     with the window open: append the stops,
-//                                                     to every session or only the letters given (e.g. A)
+//   node prepare.js stop [letters] [seconds]          with the window open: append the stops to every
+//                                                     session, or only the letters given (e.g. A or AB).
+//                                                     A, B and D reset in [seconds] (default 120); C's
+//                                                     weekly limit always resets in 2 days
 const fs = require('fs'), os = require('os'), path = require('path'), crypto = require('crypto');
 const ROOT = path.join(os.tmpdir(), 'lb-smoke-kit', 'fake');
 const HOME = path.join(ROOT, 'home');         // CLAUDE_CONFIG_DIR for the dev host
@@ -16,10 +17,21 @@ const jsonl = (ls) => ls.map((l) => JSON.stringify(l)).join('\n') + '\n';
 // Limit Break skips whatever a transcript already held when it started, so the stops are
 // appended by a second step, with the window open.
 if (process.argv[2] === 'stop') {
-  const secs = Number(process.argv[3] || 120);
-  // maxWaitHours is 1 (its floor), so the weekly reset must be further out than an hour to be offered.
-  const weeklySecs = Number(process.argv[4] || 65 * 60);
-  const only = (process.argv[5] || 'ABCD').toUpperCase();
+  const args = process.argv.slice(3);
+  const bad = args.find((a) => !/^[a-d]+$/i.test(a) && !/^\d+$/.test(a));
+  if (bad !== undefined) {
+    console.error(`prepare.js: "${bad}" is neither session letters (A-D) nor seconds. Usage: node prepare.js stop [letters] [seconds]`);
+    process.exit(1);
+  }
+  const secs = Number(args.find((a) => /^\d+$/.test(a)) ?? 120);
+  // Beyond maxWaitHours (24 by default), so it is announced and never scheduled. Nothing happens at the reset,
+  // so there is nothing to wait for; 2 days is just a realistic weekly reset.
+  const weeklySecs = 2 * 24 * 3600;
+  const only = (args.find((a) => /^[a-d]+$/i.test(a)) ?? 'ABCD').toUpperCase();
+  if (!fs.existsSync(STATE)) {
+    console.error('prepare.js: no fake sessions yet; run `node prepare.js` first.');
+    process.exit(1);
+  }
   const nowS = Math.floor(Date.now() / 1000);
   const state = JSON.parse(fs.readFileSync(STATE, 'utf8'));
   for (const t of state.targets.filter((t) => only.includes(t.label[0]))) {
@@ -57,7 +69,6 @@ fs.writeFileSync(path.join(PROFILE, 'User', 'settings.json'), JSON.stringify({
   'claudeLimitBreak.randomDelayMaxMinutes': 1,
   'claudeLimitBreak.transcriptPollSeconds': 2,
   'claudeLimitBreak.statusBar': 'always',
-  'claudeLimitBreak.maxWaitHours': 1,
 }, null, 2));
 
 const encode = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');

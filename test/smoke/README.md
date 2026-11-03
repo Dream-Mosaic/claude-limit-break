@@ -68,12 +68,13 @@ without reinstalling. `-Vsix <path>` installs a given `.vsix` instead of packagi
 | R1 | Look at the Extensions view and the status bar | Limit Break at the version in `package.json`, installed from the .vsix; its status-bar item is visible |
 | L1 | Wait for Limit Break's mod offer ("a small Claude Code mod …"), then click **Install** | `claude plugin list`, in any terminal, shows `limit-break@limit-break` |
 | R2 | `node inject.js limit 120` | A notice, and a status-bar countdown to about 2 minutes, plus up to 1 |
-| R3 | `node inject.js overload` | A notice; the resume is scheduled almost at once (the first backoff step is +0, plus up to 1 min); B is called out as untrusted, with "Open Claude to Trust" |
+| R3 | `node inject.js overload` | A notice; the resume is scheduled almost at once (the first backoff step is +0, plus up to 1 min); B is called out as untrusted, with "Open Claude to Trust". Don't click it: R6 to R8 need B untrusted |
 | R4 | Hover the status bar | One line per pending session, with its time |
 | R5 | Wait for A's fire | No process holds A, so a new terminal runs `claude --resume <A's id> "[Limit Break] Your session was interrupted…"`, and Claude replies |
-| R6 | Wait for B's fire | The same for B. If B wasn't trusted through R3's button, Claude shows its own trust prompt in the terminal; you answer it, Limit Break never does |
+| R6 | Wait for B's fire | The same launch for B, but Claude stops at its own trust prompt in the terminal. Limit Break never answers it, and a minute later warns that the resume produced no work. Leave the prompt unanswered |
 | R7 | Check the log and tooltip | Each session resumed exactly once; the tooltip is empty |
-| R8 | After B's resumed turn finishes: `node inject.js overload` | Scheduled at +0 again, because a finished turn resets the count |
+| R9 | `node inject.js overload`, then status bar → **Cancel Pending Resume**, then `node inject.js overload` again | The first is scheduled at +15, because B's stalled retry still counts. Cancel logs `Overload retry counts start over.` The second is scheduled at +0 |
+| R8 | Close B's stalled terminal now, and let R9's last retry fire: a new terminal stops at the trust prompt. Answer it, and let the turn finish. Then `node inject.js overload` | The log says `Session <B's id> finished a turn; its overload retries start over.` The new overload is scheduled at +0. Cancel it from the status bar; it isn't needed |
 
 Afterwards, `/exit` Claude in each resume terminal and close the terminals.
 
@@ -166,40 +167,72 @@ Afterwards, close the second window and answer the prompt.
 
 ## Part 2: extra cases (dev build, fake sessions)
 
-A fake Claude config folder and fake sessions; the resumed `claude` stops at a login
-prompt, which still shows the launch worked. The "All installed extensions are
-temporarily disabled" notice is expected: the window runs only the dev build, which is
-why the Extensions view doesn't list it.
+Fake sessions in a fake Claude config folder, so this needs no Claude usage and doesn't touch
+your real setup. It covers what Part 1's real sessions don't: a weekly limit, a limit inside a
+subagent, Cancel, two separate VS Code instances, and the tooltip hover. No step waits longer
+than about 3 minutes.
 
-Limit Break skips whatever a transcript already holds when it starts, so the stops go
-in after the window is open (step 3), as in Part 1. Close any Part 2 window before
-step 1.
+What to expect from the window:
+
+- The notice "All installed extensions are temporarily disabled" is normal. The window runs only
+  the dev build, which is also why the Extensions view doesn't list it.
+- A resumed `claude` stops at a login prompt, because the config folder is fake. That still shows
+  the launch worked. Close the terminal.
+
+| Session | Folder | Used for |
+|---|---|---|
+| **A** | `ws-trusted` | A five-hour limit in a trusted folder |
+| **B** | `ws-untrusted` | A five-hour limit in an untrusted folder |
+| **C** | `ws-trusted` | A weekly limit that resets in 2 days: beyond `maxWaitHours`, so it's never scheduled |
+| **D** | `ws-trusted` | A limit only inside a subagent's transcript |
+
+`node prepare.js stop [letters] [seconds]` appends the stops to the sessions you name, or to all
+four if you name none. A, B and D reset in `[seconds]` (default 120). The fire comes up to a minute
+after the reset. Limit Break skips whatever a transcript already holds when it starts, so run this
+only with the window open.
+
+### 1. Setup, one window
+
+Close any Part 2 window first.
 
 ```powershell
 npm run compile             # the window runs out/, so build first
 cd test\smoke\fake
-node prepare.js             # 1. fake sessions A-D, no stops yet
-.\launch.ps1                # 2. window 1
-node prepare.js stop        # 3. with the window open: A, B, D reset in 2 min, C (weekly) in 65 min
+node prepare.js             # fake sessions A-D, no stops yet
+.\launch.ps1                # the window, on ws-trusted
 ```
 
-`node prepare.js stop [seconds] [weeklySeconds] [letters]` changes the times, or stops
-only the sessions named (`stop 120 3900 A`).
+Open the log: Command Palette → `Limit Break: Show Log`. `prepare.js` printed which ID is which letter.
 
-C is weekly and resets beyond `maxWaitHours`, which is 1 here, its lowest allowed
-value; that's why its reset is 65 minutes out. To see X2 in a few minutes instead:
-in `out/src/config.js`, lower the `maxWaitHours` floor from 1 to 0; set
-`claudeLimitBreak.maxWaitHours` to `0.05` in `%TEMP%\lb-smoke-kit\fake\profile\User\settings.json`;
-then run `node prepare.js stop 120 300`. `npm run compile` restores the floor.
+### 2. One window, in this order
 
-| # | What | Expect |
-|---|------|--------|
-| X1 | Weekly limit (C) | Announced once at detection; nothing scheduled; no status-bar line |
-| X2 | Weekly limit (C), at its reset | Nothing happens: announced once at detection; nothing scheduled; no status-bar line |
-| X3 | Subagent limit (D) | No notice and nothing in the tooltip for D, AND the log shows `Turn ended in transcript agent-smoke.jsonl` with no `Limit detected in transcript agent-smoke.jsonl`. The turn-end line is written in the same append as D's limit, so it proves the file was read and the limit beside it skipped. A is the control: the identical limit in a main transcript is detected |
-| X4 | Cancel | Close the window, run steps 1-3 again, then status bar → "Cancel Pending Resume" (it cancels everything): the tooltip empties, nothing fires, and the log says how many were cancelled |
-| X5 | Two windows | Close all smoke windows, run step 1, `.\launch.ps1`, `.\launch.ps1 -Second` (a second VS Code instance with its own profile, titled ws-untrusted), then step 3. Both windows detect A and B; each session resumes in exactly one window, and the other window's log says `Resume for <id8> claimed by another window; dropping.` |
-| X6 | Hover flicker (#49) | Run steps 1-2, then `node prepare.js stop 120 3900 A` (trusted only) and hover the countdown for 10+ seconds; note whether the hover flashes as the seconds tick. Then `node prepare.js stop 120 3900 B` (untrusted: the tooltip gains a "Trust this folder" link) and hover again |
+X1 and X3 schedule nothing. X6 starts the 2-minute countdowns that X4 cancels, so go straight from
+X6 to X4.
+
+| # | Do | Expect |
+|---|---|---|
+| X1 | `node prepare.js stop C` | One notice: `session <id8> hit a weekly limit that resets <date>. That's more than 24 hours away, so it won't resume automatically.` Nothing scheduled, and no status-bar line for C |
+| X3 | `node prepare.js stop D` | No notice, and nothing in the tooltip for D. The log has `Turn ended in transcript agent-smoke.jsonl` and no `Limit detected in transcript agent-smoke.jsonl`. That turn-end line was written in the same append as D's limit, so it shows the file was read and the limit beside it skipped |
+| X6 | `node prepare.js stop A`, and hover the countdown for 10 seconds. Then `node prepare.js stop B`, and hover again | Note whether the hover flashes as the seconds tick (#49). The second hover has B's "Trust this folder" link. A's limit also proves that a main transcript's limit is detected, unlike D's |
+| X4 | Status bar → **Cancel Pending Resume**, then wait 3 minutes | The tooltip empties at once, and the log says `2 pending resumes cancelled.` No terminal opens, and the log has no `Resume due for` line for A or B |
+
+### 3. Two windows
+
+Close the window, then:
+
+```powershell
+node prepare.js             # new sessions
+.\launch.ps1                # window 1, on ws-trusted
+.\launch.ps1 -Second        # window 2, on ws-untrusted: a second VS Code instance with its own profile
+```
+
+Open the log in both windows.
+
+| # | Do | Expect |
+|---|---|---|
+| X5 | `node prepare.js stop AB`, then wait up to 3 minutes | Both logs have `Limit detected` for A and for B. Across the two windows, each session gets one terminal. For each session, the window that didn't launch says `Resume for <id8> claimed by another window; dropping.` |
+
+Close both windows afterwards.
 
 ## Cleanup
 

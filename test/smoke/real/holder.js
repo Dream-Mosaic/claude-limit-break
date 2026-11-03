@@ -49,6 +49,7 @@ if (!action) {
     console.log(`session ${letter.toUpperCase()} (${s.id}): pid ${r.pid}, ${kind(r)}, status ${r.status ?? '(not reported)'}, started ${new Date(r.startedAt).toLocaleTimeString()}`);
   }
   // The mod writes ~/.limit-break/sessions/<id>.json when it loads into the process holding the session.
+  if (holders.length === 0) process.exit(0);
   try {
     const m = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.limit-break', 'sessions', `${s.id}.json`), 'utf8'));
     const newest = Math.max(0, ...holders.map((h) => h.record.startedAt ?? 0));
